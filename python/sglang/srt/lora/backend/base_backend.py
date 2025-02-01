@@ -37,6 +37,7 @@ class BaseLoraBackend:
         self.batch_info = batch_info
         self.fuse_output_scaling_add = get_fuse_output_scaling_add_from_name(name)
         self.fuse_qkv_lora_b = get_fuse_qkv_lora_b_from_name(name)
+        self.stream = torch.cuda.Stream()
 
     def run_lora_a_sgemm(
         self, x: torch.Tensor, weights: torch.Tensor, *args, **kwargs
