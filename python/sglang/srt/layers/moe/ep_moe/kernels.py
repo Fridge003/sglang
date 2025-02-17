@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import triton
@@ -346,4 +346,38 @@ def grouped_gemm_triton(
         b.stride(1),
         **config,
     )
+    return c
+
+
+def grouped_gemm_cublas(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    expert_to_token_range_map: Dict[int, Tuple[int]],
+    weight_column_major: bool = True,
+):
+
+    assert c.dtype in [
+        torch.half,
+        torch.bfloat16,
+    ], "Cublas grouped gemm can only be applied to bf16 and fp16 datatypes"
+
+    # Maybe can support row major for weight if needed
+    assert weight_column_major, "Currently weight should be column major"
+
+    from sgl_kernel import cublas_grouped_gemm
+
+    # Organize Gemm groups with expert_to_token_range_map
+    inputs = []
+    weights = []
+    outputs = []
+
+    for expert_id in expert_to_token_range_map:
+        token_start_id, token_end_id = expert_to_token_range_map[expert_id]
+        inputs.append(a[token_start_id : token_end_id + 1])
+        weights.append(b[expert_id])
+        outputs.append(c[token_start_id : token_end_id + 1])
+
+    cublas_grouped_gemm(inputs, weights, outputs, a.dtype)
+
     return c

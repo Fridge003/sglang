@@ -1,16 +1,18 @@
 import logging
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
 from vllm import _custom_ops as ops
 
+from sglang.check_env import get_cuda_info
 from sglang.srt.custom_op import CustomOp
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.moe.ep_moe.kernels import (
+    grouped_gemm_cublas,
     grouped_gemm_triton,
     post_reorder_triton_kernel,
     pre_reorder_triton_kernel,
@@ -30,23 +32,22 @@ logger = logging.getLogger(__name__)
 
 
 class GroupedGemmRunner(torch.nn.Module):
-    flashinfer_gemm_warpper = None
 
-    def __init__(self, device, use_flashinfer: bool = False):
+    def __init__(
+        self, device, start_expert_id: int, end_expert_id: int, use_cublas: bool = False
+    ):
         super().__init__()
         self.device = device
-        self.use_flashinfer = use_flashinfer
-        if self.use_flashinfer and GroupedGemmRunner.flashinfer_gemm_warpper is None:
-            GroupedGemmRunner._init_flashinfer_wrapper(device)
+        self.start_expert_id = start_expert_id
+        self.end_expert_id = end_expert_id
+        self.use_cublas = use_cublas
 
-    @classmethod
-    def _init_flashinfer_wrapper(cls, device):
-        from flashinfer import SegmentGEMMWrapper
+        # A dict that maps id of an expert on current rank
+        # to (start_idx, end_idx) of its computed tokens
+        self.expert_to_token_range_map: Dict[int, List[int]] = {}
 
-        workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.int8, device=device
-        )
-        cls.flashinfer_gemm_warpper = SegmentGEMMWrapper(workspace_buffer)
+        # Set to true when no experts on current rank is used
+        self.skip_compute = False
 
     # c = a * b
     def forward(
@@ -56,24 +57,25 @@ class GroupedGemmRunner(torch.nn.Module):
         c: torch.Tensor,
         batch_size: int,
         weight_column_major: bool,
+        reorder_topk_ids: Optional[torch.Tensor] = None,
         seg_indptr: Optional[torch.Tensor] = None,
         weight_indices: Optional[torch.Tensor] = None,
         use_fp8_w8a8: bool = False,
         scale_a: torch.Tensor = None,
         scale_b: torch.Tensor = None,
     ):
-        if self.use_flashinfer:
-            # TODO: flashinfer
-            assert False
-            assert GroupedGemmRunner.flashinfer_gemm_warpper is not None
-            c = GroupedGemmRunner.flashinfer_gemm_warpper.run(
-                x=a,
-                weights=b,
-                batch_size=batch_size,
-                weight_column_major=weight_column_major,
-                seg_indptr=seg_indptr,
-                weight_indices=weight_indices,
-            )
+        if self.use_cublas:
+            if len(self.expert_to_token_range_map) == 0:
+                self.initialize_expert_to_token_range_map(reorder_topk_ids)
+            if not self.skip_compute:
+                c = grouped_gemm_cublas(
+                    a,
+                    b,
+                    c,
+                    self.expert_to_token_range_map,
+                    weight_column_major,
+                )
+            self.expert_to_token_range_map.clear()
         else:
             assert weight_column_major == True
             c = grouped_gemm_triton(
@@ -89,6 +91,40 @@ class GroupedGemmRunner(torch.nn.Module):
                 scale_b,
             )
         return c
+
+    def initialize_expert_to_token_range_map(self, reorder_topk_ids: torch.Tensor):
+        num_tokens = reorder_topk_ids.shape[-1]
+
+        # Use binary search to find the first and last token for current rank.
+        l, r, start_token_id = 0, num_tokens - 1, num_tokens - 1
+        while l <= r:
+            mid = (l + r) // 2
+            if reorder_topk_ids[mid] < self.start_expert_id:
+                l = mid + 1
+            else:
+                r = mid - 1
+                start_token_id = mid
+
+        if int(reorder_topk_ids[start_token_id]) > self.end_expert_id:
+            # No token is computed by current rank
+            self.skip_compute = True
+
+        l, r, end_token_id = 0, num_tokens - 1, 0
+        while l <= r:
+            mid = (l + r) // 2
+            if reorder_topk_ids[mid] > self.end_expert_id:
+                r = mid - 1
+            else:
+                l = mid + 1
+                end_token_id = mid
+
+        # Collect token ranges by dynamically update each expert's token range
+        for token_id in range(start_token_id, end_token_id + 1):
+            expert_id = int(reorder_topk_ids[token_id]) - self.start_expert_id
+            if expert_id in self.expert_to_token_range_map:
+                self.expert_to_token_range_map[expert_id][1] = token_id
+            else:
+                self.expert_to_token_range_map[expert_id] = [token_id, token_id]
 
 
 class EPMoE(torch.nn.Module):
@@ -172,8 +208,23 @@ class EPMoE(torch.nn.Module):
         assert self.activation == "silu"
 
         if self.grouped_gemm_runner is None:
+            use_cublas = False
+            cuda_info = get_cuda_info()
+            if cuda_info.get("CUDA available", False):
+                system_version_info = cuda_info["NVCC"]
+                torch_version_info = tuple(map(int, torch.version.cuda.split(".")))
+                if not self.use_fp8_w8a8:
+                    if torch_version_info >= (12, 5):
+                        use_cublas = True
+                    elif "12.5" in system_version_info:
+                        # FIXME: A workaround that deals with torch 2.5 that only uses cuda 12.4
+                        #        This branch should be removed after sglang supports torch 2.6
+                        use_cublas = True
             self.grouped_gemm_runner = GroupedGemmRunner(
-                hidden_states.device, use_flashinfer=False  # TODO: use flashinfer
+                hidden_states.device,
+                self.start_expert_id,
+                self.end_expert_id,
+                use_cublas=use_cublas,
             )
 
         topk_weights, topk_ids = select_experts(
@@ -239,6 +290,7 @@ class EPMoE(torch.nn.Module):
             c=gateup_output,
             batch_size=self.num_experts_per_partition,
             weight_column_major=True,
+            reorder_topk_ids=reorder_topk_ids,
             seg_indptr=seg_indptr_cur_rank,
             weight_indices=weight_indices_cur_rank,
             use_fp8_w8a8=self.use_fp8_w8a8,
@@ -287,6 +339,7 @@ class EPMoE(torch.nn.Module):
             c=down_output,
             batch_size=self.num_experts_per_partition,
             weight_column_major=True,
+            reorder_topk_ids=reorder_topk_ids,
             seg_indptr=seg_indptr_cur_rank,
             weight_indices=weight_indices_cur_rank,
             use_fp8_w8a8=self.use_fp8_w8a8,
