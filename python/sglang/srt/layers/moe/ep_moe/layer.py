@@ -57,7 +57,7 @@ class GroupedGemmRunner(torch.nn.Module):
         c: torch.Tensor,
         batch_size: int,
         weight_column_major: bool,
-        reorder_topk_ids: Optional[torch.Tensor] = None,
+        reorder_topk_ids: Optional[List[int]] = None,
         seg_indptr: Optional[torch.Tensor] = None,
         weight_indices: Optional[torch.Tensor] = None,
         use_fp8_w8a8: bool = False,
@@ -92,8 +92,8 @@ class GroupedGemmRunner(torch.nn.Module):
             )
         return c
 
-    def initialize_expert_to_token_range_map(self, reorder_topk_ids: torch.Tensor):
-        num_tokens = reorder_topk_ids.shape[-1]
+    def initialize_expert_to_token_range_map(self, reorder_topk_ids: List[int]):
+        num_tokens = len(reorder_topk_ids)
 
         # Use binary search to find the first and last token for current rank.
         l, r, start_token_id = 0, num_tokens - 1, num_tokens - 1
@@ -120,7 +120,7 @@ class GroupedGemmRunner(torch.nn.Module):
 
         # Collect token ranges by dynamically update each expert's token range
         for token_id in range(start_token_id, end_token_id + 1):
-            expert_id = int(reorder_topk_ids[token_id]) - self.start_expert_id
+            expert_id = reorder_topk_ids[token_id] - self.start_expert_id
             if expert_id in self.expert_to_token_range_map:
                 self.expert_to_token_range_map[expert_id][1] = token_id
             else:
@@ -242,6 +242,7 @@ class EPMoE(torch.nn.Module):
         reorder_topk_ids, src2dst, seg_indptr = run_moe_ep_preproess(
             topk_ids, self.num_experts
         )
+        reorder_topk_ids_list = reorder_topk_ids.tolist()
 
         gateup_input = torch.empty(
             (int(hidden_states.shape[0] * self.top_k), hidden_states.shape[1]),
@@ -290,7 +291,7 @@ class EPMoE(torch.nn.Module):
             c=gateup_output,
             batch_size=self.num_experts_per_partition,
             weight_column_major=True,
-            reorder_topk_ids=reorder_topk_ids,
+            reorder_topk_ids=reorder_topk_ids_list,
             seg_indptr=seg_indptr_cur_rank,
             weight_indices=weight_indices_cur_rank,
             use_fp8_w8a8=self.use_fp8_w8a8,
@@ -339,7 +340,7 @@ class EPMoE(torch.nn.Module):
             c=down_output,
             batch_size=self.num_experts_per_partition,
             weight_column_major=True,
-            reorder_topk_ids=reorder_topk_ids,
+            reorder_topk_ids=reorder_topk_ids_list,
             seg_indptr=seg_indptr_cur_rank,
             weight_indices=weight_indices_cur_rank,
             use_fp8_w8a8=self.use_fp8_w8a8,
