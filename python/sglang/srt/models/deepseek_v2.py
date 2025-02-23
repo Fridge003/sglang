@@ -624,7 +624,8 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         attn_output = self.attn_mqa(q_input, k_input, v_input, forward_batch)
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
-
+        # torch.set_printoptions(precision=6)
+        # print(f"After mqa: {attn_output.shape}, {attn_output.view(-1)[:10]}, {attn_output.view(-1)[-10:]}")
         if self.w_vc.dtype == torch.float8_e4m3fnuz:
             # TODO(kernel): add bmm_fp8 for torch.float8_e4m3fnuz
             attn_bmm_output = torch.bmm(
@@ -644,8 +645,10 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
         else:
             attn_bmm_output = torch.bmm(attn_output.transpose(0, 1), self.w_vc)
+        # print(f"After bmm: {attn_bmm_output.shape}, {attn_bmm_output.view(-1)[:10]}, {attn_bmm_output.view(-1)[-10:]}")
         attn_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
         output, _ = self.o_proj(attn_output)
+        # print(f"After o_proj: {output.shape}, {output.view(-1)[:10]}, {output.view(-1)[-10:]}")
 
         return output
 
