@@ -178,6 +178,7 @@ class ModelRunner:
                 "enable_ep_moe": server_args.enable_ep_moe,
                 "device": server_args.device,
                 "enable_flashinfer_mla": server_args.enable_flashinfer_mla,
+                "flashinfer_mla_ragged_prefill": server_args.flashinfer_mla_ragged_prefill,
                 "disable_radix_cache": server_args.disable_radix_cache,
             }
         )

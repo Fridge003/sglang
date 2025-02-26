@@ -2,13 +2,13 @@ from __future__ import annotations
 
 """
 Support attention backend for flashinfer MLA.
-When radix cache is enabled, the backend only uses BatchMLAPaged wrapper when forwarding.
-When radix cache is disabled, the backend uses BatchPrefill wrappers for prefilling (with or without prefix cache),
+The flashinfer_mla_ragged_prefill flag controls the wrappers to use and defaults to be false.
+When it's set to false, all wrappers are BatchMLAPaged wrapper.
+When it's set to true, the backend uses BatchRagged and BatchMLAPaged wrapper for prefilling,
 and uses BatchMLAPaged wrapper for decoding.
 More details can be found in https://docs.flashinfer.ai/api/mla.html
 """
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -18,7 +18,6 @@ from sglang.global_config import global_config
 from sglang.srt.layers.attention import AttentionBackend
 from sglang.srt.layers.attention.flashinfer_backend import (
     create_flashinfer_kv_indices_triton,
-    should_use_tensor_core,
 )
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import global_server_args_dict
@@ -32,11 +31,10 @@ if TYPE_CHECKING:
 
 if is_flashinfer_available():
     from flashinfer import (
-        BatchPrefillWithPagedKVCacheWrapper,
+        BatchMLAPagedAttentionWrapper,
         BatchPrefillWithRaggedKVCacheWrapper,
     )
     from flashinfer.cascade import merge_state
-    from flashinfer.mla import BatchMLAPagedAttentionWrapper
 
 
 @dataclass
@@ -46,9 +44,7 @@ class DecodeMetadata:
 
 @dataclass
 class PrefillMetadata:
-    prefill_wrapper: Union[
-        BatchPrefillWithPagedKVCacheWrapper, BatchMLAPagedAttentionWrapper
-    ]
+    prefill_wrapper: BatchMLAPagedAttentionWrapper
     use_ragged: bool
 
 
@@ -101,18 +97,11 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             self.workspace_buffer, "NHD"
         )
 
-        if not global_server_args_dict["disable_radix_cache"]:
-            # use mla paged prefill
-            self.prefill_wrapper_paged = BatchMLAPagedAttentionWrapper(
-                self.workspace_buffer,
-                backend="auto",
-            )
-        else:
-            self.prefill_wrapper_paged = BatchPrefillWithPagedKVCacheWrapper(
-                self.workspace_buffer,
-                "NHD",
-                backend="auto",
-            )
+        self.prefill_wrapper_paged = BatchMLAPagedAttentionWrapper(
+            self.workspace_buffer,
+            backend="auto",
+        )
+
         self.decode_wrapper = BatchMLAPagedAttentionWrapper(
             self.workspace_buffer, backend="auto"
         )
@@ -141,7 +130,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             self.forward_metadata = DecodeMetadata(self.decode_wrapper)
         else:
             prefix_lens = forward_batch.extend_prefix_lens
-            use_ragged = global_server_args_dict["disable_radix_cache"]
+            use_ragged = global_server_args_dict["flashinfer_mla_ragged_prefill"]
 
             self.indices_updater_prefill.update(
                 forward_batch.req_pool_indices,
@@ -241,19 +230,20 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         forward_batch: ForwardBatch,
         save_kv_cache=True,
     ):
+
+        if save_kv_cache and k is not None:
+            assert v is not None
+            if save_kv_cache:
+                forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
+
         cache_loc = forward_batch.out_cache_loc
         logits_soft_cap = layer.logit_cap
+        prefill_wrapper_paged = self.forward_metadata.prefill_wrapper
+        qall = q.view(-1, layer.tp_q_head_num, layer.head_dim)
+        k_buf = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
 
-        if not global_server_args_dict["disable_radix_cache"]:
-            # use mla paged prefill
-            prefill_wrapper_paged = self.forward_metadata.prefill_wrapper
-            if k is not None:
-                assert v is not None
-                if save_kv_cache:
-                    forward_batch.token_to_kv_pool.set_kv_buffer(layer, cache_loc, k, v)
-            qall = q.view(-1, layer.tp_q_head_num, layer.head_dim)
-            k_buf = forward_batch.token_to_kv_pool.get_key_buffer(layer.layer_id)
-
+        if not global_server_args_dict["flashinfer_mla_ragged_prefill"]:
+            # only run mla paged prefill
             o = prefill_wrapper_paged.run(
                 qall[:, :, : layer.v_head_dim],
                 qall[:, :, layer.v_head_dim :],
@@ -261,25 +251,28 @@ class FlashInferMLAAttnBackend(AttentionBackend):
                 k_buf[:, :, layer.v_head_dim :],
             )
         else:
-            # use mla ragged prefill
-            o, _ = self.prefill_wrapper_ragged.forward_return_lse(
-                q.view(-1, layer.tp_q_head_num, layer.head_dim),
-                k.view(-1, layer.tp_k_head_num, layer.head_dim),
-                v.view(-1, layer.tp_v_head_num, layer.v_head_dim),
+            # mqa with ragged prefill
+            o1, s1 = self.prefill_wrapper_ragged.forward_return_lse(
+                qall,
+                k.view(-1, 1, layer.head_dim),
+                v.view(-1, 1, layer.v_head_dim),
                 causal=True,
                 sm_scale=layer.scaling,
                 logits_soft_cap=logits_soft_cap,
             )
 
-            # FIXME: Here should be another prefill_paged to call
-
-            if save_kv_cache:
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer,
-                    cache_loc,
-                    k,
-                    v,
+            if self.forward_metadata.extend_no_prefix:
+                o = o1
+            else:
+                # mla paged prefill
+                o2, s2 = prefill_wrapper_paged.run(
+                    qall[:, :, : layer.v_head_dim],
+                    qall[:, :, layer.v_head_dim :],
+                    k_buf[:, :, : layer.v_head_dim],
+                    k_buf[:, :, layer.v_head_dim :],
+                    return_lse=True,
                 )
+                o, _ = merge_state(o1, s1, o2, s2)
 
         return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
@@ -342,7 +335,7 @@ class FlashInferMLAIndicesUpdaterDecode:
         seq_lens_sum: int,
         decode_wrapper: BatchMLAPagedAttentionWrapper,
     ):
-        decode_wrappers = decode_wrapper or self.decode_wrapper
+        decode_wrapper = decode_wrapper or self.decode_wrapper
         self.call_begin_forward(
             decode_wrapper,
             req_pool_indices,
@@ -425,9 +418,7 @@ class FlashInferMLAIndicesUpdaterPrefill:
         seq_lens: torch.Tensor,
         seq_lens_sum: int,
         prefix_lens: torch.Tensor,
-        prefill_wrapper_paged: Union[
-            BatchPrefillWithPagedKVCacheWrapper, BatchMLAPagedAttentionWrapper
-        ],
+        prefill_wrapper_paged: BatchMLAPagedAttentionWrapper,
         use_ragged: bool,
     ):
         if use_ragged:
@@ -453,9 +444,7 @@ class FlashInferMLAIndicesUpdaterPrefill:
     def call_begin_forward(
         self,
         wrapper_ragged: BatchPrefillWithRaggedKVCacheWrapper,
-        wrapper_paged: Union[
-            BatchPrefillWithPagedKVCacheWrapper, BatchMLAPagedAttentionWrapper
-        ],
+        wrapper_paged: BatchMLAPagedAttentionWrapper,
         req_pool_indices: torch.Tensor,
         paged_kernel_lens: torch.Tensor,
         paged_kernel_lens_sum: int,
@@ -466,7 +455,6 @@ class FlashInferMLAIndicesUpdaterPrefill:
         use_ragged: bool,
     ):
         bs = len(req_pool_indices)
-        # Normal extend
         kv_indptr[1 : bs + 1] = torch.cumsum(paged_kernel_lens, dim=0)
         kv_indptr = kv_indptr[: bs + 1]
         kv_indices = torch.empty(
@@ -490,32 +478,30 @@ class FlashInferMLAIndicesUpdaterPrefill:
 
         # extend part
         if use_ragged:
+            # ragged prefill
             wrapper_ragged.begin_forward(
                 qo_indptr=qo_indptr,
                 kv_indptr=qo_indptr,
                 num_qo_heads=self.num_qo_heads,
-                num_kv_heads=self.num_kv_heads,
+                num_kv_heads=1,
                 head_dim_qk=self.qk_nope_head_dim + self.qk_rope_head_dim,
                 head_dim_vo=self.v_head_dim,
                 q_data_type=self.q_data_type,
             )
 
-        if not global_server_args_dict["disable_radix_cache"]:
-            # mla paged prefill
-            kv_len_arr = kv_indptr[1:] - kv_indptr[:-1]
-            wrapper_paged.plan(
-                qo_indptr,
-                kv_indptr,
-                kv_indices,
-                kv_len_arr,
-                self.num_qo_heads,
-                self.kv_lora_rank,
-                self.qk_rope_head_dim,
-                1,
-                True,
-                sm_scale,
-                self.q_data_type,
-                self.data_type,
-            )
-
-        # FIXME: Here should be some logic for prefill paged when not using radix cache？
+        # mla paged prefill
+        kv_len_arr = kv_indptr[1:] - kv_indptr[:-1]
+        wrapper_paged.plan(
+            qo_indptr,
+            kv_indptr,
+            kv_indices,
+            kv_len_arr,
+            self.num_qo_heads,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            1,
+            True,
+            sm_scale,
+            self.q_data_type,
+            self.data_type,
+        )

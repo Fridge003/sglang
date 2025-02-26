@@ -520,11 +520,8 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         def no_absorb() -> bool:
             if global_server_args_dict["enable_flashinfer_mla"]:
-                # Flashinfer MLA: Only do not use absorb when prefilling/extending without radix cache
-                return (
-                    global_server_args_dict["disable_radix_cache"]
-                    and forward_batch.forward_mode.is_extend()
-                )
+                # Flashinfer MLA: Should always do absorbing
+                return False
             else:
                 # Triton: Use normal computation for prefill and use weight absorption for extend/decode
                 return (
