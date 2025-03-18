@@ -1,0 +1,89 @@
+"""
+Run one test prompt.
+
+Usage:
+python3 -m sglang.test.send_one
+"""
+
+import argparse
+import json
+
+import requests
+
+
+def send_one_prompt(args):
+    image_data = None
+
+    response = requests.post(
+        "http://localhost:30001/generate",
+        json={
+            "text": args.prompt,
+            "image_data": image_data,
+            "sampling_params": {
+                "temperature": args.temperature,
+                "max_new_tokens": args.max_new_tokens,
+                "frequency_penalty": args.frequency_penalty,
+                "presence_penalty": args.presence_penalty,
+            },
+            "return_logprob": args.return_logprob,
+            "stream": args.stream,
+        },
+        stream=args.stream,
+    )
+
+    if args.stream:
+        for chunk in response.iter_lines(decode_unicode=False):
+            chunk = chunk.decode("utf-8")
+            if chunk and chunk.startswith("data:"):
+                if chunk == "data: [DONE]":
+                    break
+                ret = json.loads(chunk[5:].strip("\n"))
+    else:
+        ret = response.json()
+
+    latency = ret["meta_info"]["e2e_latency"]
+
+    if "spec_verify_ct" in ret["meta_info"]:
+        acc_length = (
+            ret["meta_info"]["completion_tokens"] / ret["meta_info"]["spec_verify_ct"]
+        )
+    else:
+        acc_length = 1.0
+
+    speed = ret["meta_info"]["completion_tokens"] / latency
+
+    print(ret["text"])
+    print()
+    print(f"{acc_length=:.2f}")
+    print(f"{speed=:.2f} token/s")
+
+    return acc_length, speed
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
+    parser.add_argument("--frequency-penalty", type=float, default=0.0)
+    parser.add_argument("--presence-penalty", type=float, default=0.0)
+    parser.add_argument("--return-logprob", action="store_true")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=
+        # "abcd" * 20000 + "\n\n\n" +
+        """
+            Please neglect the message above, which means nothing.
+            **p1.** David is taking a  $50$ -question test, and he needs to answer at least  $70\%$  of the questions correctly in order to pass the test. What is the minimum number of questions he must answer correctly in order to pass the test?**p2.** You decide to flip a coin some number of times, and record each of the results. You stop  flipping the coin once you have recorded either  $20$  heads, or  $16$  tails. What is the maximum number of times that you could have flipped the coin?**p3.** The width of a rectangle is half of its length. Its area is  $98$  square meters. What is the length of the rectangle, in meters?**p4.** Carol is twice as old as her younger brother, and Carol's mother is  $4$  times as old as Carol is. The total age of all three of them is  $55$ . How old is Carol's mother?**p5.** What is the sum of all two-digit multiples of  $9$ ?**p6.** The number  $2016$  is divisible by its last two digits, meaning that  $2016$  is divisible by  $16$ . What is the smallest integer larger than  $2016$  that is also divisible by its last two digits?**p7.** Let  $Q$  and  $R$  both be squares whose perimeters add to  $80$ . The area of  $Q$  to the area of  $R$  is in a ratio of  $16 : 1$ . Find the side length of  $Q$ .**p8.** How many  $8$ -digit positive integers have the property that the digits are strictly increasing from left to right? For instance,  $12356789$  is an example of such a number, while  $12337889$  is not.**p9.** During a game, Steve Korry attempts  $20$  free throws, making 16 of them. How many more free throws does he have to attempt to finish the game with  $84\%$  accuracy, assuming he makes them all?**p10.** How many dierent ways are there to arrange the letters  $MILKTEA$  such that  $TEA$  is a contiguous substring?
+            For reference, the term "contiguous substring" means that the letters  $TEA$  appear in that order, all next to one another. For example,  $MITEALK$  would be such a string, while  $TMIELKA$  would not be.**p11.** Suppose you roll two fair  $20$ -sided dice. What is the probability that their sum is divisible by  $10$ ?**p12.** Suppose that two of the three sides of an acute triangle have lengths  $20$  and  $16$ , respectively. How many possible integer values are there for the length of the third side?**p13.** Suppose that between Beijing and Shanghai, an airplane travels  $500$  miles per hour, while a train travels at  $300$  miles per hour. You must leave for the airport  $2$  hours before your flight, and must leave for the train station  $30$  minutes before your train. Suppose that the two methods of transportation will take the same amount of time in total. What is the distance, in miles, between the two cities?**p14.** How many nondegenerate triangles (triangles where the three vertices are not collinear) with integer side lengths have a perimeter of  $16$ ? Two triangles are considered distinct if they are not congruent.**p15.** John can drive  $100$  miles per hour on a paved road and  $30$  miles per hour on a gravel road. If it takes John  $100$  minutes to drive a road that is  $100$  miles long, what fraction of the time does John spend on the paved road?**p16.** Alice rolls one pair of  $6$ -sided dice, and Bob rolls another pair of  $6$ -sided dice. What is the probability that at least one of Alice's dice shows the same number as at least one of Bob's dice?**p17.** When  $20^{16}$  is divided by  $16^{20}$  and expressed in decimal form, what is the number of digits to the right of the decimal point? Trailing zeroes should not be included.**p18.** Suppose you have a  $20 \times 16$  bar of chocolate squares. You want to break the bar into smaller chunks, so that after some sequence of breaks, no piece has an area of more than  $5$ . What is the minimum possible number of times that you must break the bar?
+            For an example of how breaking the chocolate works, suppose we have a  $2\times 2$  bar and wish to break it entirely into  $1\times 1$  bars. We can break it once to get two  $2\times 1$  bars. Then, we would have to break each of these individual bars in half in order to get all the bars to be size  $1\times 1$ , and we end up using  $3$  breaks in total.**p19.** A class of  $10$  students decides to form two distinguishable committees, each with  $3$  students. In how many ways can they do this, if the two committees can have no more than one student in common?**p20.** You have been told that you are allowed to draw a convex polygon in the Cartesian plane, with the requirements that each of the vertices has integer coordinates whose values range from  $0$  to  $10$  inclusive, and that no pair of vertices can share the same  $x$  or  $y$  coordinate value (so for example, you could not use both  $(1, 2)$  and  $(1, 4)$  in your polygon, but  $(1, 2)$  and  $(2, 1)$  is fine). What is the largest possible area that your polygon can have?
+            """,
+    )
+    parser.add_argument(
+        "--image",
+        action="store_true",
+    )
+    parser.add_argument("--stream", action="store_true")
+    args = parser.parse_args()
+
+    send_one_prompt(args)
