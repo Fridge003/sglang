@@ -123,23 +123,25 @@ class FlashAttentionBackend(AttentionBackend):
         save_kv_cache=True,
     ):
 
-        if k is not None and v is not None and save_kv_cache:
-            cache_loc = (
-                forward_batch.out_cache_loc
-                if not layer.is_cross_attention
-                else forward_batch.encoder_out_cache_loc
-            )
-            if not self.use_mla:
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+        if k is not None:
+            assert v is not None
+            if save_kv_cache:
+                cache_loc = (
+                    forward_batch.out_cache_loc
+                    if not layer.is_cross_attention
+                    else forward_batch.encoder_out_cache_loc
                 )
-            else:
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer,
-                    cache_loc,
-                    k,
-                    v,
-                )
+                if not self.use_mla:
+                    forward_batch.token_to_kv_pool.set_kv_buffer(
+                        layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                    )
+                else:
+                    forward_batch.token_to_kv_pool.set_kv_buffer(
+                        layer,
+                        cache_loc,
+                        k,
+                        v,
+                    )
 
         # Use precomputed metadata
         metadata = self.forward_metadata
@@ -221,23 +223,25 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> torch.Tensor:
         """Forward pass with FlashAttention using precomputed metadata."""
         # Save KV cache if needed
-        if k is not None and v is not None and save_kv_cache:
-            cache_loc = (
-                forward_batch.out_cache_loc
-                if not layer.is_cross_attention
-                else forward_batch.encoder_out_cache_loc
-            )
-            if not self.use_mla:
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+        if k is not None:
+            assert v is not None
+            if save_kv_cache:
+                cache_loc = (
+                    forward_batch.out_cache_loc
+                    if not layer.is_cross_attention
+                    else forward_batch.encoder_out_cache_loc
                 )
-            else:
-                forward_batch.token_to_kv_pool.set_kv_buffer(
-                    layer,
-                    cache_loc,
-                    k,
-                    v,
-                )
+                if not self.use_mla:
+                    forward_batch.token_to_kv_pool.set_kv_buffer(
+                        layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                    )
+                else:
+                    forward_batch.token_to_kv_pool.set_kv_buffer(
+                        layer,
+                        cache_loc,
+                        k,
+                        v,
+                    )
 
         # Use precomputed metadata
         metadata = self.forward_metadata
