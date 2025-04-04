@@ -21,7 +21,7 @@ def send_one_prompt(args):
         image_data = None
 
     response = requests.post(
-        "http://localhost:30000/generate",
+        "http://localhost:30001/generate",
         json={
             "text": args.prompt,
             "image_data": image_data,

@@ -103,7 +103,7 @@ class ForwardMode(IntEnum):
             # Just for demo, do not merge this change
             # To community developers: FA3 Cuda Graph only works for DECODE
             # If we enable TARGET_VERIFY, send_one's result will be a mess
-            # or self == ForwardMode.TARGET_VERIFY
+            or self == ForwardMode.TARGET_VERIFY
             or self == ForwardMode.IDLE
         )
 

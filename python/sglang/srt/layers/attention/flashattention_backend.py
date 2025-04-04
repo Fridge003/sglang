@@ -660,7 +660,7 @@ class FlashAttentionBackend(AttentionBackend):
                 torch.cumsum(metadata.cache_seqlens_int32, dim=0, dtype=torch.int32),
                 (1, 0),
             )
-            metadata.max_seq_len_k = seq_lens.max().item() + draft_token_num
+            metadata.max_seq_len_k = seq_lens_cpu.max().item() + draft_token_num
             page_table = self.req_to_token[
                 req_pool_indices, : metadata.max_seq_len_k
             ].repeat_interleave(draft_token_num, dim=0)
@@ -668,9 +668,7 @@ class FlashAttentionBackend(AttentionBackend):
             aug_cum_len = torch.nn.functional.pad(
                 torch.cumsum(aug_seq_lens, dim=0, dtype=torch.int32), (1, 0)
             )
-            for idx, single_seq_len in enumerate(
-                aug_seq_lens[: spec_info.positions.shape[0] // draft_token_num]
-            ):
+            for idx, single_seq_len in enumerate(aug_seq_lens):
                 metadata.page_table[
                     idx * draft_token_num : (idx + 1) * draft_token_num, :single_seq_len
                 ] *= spec_info.custom_mask[
