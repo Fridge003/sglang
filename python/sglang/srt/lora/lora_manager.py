@@ -146,8 +146,8 @@ class LoRAManager:
             forward_batch.extend_seq_lens
             if forward_batch.forward_mode.is_extend()
             else torch.ones(bs, device=self.device)
-        )
-        seg_indptr = torch.zeros((bs + 1,), dtype=torch.int32, device=self.device)
+        ).to(torch.int64)
+        seg_indptr = torch.zeros((bs + 1,), dtype=torch.int64, device=self.device)
         seg_indptr[1:] = torch.cumsum(seg_lens, dim=0)
         max_len = int(torch.max(seg_lens))
         weight_indices = torch.empty((bs,), dtype=torch.int64, device=self.device)

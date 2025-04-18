@@ -7,7 +7,7 @@ from sglang.srt.lora.utils import LoRABatchInfo
 from sglang.srt.utils import is_flashinfer_available
 
 if is_flashinfer_available():
-    from flashinfer import SegmentGEMMWrapper
+    from flashinfer.gemm import SegmentGEMMWrapper
 
 
 class FlashInferLoRABackend(BaseLoRABackend):
@@ -16,8 +16,9 @@ class FlashInferLoRABackend(BaseLoRABackend):
         super().__init__(name, batch_info)
 
         # Set up SGemm Wrapper from flashinfer
-        # FIXME wait for flashinfer segment gemm update
-        workspace_buffer = torch.empty(1 * 1024 * 1024, dtype=torch.int8, device="cuda")
+        workspace_buffer = torch.empty(
+            32 * 1024 * 1024, dtype=torch.int8, device="cuda"
+        )
         self.segment_gemm = SegmentGEMMWrapper(workspace_buffer)
 
     def run_lora_a_sgemm(
@@ -37,16 +38,13 @@ class FlashInferLoRABackend(BaseLoRABackend):
         self, x: torch.Tensor, weights: torch.Tensor, *args, **kwargs
     ) -> torch.Tensor:
 
-        return (
-            self.segment_gemm.run(
-                x=x,
-                weights=weights,
-                batch_size=self.batch_info.bs,
-                weight_column_major=True,
-                seg_indptr=self.batch_info.seg_indptr,
-                weight_indices=self.batch_info.weight_indices,
-            )
-            * self.batch_info.scalings[0]
+        return self.segment_gemm.run(
+            x=x,
+            weights=weights,
+            batch_size=self.batch_info.bs,
+            weight_column_major=True,
+            seg_indptr=self.batch_info.seg_indptr,
+            weight_indices=self.batch_info.weight_indices,
         )
 
     def run_qkv_lora(
@@ -57,7 +55,6 @@ class FlashInferLoRABackend(BaseLoRABackend):
         *args,
         **kwargs,
     ) -> torch.Tensor:
-
         assert isinstance(qkv_lora_b, tuple) and len(qkv_lora_b) == 2
 
         # Shape of lora_a_output: (s, 3 * r)
@@ -73,23 +70,28 @@ class FlashInferLoRABackend(BaseLoRABackend):
             dtype=x.dtype,
         )
 
+        x_b = torch.empty(x.shape[0], lora_rank, device=x.device, dtype=x.dtype)
+
         # q
+        x_b.copy_(lora_a_output[:, :lora_rank])
         lora_output[:, :output_dim_q] = self.run_lora_b_sgemm(
-            x=lora_a_output[:, :lora_rank].contiguous(), weights=q_lora_b[0]
+            x=x_b, weights=q_lora_b[0]
         )
 
         # kv
+        x_b.copy_(lora_a_output[:, lora_rank : 2 * lora_rank])
         lora_output[:, output_dim_q : output_dim_q + output_dim_kv] = (
             self.run_lora_b_sgemm(
-                x=lora_a_output[:, lora_rank : 2 * lora_rank].contiguous(),
+                x=x_b,
                 weights=kv_lora_b[0],
             )
         )
 
+        x_b.copy_(lora_a_output[:, 2 * lora_rank : 3 * lora_rank])
         lora_output[
             :, output_dim_q + output_dim_kv : output_dim_q + 2 * output_dim_kv
         ] = self.run_lora_b_sgemm(
-            x=lora_a_output[:, 2 * lora_rank : 3 * lora_rank].contiguous(),
+            x=x_b,
             weights=kv_lora_b[1],
         )
 
@@ -118,13 +120,16 @@ class FlashInferLoRABackend(BaseLoRABackend):
         )
 
         # Compute lora for gate and up proj respectively
+        x_b = torch.empty(x.shape[0], lora_rank, device=x.device, dtype=x.dtype)
+        x_b.copy_(lora_a_output[:, :lora_rank])
         lora_output[:, :output_dim] = self.run_lora_b_sgemm(
-            x=lora_a_output[:, :lora_rank].contiguous(),
+            x=x_b,
             weights=gate_up_lora_b[0],
         )
 
+        x_b.copy_(lora_a_output[:, lora_rank:])
         lora_output[:, output_dim:] = self.run_lora_b_sgemm(
-            x=lora_a_output[:, lora_rank:].contiguous(),
+            x=x_b,
             weights=gate_up_lora_b[1],
         )
 

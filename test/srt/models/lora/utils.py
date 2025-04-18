@@ -49,7 +49,8 @@ class LoRAModelCase:
 
 
 TORCH_DTYPES = [torch.float16]
-BACKENDS = ["triton"]
+# BACKENDS = ["triton"]
+BACKENDS = ["flashinfer"]
 DEFAULT_PROMPTS = [
     "AI is a field of computer science focused on",
     """
