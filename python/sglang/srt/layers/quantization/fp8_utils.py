@@ -28,6 +28,7 @@ from sglang.srt.utils import (
     get_cuda_version,
     get_device_capability,
     is_cuda,
+    is_flashinfer_available,
     is_hip,
 )
 
@@ -123,7 +124,10 @@ def cutlass_block_fp8_supported() -> bool:
 
 
 CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
-
+ENABLE_FLASHINFER_GEMM = get_bool_env_var("ENABLE_FLASHINFER_GEMM")
+if ENABLE_FLASHINFER_GEMM:
+    assert is_flashinfer_available(), "Flashinfer should be installed to use Flashinfer GEMM"
+    from flashinfer.gemm import gemm_fp8_nt_blockscaled
 
 def apply_w8a8_block_fp8_linear(
     input: torch.Tensor,
@@ -141,7 +145,21 @@ def apply_w8a8_block_fp8_linear(
     shape_supported_by_cutlass = (
         weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0
     )
-    if CUTLASS_BLOCK_FP8_SUPPORTED and shape_supported_by_cutlass:
+    if ENABLE_FLASHINFER_GEMM:
+        assert is_sm100_supported(), "Flashinfer Blockwise GEMM only supports SM100"
+        q_input, x_scale = per_token_group_quant_fp8(
+            input_2d, block_size[1], column_major_scales=False
+        )
+        print("Q_input", q_input.shape, q_input.dtype, q_input.stride())
+        print("Weight", weight.shape, weight.dtype, weight.stride())
+        x_scale_input = x_scale.T.contiguous()
+        weight_scale_input = weight_scale.T.contiguous()
+        print("X_scale", x_scale_input.shape, x_scale_input.dtype, x_scale_input.stride())
+        print("Weight_scale", weight_scale_input.shape, weight_scale_input.dtype, weight_scale_input.stride())
+        output = gemm_fp8_nt_blockscaled(
+            q_input, weight, x_scale_input, weight_scale_input, out_dtype=input.dtype
+        )
+    elif CUTLASS_BLOCK_FP8_SUPPORTED and shape_supported_by_cutlass:
         q_input, x_scale = per_token_group_quant_fp8(
             input_2d, block_size[1], column_major_scales=True
         )
