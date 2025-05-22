@@ -109,7 +109,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             self.q_indptr_decode = q_indptr_decode_buf
 
         self.prefill_wrapper_ragged = BatchPrefillWithRaggedKVCacheWrapper(
-            self.workspace_buffer, "NHD"
+            self.workspace_buffer, "NHD", backend="cutlass"
         )
 
         if not self.skip_prefill:
@@ -371,9 +371,9 @@ class FlashInferMLAAttnBackend(AttentionBackend):
             if k_rope is not None:
                 k = torch.cat([k, k_rope], dim=-1)
             o = self.prefill_wrapper_ragged.forward(
-                qall,
-                k.view(-1, layer.tp_k_head_num, layer.head_dim),
-                v.view(-1, layer.tp_k_head_num, layer.v_head_dim),
+                qall.contiguous(),
+                k.view(-1, layer.tp_k_head_num, layer.head_dim).contiguous(),
+                v.view(-1, layer.tp_k_head_num, layer.v_head_dim).contiguous(),
                 causal=True,
                 sm_scale=layer.scaling,
                 logits_soft_cap=logits_soft_cap,
