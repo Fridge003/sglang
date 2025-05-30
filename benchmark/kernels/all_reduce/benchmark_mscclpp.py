@@ -162,13 +162,14 @@ if __name__ == "__main__":
         dist.init_process_group(backend="nccl")
     world, world_size = dist.group.WORLD, dist.get_world_size()
     rank = dist.get_rank()
-    torch.cuda.set_device(rank % 4)
+    nranks_per_node = torch.cuda.device_count()
+    torch.cuda.set_device(rank % nranks_per_node)
     device = torch.cuda.current_device()
     set_mscclpp_all_reduce(True)
     init_distributed_environment(
         world_size=world_size,
         rank=rank,
-        local_rank=rank % 4,
+        local_rank=rank % nranks_per_node,
     )
     initialize_model_parallel(tensor_model_parallel_size=world_size)
     group = get_tensor_model_parallel_group().device_group

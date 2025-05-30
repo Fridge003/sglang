@@ -102,7 +102,7 @@ def mscclpp_bench_time(func, test_niter: int = 10, warmup_niter: int = 2):
 
 
 class PyMscclppCommunicator:
-    _SUPPORTED_WORLD_SIZES = [8, 16]
+    _SUPPORTED_WORLD_SIZES = [4, 8, 16]
     _MAX_BYTES = mscclpp_convert_to_bytes(os.getenv("SGLANG_MSCCLPP_MAX_BYTES", "1MB"))
     _SUPPORTED_DTYPE = [torch.float, torch.float16, torch.bfloat16]
 
@@ -188,8 +188,8 @@ class PyMscclppCommunicator:
             range(world_size)
         )
         for r in range(world_size):
-            self.rank_to_node[r] = r // 8
-            self.rank_to_ib[r] = self.rank % 8
+            self.rank_to_node[r] = r // self.nranks_per_node
+            self.rank_to_ib[r] = self.rank % self.nranks_per_node
 
         self._context = None
         self.context_selection = None
@@ -197,9 +197,9 @@ class PyMscclppCommunicator:
             2**i for i in range(10, math.floor(math.log2(self.max_bytes)) + 1)
         ]
         self.msg_size2best_config = {}
-        if world_size == 8:
+        if world_size == self.nranks_per_node:
             self.context_selection = MscclContextSelection.MSCCL1SHOT1NODELL
-        elif world_size == 16:
+        elif world_size == 2 * self.nranks_per_node:
             self.context_selection = MscclContextSelection.MSCCL1SHOT2NODELL
         if not _is_hip:
             self.scratch = torch.empty(
