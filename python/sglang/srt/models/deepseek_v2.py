@@ -722,9 +722,6 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.w_scale_v = None
         self.use_deep_gemm_bmm = False
 
-        self.flashinfer_mla_disable_ragged = global_server_args_dict[
-            "flashinfer_mla_disable_ragged"
-        ]
         self.disable_chunked_prefix_cache = global_server_args_dict[
             "disable_chunked_prefix_cache"
         ]
@@ -756,8 +753,7 @@ class DeepseekV2AttentionMLA(nn.Module):
         if self.attention_backend == "flashinfer":
             # Flashinfer MLA: Do not absorb when enabling ragged prefill
             if (
-                not self.flashinfer_mla_disable_ragged
-                and forward_batch.forward_mode.is_extend()
+                forward_batch.forward_mode.is_extend()
                 and not forward_batch.forward_mode.is_target_verify()
                 and not forward_batch.forward_mode.is_draft_extend()
                 and sum(forward_batch.extend_prefix_lens_cpu) == 0
@@ -775,6 +771,7 @@ class DeepseekV2AttentionMLA(nn.Module):
                 and not forward_batch.forward_mode.is_target_verify()
                 and not forward_batch.forward_mode.is_draft_extend()
                 and (
+                    # Maybe consider extend_seq_lens here
                     sum_extend_prefix_lens >= self.chunked_prefix_cache_threshold
                     or sum_extend_prefix_lens == 0
                 )

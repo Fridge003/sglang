@@ -2,9 +2,7 @@ from __future__ import annotations
 
 """
 Support attention backend for flashinfer MLA.
-The flashinfer_mla_disable_ragged flag controls whether to use ragged prefill wrapper and defaults to be false.
-When it's set to false, all wrappers are BatchMLAPaged wrapper.
-When it's set to true, the backend uses BatchRagged and BatchMLAPaged wrapper for prefilling,
+The backend uses BatchRagged and BatchMLAPaged wrapper for prefilling,
 and uses BatchMLAPaged wrapper for decoding.
 More details can be found in https://docs.flashinfer.ai/api/mla.html
 """
@@ -181,10 +179,7 @@ class FlashInferMLAAttnBackend(AttentionBackend):
         else:
             prefix_lens = forward_batch.extend_prefix_lens
             extend_no_prefix = not any(forward_batch.extend_prefix_lens_cpu)
-            use_ragged = (
-                not global_server_args_dict["flashinfer_mla_disable_ragged"]
-                and extend_no_prefix
-            )
+            use_ragged = extend_no_prefix
 
             self.indices_updater_prefill.update(
                 forward_batch.req_pool_indices,

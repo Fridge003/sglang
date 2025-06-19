@@ -90,7 +90,6 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "deepep_config",
     "ep_num_redundant_experts",
     "enable_nan_detection",
-    "flashinfer_mla_disable_ragged",
     "max_micro_batch_size",
     "disable_shared_experts_fusion",
     "sampling_backend",

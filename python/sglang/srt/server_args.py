@@ -210,7 +210,6 @@ class ServerArgs:
     hicache_ratio: float = 2.0
     hicache_size: int = 0
     hicache_write_policy: str = "write_through_selective"
-    flashinfer_mla_disable_ragged: bool = False
     disable_shared_experts_fusion: bool = False
     disable_chunked_prefix_cache: bool = False
     disable_fast_image_processor: bool = False
@@ -1464,11 +1463,6 @@ class ServerArgs:
             choices=["write_back", "write_through", "write_through_selective"],
             default=ServerArgs.hicache_write_policy,
             help="The write policy of hierarchical cache.",
-        )
-        parser.add_argument(
-            "--flashinfer-mla-disable-ragged",
-            action="store_true",
-            help="Not using ragged prefill wrapper when running flashinfer mla",
         )
         parser.add_argument(
             "--disable-shared-experts-fusion",
