@@ -1536,7 +1536,7 @@ class Scheduler(
 
             req.init_next_round_input(self.tree_cache)
             if self.enable_lora:
-                # TODO: we should call a special init_next_round_input here
+                # TODO (baizhou): we should call a special init_next_round_input here
                 pass
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
 
