@@ -1085,6 +1085,11 @@ class GptOssForCausalLM(nn.Module):
                         loaded_weight = loaded_weight.transpose(-2, -1)
                     if "w2_weight_bias" in name and get_moe_tensor_parallel_rank() != 0:
                         loaded_weight = loaded_weight.zero_()
+                    if (
+                        self.quant_config is not None
+                        and self.quant_config.get_name() == "fp8"
+                    ):
+                        loaded_weight = loaded_weight.transpose(-2, -1)
 
                     weight_loader(
                         param,
@@ -1093,6 +1098,14 @@ class GptOssForCausalLM(nn.Module):
                         shard_id=shard_id,
                     )
                     params_checker[name] = True
+
+                    # If quantized as fp8 weights, we also need to mark the scales as loaded
+                    if (
+                        self.quant_config is not None
+                        and self.quant_config.get_name() == "fp8"
+                    ):
+                        scale_name = f"{name}_scale"
+                        params_checker[scale_name] = True
                     break
                 else:
                     if name.endswith(".bias") and name not in params_dict:
