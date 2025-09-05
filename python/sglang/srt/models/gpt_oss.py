@@ -1081,15 +1081,11 @@ class GptOssForCausalLM(nn.Module):
                         continue
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if "bias" not in name:
+                    # Transpose weight when not quantized as fp8
+                    if "bias" not in name and self.quant_config is None:
                         loaded_weight = loaded_weight.transpose(-2, -1)
                     if "w2_weight_bias" in name and get_moe_tensor_parallel_rank() != 0:
                         loaded_weight = loaded_weight.zero_()
-                    if (
-                        self.quant_config is not None
-                        and self.quant_config.get_name() == "fp8"
-                    ):
-                        loaded_weight = loaded_weight.transpose(-2, -1)
 
                     weight_loader(
                         param,
