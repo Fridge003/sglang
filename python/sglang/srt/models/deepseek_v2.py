@@ -232,6 +232,9 @@ class AttnForwardMethod(IntEnum):
     # Use MLA with fused RoPE kernel for CPU
     MLA_FUSED_ROPE_CPU = auto()
 
+    # Use MLA with sparse forward and chunked kv
+    MLA_SPARSE_CHUNKED_KV = auto()
+
 
 def _dispatch_mla_subtype(attn, forward_batch):
     if _is_hip:
@@ -358,7 +361,10 @@ def handle_aiter(attn, forward_batch):
 
 
 def handle_nsa(attn, forward_batch):
-    return AttnForwardMethod.MLA
+    if _is_extend_without_speculative(forward_batch):
+        return AttnForwardMethod.MLA_SPARSE_CHUNKED_KV
+    else:
+        return AttnForwardMethod.MLA
 
 
 def handle_triton(attn, forward_batch):
@@ -1360,6 +1366,10 @@ class DeepseekV2AttentionMLA(nn.Module):
             inner_state = self.forward_absorb_fused_mla_rope_cpu_prepare(
                 positions, hidden_states, forward_batch, zero_allocator
             )
+        elif attn_forward_method == AttnForwardMethod.MLA_SPARSE_CHUNKED_KV:
+            inner_state = self.forward_sparse_chunked_kv_prepare(
+                positions, hidden_states, forward_batch, zero_allocator
+            )
         else:
             raise NotImplementedError
         return None, attn_forward_method, forward_batch, inner_state
@@ -1383,6 +1393,8 @@ class DeepseekV2AttentionMLA(nn.Module):
             return self.forward_absorb_fused_mla_rope_core(*inner_state)
         elif attn_forward_method == AttnForwardMethod.MLA_FUSED_ROPE_CPU:
             return self.forward_absorb_fused_mla_rope_cpu_core(*inner_state)
+        elif attn_forward_method == AttnForwardMethod.MLA_SPARSE_CHUNKED_KV:
+            return self.forward_sparse_chunked_kv_core(*inner_state)
         else:
             raise NotImplementedError
 
@@ -1844,6 +1856,32 @@ class DeepseekV2AttentionMLA(nn.Module):
         positions,
         topk_indices,
     ):
+        # has_extend_prefix = any(forward_batch.extend_prefix_lens_cpu)
+        # # Only initialize the info once
+        # if has_extend_prefix and forward_batch.num_prefix_chunks is None:
+        #     forward_batch.prepare_chunked_prefix_cache_info(q.device)
+        #     if hasattr(forward_batch.attn_backend, "init_mha_chunk_metadata"):
+        #         forward_batch.attn_backend.init_mha_chunk_metadata(forward_batch)
+
+        # forward_batch.mha_return_lse = has_extend_prefix
+        # # Do mha for extended part without prefix
+        # forward_batch.set_attn_attend_prefix_cache(False)
+        # attn_output = self.attn_mqa(q, k, v, forward_batch, save_kv_cache=False)
+
+        # # Do mha attention with chunked prefix cache if there are any sequence with prefix
+        # if has_extend_prefix:
+        #     attn_output, lse = attn_output
+        #     forward_batch.set_attn_attend_prefix_cache(True)
+        #     attn_output = self._chunked_prefix_attn_mha(
+        #         q=q,
+        #         accum_output=attn_output,
+        #         accum_lse=lse,
+        #         forward_batch=forward_batch,
+        #     )
+
+        # attn_output = attn_output.reshape(-1, self.num_local_heads * self.v_head_dim)
+        # output, _ = self.o_proj(attn_output)
+        # return output
         assert topk_indices is not None
         attn_output = self.attn_mqa(
             q_nope_out,
@@ -1852,7 +1890,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             forward_batch,
             q_rope=q_pe,
             k_rope=k_pe,
-            **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
+            topk_indices=topk_indices,
         )
         attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
 
