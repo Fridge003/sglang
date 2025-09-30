@@ -1739,6 +1739,172 @@ class DeepseekV2AttentionMLA(nn.Module):
 
         return output
 
+    def forward_sparse_chunked_kv_prepare(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        zero_allocator: BumpAllocator,
+    ):
+        from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+
+        assert self.q_lora_rank is not None and self.use_nsa
+
+        if (
+            (not isinstance(hidden_states, tuple))
+            and hidden_states.shape[0] <= 16
+            and self.use_min_latency_fused_a_gemm
+        ):
+            fused_qkv_a_proj_out = dsv3_fused_a_gemm(
+                hidden_states, self.fused_qkv_a_proj_with_mqa.weight.T
+            )
+        else:
+            fused_qkv_a_proj_out = self.fused_qkv_a_proj_with_mqa(hidden_states)[0]
+        q, latent_cache = fused_qkv_a_proj_out.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+        )
+        k_nope = latent_cache[..., : self.kv_lora_rank]
+
+        # overlap qk norm
+        if self.alt_stream is not None and get_is_capture_mode():
+            current_stream = torch.cuda.current_stream()
+            self.alt_stream.wait_stream(current_stream)
+            q = self.q_a_layernorm(q)
+            with torch.cuda.stream(self.alt_stream):
+                k_nope = self.kv_a_layernorm(k_nope)
+            current_stream.wait_stream(self.alt_stream)
+        else:
+            q = self.q_a_layernorm(q)
+            k_nope = self.kv_a_layernorm(k_nope)
+
+        # q_lora needed by indexer
+        q_lora = q
+
+        k_nope = k_nope.unsqueeze(1)
+        q = self.q_b_proj(q)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        k_pe = latent_cache[..., self.kv_lora_rank :].unsqueeze(1)
+
+        if self.use_deep_gemm_bmm:
+            q_nope_val, q_nope_scale, masked_m, expected_m, aligned_m = (
+                per_token_group_quant_mla_deep_gemm_masked_fp8(q_nope.transpose(0, 1))
+            )
+            q_nope_out = q_nope.new_empty(
+                (self.num_local_heads, aligned_m, self.kv_lora_rank)
+            )
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
+                (q_nope_val, q_nope_scale),
+                (self.w_kc, self.w_scale_k),
+                q_nope_out,
+                masked_m,
+                expected_m,
+            )
+            q_nope_out = q_nope_out[:, :expected_m, :]
+        elif self.w_kc.dtype == torch.float8_e4m3fn:
+            q_nope_val, q_nope_scale = per_tensor_quant_mla_fp8(
+                q_nope.transpose(0, 1),
+                zero_allocator.allocate(1),
+            )
+            q_nope_out = bmm_fp8(
+                q_nope_val, self.w_kc, q_nope_scale, self.w_scale, torch.bfloat16
+            )
+        else:
+            q_nope_out = torch.bmm(q_nope.transpose(0, 1), self.w_kc)
+
+        q_nope_out = q_nope_out.transpose(0, 1)
+
+        topk_indices = self.indexer(
+            x=hidden_states,
+            q_lora=q_lora,
+            positions=positions,
+            forward_batch=forward_batch,
+            layer_id=self.layer_id,
+        )
+
+        return (
+            q_pe,
+            k_pe,
+            q_nope_out,
+            k_nope,
+            forward_batch,
+            zero_allocator,
+            positions,
+            topk_indices,
+        )
+
+    def forward_sparse_chunked_kv_core(
+        self,
+        q_pe,
+        k_pe,
+        q_nope_out,
+        k_nope,
+        forward_batch,
+        zero_allocator,
+        positions,
+        topk_indices,
+    ):
+        assert topk_indices is not None
+        attn_output = self.attn_mqa(
+            q_nope_out,
+            k_nope,
+            k_nope,
+            forward_batch,
+            q_rope=q_pe,
+            k_rope=k_pe,
+            **(dict(topk_indices=topk_indices) if topk_indices is not None else {}),
+        )
+        attn_output = attn_output.view(-1, self.num_local_heads, self.kv_lora_rank)
+
+        if self.use_deep_gemm_bmm:
+            attn_output_val, attn_output_scale, masked_m, expected_m, aligned_m = (
+                per_token_group_quant_mla_deep_gemm_masked_fp8(
+                    attn_output.transpose(0, 1)
+                )
+            )
+            attn_bmm_output = attn_output.new_empty(
+                (self.num_local_heads, aligned_m, self.v_head_dim)
+            )
+            deep_gemm_wrapper.grouped_gemm_nt_f8f8bf16_masked(
+                (attn_output_val, attn_output_scale),
+                (self.w_vc, self.w_scale_v),
+                attn_bmm_output,
+                masked_m,
+                expected_m,
+            )
+            attn_bmm_output = (
+                attn_bmm_output[:, :expected_m, :].transpose(0, 1).flatten(1, 2)
+            )
+        elif self.w_vc.dtype == torch.float8_e4m3fn:
+            attn_output_val, attn_output_scale = per_tensor_quant_mla_fp8(
+                attn_output.transpose(0, 1),
+                zero_allocator.allocate(1),
+            )
+            attn_bmm_output = bmm_fp8(
+                attn_output_val,
+                self.w_vc,
+                attn_output_scale,
+                self.w_scale,
+                torch.bfloat16,
+            )
+            attn_bmm_output = attn_bmm_output.transpose(0, 1).flatten(1, 2)
+        else:
+            attn_bmm_output = torch.empty(
+                (attn_output.shape[0], self.num_local_heads * self.v_head_dim),
+                dtype=attn_output.dtype,
+                device=attn_output.device,
+            )
+            torch.bmm(
+                attn_output.transpose(0, 1),
+                self.w_vc,
+                out=attn_bmm_output.view(
+                    -1, self.num_local_heads, self.v_head_dim
+                ).transpose(0, 1),
+            )
+        output, _ = self.o_proj(attn_bmm_output)
+
+        return output
+
     def forward_npu_sparse_prepare(
         self,
         positions: torch.Tensor,
