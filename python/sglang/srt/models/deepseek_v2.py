@@ -102,7 +102,6 @@ from sglang.srt.layers.quantization.fp8_kernel import (
     per_token_group_quant_mla_deep_gemm_masked_fp8,
 )
 from sglang.srt.layers.quantization.fp8_utils import (
-    ENABLE_FLASHINFER_FP8_GEMM,
     block_quant_dequant,
     block_quant_to_tensor_quant,
     channel_quant_to_tensor_quant,
@@ -3577,22 +3576,25 @@ class DeepseekV2ForCausalLM(nn.Module):
                 self_attn.w_vc = bind_or_assign(self_attn.w_vc, w_vc.contiguous())
                 self_attn.use_deep_gemm_bmm = True
 
+        # For normal dpsk
         if (
-            not ENABLE_FLASHINFER_FP8_GEMM
-            and should_deepgemm_weight_requant_ue8m0(
+            should_deepgemm_weight_requant_ue8m0(
                 weight_block_size=getattr(self.quant_config, "weight_block_size", None)
             )
             and not self._executed_weight_requant_ue8m0
         ):
+            # For all fp8 linear and moe weights
             self._executed_weight_requant_ue8m0 = True
             self._weight_requant_ue8m0(is_nextn)
 
+        # For deepseek nvfp4
         # TODO can move weight_requant_ue8m0 and transform_scale_ue8m0 into Fp8LinearMethod.process_weights_after_loading
         if (
             deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
             and deep_gemm_wrapper.DEEPGEMM_SCALE_UE8M0
             and get_bool_env_var("SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN")
         ):
+            # Only for q_b_proj
             self._transform_scale_ue8m0(is_nextn)
         if is_nextn and enable_nextn_moe_bf16_cast_to_fp8(self.quant_config):
             self._transform_scale_nextn_moe_ue8m0()
@@ -3633,6 +3635,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                     module.weight, module.weight_scale_inv, weight_block_size
                 )
 
+            # MoE can keep
             if layer_id in moe_layers or is_nextn:
                 shared_experts = getattr(layer.mlp, "shared_experts", None)
                 if shared_experts is not None:
@@ -3734,6 +3737,7 @@ class DeepseekV2ForCausalLM(nn.Module):
             else:
                 raise ValueError("num_nextn_predict_layers is not in the config")
 
+        # For deepseek nvfp4 v2
         if get_bool_env_var("SGLANG_NVFP4_CKPT_FP8_GEMM_IN_ATTN"):
             weights = self._quant_attn_to_fp8_ue8m0(weights, is_nextn=is_nextn)
         if is_nextn and enable_nextn_moe_bf16_cast_to_fp8(self.quant_config):
@@ -4066,6 +4070,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                 )
                 weights_dict[f"{partial_name}.weight"] = out_w
                 weights_dict[f"{partial_name}.weight_scale_inv"] = out_s
+                print(
+                    f"\nQuantized {partial_name}.weight from {original_weight.dtype} to {out_w.dtype} in ue8m0. Scale: {out_s.dtype}"
+                )
 
         return list(weights_dict.items())
 
@@ -4098,6 +4105,9 @@ class DeepseekV2ForCausalLM(nn.Module):
                     )
                     weights_dict[f"{partial_name}.weight"] = out_w
                     weights_dict[f"{partial_name}.weight_scale_inv"] = out_s
+                    print(
+                        f"\nQuantized {partial_name}.weight from {original_weight.dtype} to {out_w.dtype} in ue8m0. Scale: {out_s.dtype}"
+                    )
 
         return list(weights_dict.items())
 

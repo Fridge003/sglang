@@ -442,7 +442,9 @@ def requant_weight_ue8m0_inplace(weight, weight_scale_inv, weight_block_size):
     new_weight, new_weight_scale_inv = _requant_weight_ue8m0(
         weight.to(weight_scale_inv.device), weight_scale_inv, weight_block_size
     )
-
+    print(
+        f"Requantizing {weight.shape} from {weight.dtype} to {new_weight.dtype} in ue8m0. Scale: {weight_scale_inv.dtype} -> {new_weight_scale_inv.dtype}"
+    )
     offloader.update_param(weight, new_weight)
     weight_scale_inv.data = new_weight_scale_inv
 
