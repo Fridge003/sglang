@@ -167,7 +167,6 @@ jobs:
           BUILD_JOBS: 64
           NVCC_THREADS: 8
           USE_CCACHE: 0
-          CMAKE_EXTRA_ARGS: ${{ matrix.arch == 'aarch64' && '-DENABLE_BELOW_SM90=ON' || '' }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
