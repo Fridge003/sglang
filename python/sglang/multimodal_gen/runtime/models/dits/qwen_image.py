@@ -45,6 +45,11 @@ from sglang.multimodal_gen.runtime.layers.rotary_embedding import (
 )
 from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
+from sglang.multimodal_gen.runtime.utils.cuda_graph import (
+    CudaGraphCallableCache,
+    pad_tensor_to_power_of_2,
+    power_of_2_shape,
+)
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -774,6 +779,14 @@ class QwenImageTransformerBlock(nn.Module):
             self.img_mlp = NunchakuFeedForward(self.img_mlp, **nunchaku_kwargs)
             self.txt_mlp = NunchakuFeedForward(self.txt_mlp, **nunchaku_kwargs)
 
+        self._enable_cuda_graph_capture = False
+        self._cuda_graphs = CudaGraphCallableCache()
+
+    def enable_cuda_graph_capture(self, enable: bool):
+        self._enable_cuda_graph_capture = enable
+        if not enable:
+            self._cuda_graphs.clear()
+
     def _modulate(
         self,
         x: torch.Tensor,
@@ -863,6 +876,223 @@ class QwenImageTransformerBlock(nn.Module):
                 modulated = norm_module(x=x, shift=shift_result, scale=scale_result)
                 return modulated, gate_result
 
+    def _img_pre_attention_forward(
+        self,
+        hidden_states: torch.Tensor,
+        temb_img_silu: torch.Tensor,
+        modulate_index: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        img_mod_params = self.img_mod[1](temb_img_silu)
+
+        if (
+            self.quant_config is not None
+            and hasattr(self.quant_config, "get_name")
+            and self.quant_config.get_name() == "svdquant"
+        ):
+            img_mod_params = (
+                img_mod_params.view(img_mod_params.shape[0], -1, 6)
+                .transpose(1, 2)
+                .reshape(img_mod_params.shape[0], -1)
+            )
+
+        img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)
+        img_modulated, img_gate1 = self._modulate(
+            hidden_states, img_mod1, self.img_norm1, modulate_index
+        )
+        return img_modulated, img_gate1, img_mod2
+
+    def _txt_pre_attention_forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        temb_txt_silu: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        txt_mod_params = self.txt_mod[1](temb_txt_silu)
+
+        if (
+            self.quant_config is not None
+            and hasattr(self.quant_config, "get_name")
+            and self.quant_config.get_name() == "svdquant"
+        ):
+            txt_mod_params = (
+                txt_mod_params.view(txt_mod_params.shape[0], -1, 6)
+                .transpose(1, 2)
+                .reshape(txt_mod_params.shape[0], -1)
+            )
+
+        txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)
+        txt_shift1, txt_scale1, txt_gate1_raw = txt_mod1.chunk(3, dim=-1)
+        txt_modulated = self.txt_norm1(
+            encoder_hidden_states, shift=txt_shift1, scale=txt_scale1
+        )
+        txt_gate1 = txt_gate1_raw.unsqueeze(1)
+        return txt_modulated, txt_gate1, txt_mod2
+
+    def _img_post_attention_forward(
+        self,
+        img_attn_output: torch.Tensor,
+        img_mod2: torch.Tensor,
+        img_gate1: torch.Tensor,
+        hidden_states: torch.Tensor,
+        modulate_index: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        img_modulated2, hidden_states, img_gate2 = self._modulate(
+            img_attn_output,
+            img_mod2,
+            self.img_norm2,
+            modulate_index,
+            gate_x=img_gate1,
+            residual_x=hidden_states,
+        )
+        img_mlp_output = self.img_mlp(img_modulated2)
+        if img_mlp_output.dim() == 2:
+            img_mlp_output = img_mlp_output.unsqueeze(0)
+        hidden_states = self.fuse_mul_add(img_mlp_output, img_gate2, hidden_states)
+
+        if hidden_states.dtype == torch.float16:
+            hidden_states = hidden_states.clip(-65504, 65504)
+        return hidden_states
+
+    def _txt_post_attention_forward(
+        self,
+        txt_attn_output: torch.Tensor,
+        txt_mod2: torch.Tensor,
+        txt_gate1: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        txt_shift2, txt_scale2, txt_gate2_raw = txt_mod2.chunk(3, dim=-1)
+        txt_modulated2, encoder_hidden_states = self.txt_norm2(
+            residual=encoder_hidden_states,
+            x=txt_attn_output,
+            gate=txt_gate1,
+            shift=txt_shift2,
+            scale=txt_scale2,
+        )
+        txt_gate2 = txt_gate2_raw.unsqueeze(1)
+        txt_mlp_output = self.txt_mlp(txt_modulated2)
+
+        if txt_mlp_output.dim() == 2:
+            txt_mlp_output = txt_mlp_output.unsqueeze(0)
+        encoder_hidden_states = self.fuse_mul_add(
+            txt_mlp_output, txt_gate2, encoder_hidden_states
+        )
+
+        if encoder_hidden_states.dtype == torch.float16:
+            encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
+        return encoder_hidden_states
+
+    def _run_img_pre_attention(
+        self,
+        hidden_states: torch.Tensor,
+        temb_img_silu: torch.Tensor,
+        modulate_index: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self._enable_cuda_graph_capture:
+            return self._img_pre_attention_forward(
+                hidden_states, temb_img_silu, modulate_index
+            )
+
+        key = ("img_pre_attention_forward", tuple(hidden_states.shape))
+        if modulate_index is None:
+            fn = functools.partial(self._img_pre_attention_forward, modulate_index=None)
+            example_inputs = (hidden_states, temb_img_silu)
+            call_inputs = example_inputs
+        else:
+            key = key + (tuple(modulate_index.shape),)
+            fn = self._img_pre_attention_forward
+            example_inputs = (hidden_states, temb_img_silu, modulate_index)
+            call_inputs = example_inputs
+
+        return self._cuda_graphs.run(key, fn, example_inputs, call_inputs)
+
+    def _run_txt_pre_attention(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        temb_txt_silu: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not self._enable_cuda_graph_capture:
+            return self._txt_pre_attention_forward(encoder_hidden_states, temb_txt_silu)
+
+        padded_encoder_hidden_states = pad_tensor_to_power_of_2(
+            encoder_hidden_states, dim=1
+        )
+        key = (
+            "txt_pre_attention_forward",
+            power_of_2_shape(encoder_hidden_states.shape, dim=1),
+        )
+        padded_txt_modulated, txt_gate1, txt_mod2 = self._cuda_graphs.run(
+            key,
+            self._txt_pre_attention_forward,
+            (padded_encoder_hidden_states, temb_txt_silu),
+        )
+        seq_len_txt = encoder_hidden_states.shape[1]
+        txt_modulated = padded_txt_modulated[:, :seq_len_txt]
+        return txt_modulated, txt_gate1, txt_mod2
+
+    def _run_img_post_attention(
+        self,
+        img_attn_output: torch.Tensor,
+        img_mod2: torch.Tensor,
+        img_gate1: torch.Tensor,
+        hidden_states: torch.Tensor,
+        modulate_index: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        if not self._enable_cuda_graph_capture:
+            return self._img_post_attention_forward(
+                img_attn_output, img_mod2, img_gate1, hidden_states, modulate_index
+            )
+
+        key = ("img_post_attention_forward", tuple(img_attn_output.shape))
+        if modulate_index is None:
+            fn = functools.partial(self._img_post_attention_forward, modulate_index=None)
+            example_inputs = (img_attn_output, img_mod2, img_gate1, hidden_states)
+            call_inputs = example_inputs
+        else:
+            key = key + (tuple(modulate_index.shape),)
+            fn = self._img_post_attention_forward
+            example_inputs = (
+                img_attn_output,
+                img_mod2,
+                img_gate1,
+                hidden_states,
+                modulate_index,
+            )
+            call_inputs = example_inputs
+
+        return self._cuda_graphs.run(key, fn, example_inputs, call_inputs)
+
+    def _run_txt_post_attention(
+        self,
+        txt_attn_output: torch.Tensor,
+        txt_mod2: torch.Tensor,
+        txt_gate1: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        if not self._enable_cuda_graph_capture:
+            return self._txt_post_attention_forward(
+                txt_attn_output, txt_mod2, txt_gate1, encoder_hidden_states
+            )
+
+        padded_txt_attn_output = pad_tensor_to_power_of_2(txt_attn_output, dim=1)
+        padded_encoder_hidden_states = pad_tensor_to_power_of_2(
+            encoder_hidden_states, dim=1
+        )
+        key = (
+            "txt_post_attention_forward",
+            power_of_2_shape(txt_attn_output.shape, dim=1),
+        )
+        padded_encoder_hidden_states = self._cuda_graphs.run(
+            key,
+            self._txt_post_attention_forward,
+            (
+                padded_txt_attn_output,
+                txt_mod2,
+                txt_gate1,
+                padded_encoder_hidden_states,
+            ),
+        )
+        seq_len_txt = txt_attn_output.shape[1]
+        return padded_encoder_hidden_states[:, :seq_len_txt]
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -874,42 +1104,12 @@ class QwenImageTransformerBlock(nn.Module):
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         modulate_index: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Get modulation parameters for both streams
-        img_mod_params = self.img_mod[1](temb_img_silu)  # [B, 6*dim]
-        txt_mod_params = self.txt_mod[1](temb_txt_silu)  # [B, 6*dim]
-
-        if (
-            self.quant_config is not None
-            and hasattr(self.quant_config, "get_name")
-            and self.quant_config.get_name() == "svdquant"
-        ):
-            # When NOT using nunchaku, reshape mod_params from [B, 6*dim] to [B, dim*6]
-            # When using nunchaku (svdquant), keep original format
-            img_mod_params = (
-                img_mod_params.view(img_mod_params.shape[0], -1, 6)
-                .transpose(1, 2)
-                .reshape(img_mod_params.shape[0], -1)
-            )
-            txt_mod_params = (
-                txt_mod_params.view(txt_mod_params.shape[0], -1, 6)
-                .transpose(1, 2)
-                .reshape(txt_mod_params.shape[0], -1)
-            )
-
-        # Split modulation parameters for norm1 and norm2
-        img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
-        txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
-
-        # Process image stream - norm1 + modulation
-        img_modulated, img_gate1 = self._modulate(
-            hidden_states, img_mod1, self.img_norm1, modulate_index
+        img_modulated, img_gate1, img_mod2 = self._run_img_pre_attention(
+            hidden_states, temb_img_silu, modulate_index
         )
-        # Process text stream - norm1 + modulation
-        txt_shift1, txt_scale1, txt_gate1_raw = txt_mod1.chunk(3, dim=-1)
-        txt_modulated = self.txt_norm1(
-            encoder_hidden_states, shift=txt_shift1, scale=txt_scale1
+        txt_modulated, txt_gate1, txt_mod2 = self._run_txt_pre_attention(
+            encoder_hidden_states, temb_txt_silu
         )
-        txt_gate1 = txt_gate1_raw.unsqueeze(1)
 
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:
@@ -930,44 +1130,20 @@ class QwenImageTransformerBlock(nn.Module):
 
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
         img_attn_output, txt_attn_output = attn_output
-        # Process image stream - norm2 + MLP
-        img_modulated2, hidden_states, img_gate2 = self._modulate(
+
+        hidden_states = self._run_img_post_attention(
             img_attn_output,
             img_mod2,
-            self.img_norm2,
+            img_gate1,
+            hidden_states,
             modulate_index,
-            gate_x=img_gate1,
-            residual_x=hidden_states,
         )
-        img_mlp_output = self.img_mlp(img_modulated2)
-
-        if img_mlp_output.dim() == 2:
-            img_mlp_output = img_mlp_output.unsqueeze(0)
-        hidden_states = self.fuse_mul_add(img_mlp_output, img_gate2, hidden_states)
-
-        # Process text stream - norm2 + MLP
-        txt_shift2, txt_scale2, txt_gate2_raw = txt_mod2.chunk(3, dim=-1)
-        txt_modulated2, encoder_hidden_states = self.txt_norm2(
-            residual=encoder_hidden_states,
-            x=txt_attn_output,
-            gate=txt_gate1,
-            shift=txt_shift2,
-            scale=txt_scale2,
+        encoder_hidden_states = self._run_txt_post_attention(
+            txt_attn_output,
+            txt_mod2,
+            txt_gate1,
+            encoder_hidden_states,
         )
-        txt_gate2 = txt_gate2_raw.unsqueeze(1)
-        txt_mlp_output = self.txt_mlp(txt_modulated2)
-
-        if txt_mlp_output.dim() == 2:
-            txt_mlp_output = txt_mlp_output.unsqueeze(0)
-        encoder_hidden_states = self.fuse_mul_add(
-            txt_mlp_output, txt_gate2, encoder_hidden_states
-        )
-
-        # Clip to prevent overflow for fp16
-        if encoder_hidden_states.dtype == torch.float16:
-            encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
-        if hidden_states.dtype == torch.float16:
-            hidden_states = hidden_states.clip(-65504, 65504)
 
         return encoder_hidden_states, hidden_states
 
@@ -1097,6 +1273,10 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
 
         modulate_index = torch.stack(modulate_index_list)
         return modulate_index
+
+    def enable_cuda_graph_capture(self, enable: bool):
+        for block in self.transformer_blocks:
+            block.enable_cuda_graph_capture(enable)
 
     def forward(
         self,
