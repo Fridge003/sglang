@@ -762,7 +762,9 @@ class HiRadixCache(RadixCache):
         return node.pin_expiry > 0 and time.monotonic() <= node.pin_expiry
 
     def _clear_pin(self, node: TreeNode):
-        """Clear expired pin state from a node."""
+        """Clear expired pin state and release host_ref_counter hold."""
+        if node.pin_expiry > 0:
+            node.host_ref_counter = max(0, node.host_ref_counter - 1)
         node.pin_expiry = 0.0
         node.pin_ttl = 0
 
@@ -787,10 +789,13 @@ class HiRadixCache(RadixCache):
             child = node.children[child_key]
             prefix_len = self.key_match_fn(child.key, key)
 
+            # First pin on this node: acquire host_ref_counter hold
+            if child.pin_expiry == 0:
+                child.host_ref_counter += 1
+
             # Extend expiry (never shorten), store TTL for refresh-on-hit
             child.pin_expiry = max(child.pin_expiry, expiry)
             child.pin_ttl = max(child.pin_ttl, ttl_seconds)
-            self._update_host_leaf_status(child)
             pinned += 1
 
             if prefix_len < len(child.key):
@@ -851,11 +856,7 @@ class HiRadixCache(RadixCache):
         return delta
 
     def _update_host_leaf_status(self, node: TreeNode):
-        # Lazy expiry check (single _is_pinned call)
-        pinned = self._is_pinned(node)
-        if not pinned and node.pin_expiry > 0:
-            self._clear_pin(node)
-        if not node.evicted or node.lock_ref > 0 or pinned:
+        if not node.evicted or node.lock_ref > 0:
             if node in self.evictable_host_leaves:
                 self.evictable_host_leaves.remove(node)
             return
@@ -971,23 +972,13 @@ class HiRadixCache(RadixCache):
             if not x.evicted:
                 continue
 
-            # node is protected from eviction as it has ongoing prefetch or backup to storage
+            # Expire stale pins before checking host_ref_counter
+            if x.pin_expiry > 0 and time.monotonic() > x.pin_expiry:
+                self._clear_pin(x)
+
+            # node is protected from eviction as it has ongoing prefetch, backup, or pin
             if x.host_ref_counter > 0:
                 continue
-            if self._is_pinned(x):
-                logger.debug(
-                    "[PIN] evict_host: skipping pinned node %d (expires in %.1fs)",
-                    x.id,
-                    x.pin_expiry - time.monotonic(),
-                )
-                continue
-            elif x.pin_expiry > 0:
-                # Expired pin: clear and fall through to normal host eviction
-                self._clear_pin(x)
-                logger.debug(
-                    "[PIN] evict_host: pin expired on node %d, allowing eviction",
-                    x.id,
-                )
 
             # Block deleted entirely (GPU already evicted, now CPU freed) --
             # emit BlockRemoved so the router removes this block from its index.
@@ -1455,6 +1446,9 @@ class HiRadixCache(RadixCache):
         new_node.lock_ref = child.lock_ref
         new_node.pin_expiry = child.pin_expiry
         new_node.pin_ttl = child.pin_ttl
+        # If child is pinned, new parent inherits a host_ref_counter hold
+        if child.pin_expiry > 0:
+            new_node.host_ref_counter += 1
         new_node.key = child.key[:split_len]
         new_node.hit_count = child.hit_count
 
