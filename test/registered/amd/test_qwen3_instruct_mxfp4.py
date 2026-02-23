@@ -11,6 +11,7 @@ from sglang.test.send_one import BenchArgs, send_one_prompt
 from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    is_in_amd_ci,
     is_in_ci,
     popen_launch_server,
     write_github_step_summary,
@@ -18,18 +19,20 @@ from sglang.test.test_utils import (
 
 register_amd_ci(est_time=3600, suite="stage-c-test-large-8-gpu-amd")
 
-GWEN3_MODEL_PATH = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+GWEN3_MODEL_PATH = "amd/Qwen3-235B-A22B-Instruct-2507-mxfp4"
 SERVER_LAUNCH_TIMEOUT = 3600
 
 
-class TestQwen3Instruct2507(CustomTestCase):
+class TestQwen3Instruct2507MXFP4(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = GWEN3_MODEL_PATH
         cls.base_url = DEFAULT_URL_FOR_TEST
         other_args = [
             "--tp",
-            "8",
+            "4",
+            "--ep",
+            "2",
             "--trust-remote-code",
             "--attention-backend",
             "aiter",
@@ -67,10 +70,9 @@ class TestQwen3Instruct2507(CustomTestCase):
 
         if is_in_ci():
             write_github_step_summary(
-                f"### test_gsm8k (self.model)\n"
-                f'{metrics["accuracy"]=:.3f}\n'
+                f"### test_gsm8k (self.model)\n" '{metrics["accuracy"]=:.3f}\n'
             )
-            self.assertGreater(metrics["accuracy"], 0.95)
+            self.assertGreater(metrics["accuracy"], 0.93)
 
     def test_bs_1_speed(self):
         args = BenchArgs(port=int(self.base_url.split(":")[-1]), max_new_tokens=2048)
@@ -79,13 +81,11 @@ class TestQwen3Instruct2507(CustomTestCase):
         print(f"{speed=:.2f}")
 
         if is_in_ci():
-            write_github_step_summary(
-                f"### test_bs_1_speed (self.model)\n"
-            )
+            write_github_step_summary(f"### test_bs_1_speed (self.model)\n")
             if is_in_amd_ci():
-                self.assertGreater(speed, 50)
+                self.assertGreater(speed, 60)
             else:
-                self.assertGreater(speed, 75)
+                self.assertGreater(speed, 90)
 
 
 if __name__ == "__main__":
