@@ -19,14 +19,14 @@ from sglang.test.test_utils import (
 
 register_amd_ci(est_time=3600, suite="stage-c-test-large-8-gpu-amd")
 
-GWEN3_MODEL_PATH = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+QWEN3_MODEL_PATH = "Qwen/Qwen3-235B-A22B-Instruct-2507"
 SERVER_LAUNCH_TIMEOUT = 3600
 
 
 class TestQwen3Instruct2507(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        cls.model = GWEN3_MODEL_PATH
+        cls.model = QWEN3_MODEL_PATH
         cls.base_url = DEFAULT_URL_FOR_TEST
         other_args = [
             "--tp",
