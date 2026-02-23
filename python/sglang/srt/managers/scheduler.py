@@ -2641,31 +2641,13 @@ class Scheduler(
         return no_request
 
     def flush_cache(self):
-        """Flush the memory pool and cache.
-
-        HiRadixCache uses selective flush (evicts unpinned entries,
-        preserves any active pins). Plain RadixCache does a full reset.
-        """
+        """Flush the memory pool and cache."""
         if self._is_no_request():
             self.cur_batch = None
             self.last_batch = None
-
-            evictable = getattr(self.tree_cache, "evictable_size_", "N/A")
-            logger.info(
-                "flush_cache: evictable_size=%s, req_to_token_pool.size=%d, tp_rank=%d",
-                evictable,
-                self.req_to_token_pool.size,
-                self.tp_rank,
-            )
-
-            if hasattr(self.tree_cache, "flush"):
-                # HiCache with PIN support: selective flush preserves pinned blocks
-                self.tree_cache.flush()
-            else:
-                self.tree_cache.reset()
-                self.req_to_token_pool.clear()
-                self.token_to_kv_pool_allocator.clear()
-
+            self.tree_cache.reset()
+            self.req_to_token_pool.clear()
+            self.token_to_kv_pool_allocator.clear()
             self.grammar_manager.clear()
             self.reset_metrics()
 
