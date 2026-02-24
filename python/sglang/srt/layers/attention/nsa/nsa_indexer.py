@@ -595,89 +595,6 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
         )
         return metadata.topk_transform(dummy_logits, self.index_topk)
 
-    def forward_indexer(
-        self,
-        q_fp8: torch.Tensor,
-        weights: torch.Tensor,
-        forward_batch: ForwardBatch,
-        topk: int,
-        layer_id: int,
-    ) -> Optional[torch.Tensor]:
-        if not _is_npu:
-            from sglang.srt.layers.attention.nsa.tilelang_kernel import fp8_index
-
-        page_size = forward_batch.token_to_kv_pool.page_size
-        assert page_size == 64, "only support page size 64"
-
-        assert len(weights.shape) == 3
-        weights = weights.squeeze(-1)
-
-        # logits = deep_gemm.fp8_mqa_logits(q_fp8, kv_fp8, weights, ks, ke)
-        k_fp8_list = []
-        k_scale_list = []
-
-        topk_indices_list = []
-
-        block_tables = forward_batch.req_to_token_pool.req_to_token[
-            forward_batch.req_pool_indices, :
-        ]
-        strided_indices = torch.arange(
-            0, block_tables.shape[-1], page_size, device="cuda"
-        )
-        block_tables = block_tables[:, strided_indices] // page_size
-
-        q_len_start = 0
-
-        for i in range(forward_batch.batch_size):
-            seq_len = forward_batch.seq_lens[i].item()
-            q_len = (
-                forward_batch.extend_seq_lens_cpu[i]
-                if forward_batch.forward_mode.is_extend()
-                else 1
-            )
-            q_len_end = q_len_start + q_len
-
-            q_fp8_partial = q_fp8[q_len_start:q_len_end]
-            q_fp8_partial = q_fp8_partial.unsqueeze(0).contiguous()
-
-            weights_partial = weights[q_len_start:q_len_end]
-            weights_partial = weights_partial.squeeze(-1).unsqueeze(0).contiguous()
-
-            k_fp8 = forward_batch.token_to_kv_pool.get_index_k_continuous(
-                layer_id,
-                seq_len,
-                block_tables[i],
-            )
-            k_scale = forward_batch.token_to_kv_pool.get_index_k_scale_continuous(
-                layer_id,
-                seq_len,
-                block_tables[i],
-            )
-
-            k_fp8 = k_fp8.view(torch.float8_e4m3fn).unsqueeze(0).contiguous()
-            k_scale = k_scale.view(torch.float32).squeeze(-1).unsqueeze(0).contiguous()
-
-            index_score = fp8_index(
-                q_fp8_partial,
-                weights_partial,
-                k_fp8,
-                k_scale,
-            )
-            end_pos = seq_len
-            topk_indices = index_score.topk(min(topk, end_pos), dim=-1)[1].squeeze(0)
-
-            pad_len = ceil_align(topk_indices.shape[-1], 2048) - topk_indices.shape[-1]
-            topk_indices = torch.nn.functional.pad(
-                topk_indices, (0, pad_len), "constant", -1
-            )
-
-            topk_indices_list.append(topk_indices)
-
-            q_len_start = q_len_end
-
-        topk_indices = torch.cat(topk_indices_list, dim=0)
-        return topk_indices
-
     def forward_cuda(
         self,
         x: torch.Tensor,
@@ -812,81 +729,73 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
             index_k_scale=k_scale,
         )
 
-        if _is_cuda or _is_hip:
-            assert forward_batch.seq_lens_cpu is not None
-            if len(forward_batch.seq_lens_cpu) == 0:
-                # this seems b/c max-pad, no worries?
-                # if x.shape[0] != 0:
-                #     print(
-                #         "HACK: seq_lens empty but x not empty, hackily return all-invalid topk_result"
-                #     )
-                return torch.full(
-                    (x_meta.shape[0], self.index_topk),
-                    -1,
-                    dtype=torch.int,
-                    device=x_meta.device,
+        assert forward_batch.seq_lens_cpu is not None
+        if len(forward_batch.seq_lens_cpu) == 0:
+            # this seems b/c max-pad, no worries?
+            # if x.shape[0] != 0:
+            #     print(
+            #         "HACK: seq_lens empty but x not empty, hackily return all-invalid topk_result"
+            #     )
+            return torch.full(
+                (x_meta.shape[0], self.index_topk),
+                -1,
+                dtype=torch.int,
+                device=x_meta.device,
+            )
+
+        if (
+            forward_batch.forward_mode.is_decode_or_idle()
+            or forward_batch.forward_mode.is_target_verify()
+            or forward_batch.forward_mode.is_draft_extend(include_v2=True)
+        ):
+            topk_result = self._get_topk_paged(
+                forward_batch, layer_id, q_fp8, weights, metadata
+            )
+        else:
+            if (
+                forward_batch.nsa_cp_metadata is not None
+                and is_nsa_prefill_cp_in_seq_split()
+            ):
+                kv_len_prev = forward_batch.nsa_cp_metadata.kv_len_prev
+                kv_len_next = forward_batch.nsa_cp_metadata.kv_len_next
+                actual_seq_q_prev = forward_batch.nsa_cp_metadata.actual_seq_q_prev
+                actual_seq_q_next = forward_batch.nsa_cp_metadata.actual_seq_q_next
+
+                # TODO support mutil-batch
+                # cp_batch_seq_index_prev = forward_batch.nsa_cp_metadata["cp_batch_seq_index_prev"]
+                # cp_batch_seq_index_next = forward_batch.nsa_cp_metadata["cp_batch_seq_index_next"]
+                # TODO prev, next, combined into a single call
+                q_fp8_prev, q_fp8_next = torch.split(
+                    q_fp8, (q_fp8.shape[0] + 1) // 2, dim=0
+                )
+                weights_prev, weights_next = torch.split(
+                    weights, (weights.shape[0] + 1) // 2, dim=0
+                )
+                topk_result_prev = self._get_topk_ragged_with_cp(
+                    forward_batch,
+                    layer_id,
+                    q_fp8_prev,
+                    weights_prev,
+                    metadata,
+                    kv_len_prev,
+                    actual_seq_q_prev,
                 )
 
-            if (
-                forward_batch.forward_mode.is_decode_or_idle()
-                or forward_batch.forward_mode.is_target_verify()
-                or forward_batch.forward_mode.is_draft_extend(include_v2=True)
-            ):
-                topk_result = self._get_topk_paged(
+                topk_result_next = self._get_topk_ragged_with_cp(
+                    forward_batch,
+                    layer_id,
+                    q_fp8_next,
+                    weights_next,
+                    metadata,
+                    kv_len_next,
+                    actual_seq_q_next,
+                )
+                return torch.cat([topk_result_prev, topk_result_next], dim=0)
+            else:
+                topk_result = self._get_topk_ragged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
-            else:
-                if (
-                    forward_batch.nsa_cp_metadata is not None
-                    and is_nsa_prefill_cp_in_seq_split()
-                ):
-                    kv_len_prev = forward_batch.nsa_cp_metadata.kv_len_prev
-                    kv_len_next = forward_batch.nsa_cp_metadata.kv_len_next
-                    actual_seq_q_prev = forward_batch.nsa_cp_metadata.actual_seq_q_prev
-                    actual_seq_q_next = forward_batch.nsa_cp_metadata.actual_seq_q_next
 
-                    # TODO support mutil-batch
-                    # cp_batch_seq_index_prev = forward_batch.nsa_cp_metadata["cp_batch_seq_index_prev"]
-                    # cp_batch_seq_index_next = forward_batch.nsa_cp_metadata["cp_batch_seq_index_next"]
-                    # TODO prev, next, combined into a single call
-                    q_fp8_prev, q_fp8_next = torch.split(
-                        q_fp8, (q_fp8.shape[0] + 1) // 2, dim=0
-                    )
-                    weights_prev, weights_next = torch.split(
-                        weights, (weights.shape[0] + 1) // 2, dim=0
-                    )
-                    topk_result_prev = self._get_topk_ragged_with_cp(
-                        forward_batch,
-                        layer_id,
-                        q_fp8_prev,
-                        weights_prev,
-                        metadata,
-                        kv_len_prev,
-                        actual_seq_q_prev,
-                    )
-
-                    topk_result_next = self._get_topk_ragged_with_cp(
-                        forward_batch,
-                        layer_id,
-                        q_fp8_next,
-                        weights_next,
-                        metadata,
-                        kv_len_next,
-                        actual_seq_q_next,
-                    )
-                    return torch.cat([topk_result_prev, topk_result_next], dim=0)
-                else:
-                    topk_result = self._get_topk_ragged(
-                        forward_batch, layer_id, q_fp8, weights, metadata
-                    )
-        else:
-            topk_result = self.forward_indexer(
-                q_fp8.contiguous(),
-                weights,
-                forward_batch,
-                topk=self.index_topk,
-                layer_id=layer_id,
-            )
         return topk_result
 
     def forward_npu(
