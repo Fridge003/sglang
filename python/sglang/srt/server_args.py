@@ -2540,8 +2540,9 @@ class ServerArgs:
                 self.disaggregation_decode_dp is None
             ), "Cannot set --disaggregation-decode-dp for the decode engine."
 
-            self.disable_radix_cache = True
-            logger.warning("KV cache is forced as chunk cache for decode server")
+            logger.info(
+                f"Decode server radix cache: {'disabled' if self.disable_radix_cache else 'enabled'}"
+            )
 
         elif self.disaggregation_mode == "prefill":
             if self.disaggregation_decode_tp is None:

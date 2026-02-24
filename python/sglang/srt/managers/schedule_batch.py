@@ -800,6 +800,7 @@ class Req(ReqDllmMixin):
         # kv_send(req.input_ids[req.start_send_idx:len(req.fill_ids)])
         # start_send_idx = len(req.fill_ids)
         self.start_send_idx: int = 0
+        self.decode_prefix_len: int = 0
 
         # For overlap schedule, we delay the kv transfer until `process_batch_result_disagg_prefill` rather than `process_prefill_chunk` in non-overlap
         # This is because kv is not ready in `process_prefill_chunk`.

@@ -488,7 +488,8 @@ class RadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator.free(kv_indices[len(keys) :])
 
         # Remove req slot release the cache lock
-        self.dec_lock_ref(req.last_node)
+        if req.last_node is not None:
+            self.dec_lock_ref(req.last_node)
 
     def cache_unfinished_req(self, req: Req, chunked=False):
         """Cache request when it is unfinished."""

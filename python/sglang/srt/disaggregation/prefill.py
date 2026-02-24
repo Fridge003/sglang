@@ -25,6 +25,7 @@ from collections import deque
 from http import HTTPStatus
 from typing import TYPE_CHECKING, List, Optional, Type
 
+import numpy as np
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVPoll
@@ -314,8 +315,24 @@ class PrefillBootstrapQueue:
             )
             assert req.metadata_buffer_index is not None
 
-            num_pages = kv_to_page_num(num_kv_indices, self.token_to_kv_pool.page_size)
-            req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
+            # Read decode_prefix_len from TransferInfo (set by decode-side radix cache)
+            decode_prefix_len = 0
+            transfer_infos = self.kv_manager.transfer_infos.get(
+                req.bootstrap_room, {}
+            )
+            for info in transfer_infos.values():
+                decode_prefix_len = getattr(info, "decode_prefix_len", 0)
+                if decode_prefix_len > 0:
+                    break
+
+            page_size = self.token_to_kv_pool.page_size
+            num_pages = kv_to_page_num(num_kv_indices, page_size)
+            prefix_pages = decode_prefix_len // page_size
+            req.decode_prefix_len = decode_prefix_len
+
+            req.disagg_kv_sender.init(
+                num_pages - prefix_pages, req.metadata_buffer_index
+            )
 
             bootstrapped_reqs.append(req)
             indices_to_remove.add(i)
@@ -680,6 +697,11 @@ class SchedulerDisaggregationPrefillMixin:
         """
         page_size = self.token_to_kv_pool_allocator.page_size
         start_idx = req.start_send_idx
+
+        # Skip past decode-side cached prefix
+        decode_prefix_len = getattr(req, "decode_prefix_len", 0)
+        effective_start_idx = max(start_idx, decode_prefix_len)
+
         end_idx = (
             end_idx
             if end_idx is not None
@@ -690,13 +712,64 @@ class SchedulerDisaggregationPrefillMixin:
             # if not the last chunk and the last page is partial, delay the last partial page to the next send
             end_idx = end_idx - end_idx % page_size
 
+        state_indices = None
+
+        # If prefix covers everything, handle metadata-only path
+        if effective_start_idx >= end_idx:
+            req.start_send_idx = end_idx
+            if last_chunk:
+                self.disagg_metadata_buffers.set_buf(req)
+
+                # Prepare extra pool indices for hybrid models
+                if isinstance(
+                    self.token_to_kv_pool_allocator.get_kvcache(), HybridLinearKVPool
+                ):
+                    state_indices = [
+                        self.req_to_token_pool.req_index_to_mamba_index_mapping[
+                            req.req_pool_idx
+                        ]
+                        .cpu()
+                        .numpy()
+                    ]
+                elif isinstance(
+                    self.token_to_kv_pool_allocator.get_kvcache(), SWAKVPool
+                ):
+                    seq_len = len(req.fill_ids)
+                    window_size = self.sliding_window_size
+                    window_start = max(0, seq_len - window_size)
+                    window_start = (window_start // page_size) * page_size
+                    window_kv_indices_full = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, window_start:seq_len
+                    ]
+                    window_kv_indices_swa = (
+                        self.token_to_kv_pool_allocator.translate_loc_from_full_to_swa(
+                            window_kv_indices_full
+                        )
+                    )
+                    state_indices = window_kv_indices_swa.cpu().numpy()
+                    state_indices = kv_to_page_indices(state_indices, page_size)
+                elif isinstance(
+                    self.token_to_kv_pool_allocator.get_kvcache(), NSATokenToKVPool
+                ):
+                    seq_len = len(req.fill_ids)
+                    kv_indices_full = self.req_to_token_pool.req_to_token[
+                        req.req_pool_idx, :seq_len
+                    ]
+                    state_indices = kv_indices_full.cpu().numpy()
+                    state_indices = kv_to_page_indices(state_indices, page_size)
+
+                page_indices = np.array([], dtype=np.int32)
+                req.disagg_kv_sender.send(page_indices, state_indices)
+            return
+
         kv_indices = (
-            self.req_to_token_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]
+            self.req_to_token_pool.req_to_token[
+                req.req_pool_idx, effective_start_idx:end_idx
+            ]
             .cpu()
             .numpy()
         )
         req.start_send_idx = end_idx
-        state_indices = None
         if last_chunk:
             self.disagg_metadata_buffers.set_buf(req)
 

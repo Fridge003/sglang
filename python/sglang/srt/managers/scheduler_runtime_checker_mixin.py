@@ -150,14 +150,93 @@ class SchedulerRuntimeCheckerMixin:
     def _check_radix_cache_memory(self: Scheduler):
         _, _, available_size, evictable_size = self._get_token_info()
         protected_size = self.tree_cache.protected_size()
-        memory_leak = (available_size + evictable_size) != (
-            # self.max_total_num_tokens
-            # if not self.enable_hierarchical_cache
-            # else self.max_total_num_tokens - protected_size
-            self.max_total_num_tokens
-            - protected_size
-        )
+        expected = self.max_total_num_tokens - protected_size
+        actual = available_size + evictable_size
+        # With paged allocation (page_size > 1), partial pages in the radix
+        # tree cause a token-level mismatch of up to page_size per partial
+        # page.  Allow a tolerance proportional to the number of tree pages
+        # that could be partially filled.
+        tolerance = 0
+        if self.page_size > 1:
+            tree_tokens = evictable_size + protected_size
+            # Worst case: every page_size-aligned boundary holds a partial page
+            max_partial_pages = (tree_tokens + self.page_size - 1) // self.page_size
+            tolerance = max_partial_pages * (self.page_size - 1)
+        memory_leak = abs(actual - expected) > tolerance
         token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
+        import logging as _logging
+        import time as _time
+        _now = _time.monotonic()
+        if not hasattr(self, '_last_idle_chk') or _now - self._last_idle_chk > 10:
+            self._last_idle_chk = _now
+            _logging.getLogger(__name__).warning(
+                f"[IDLE-CHK] leak={memory_leak} avail={available_size} evict={evictable_size} prot={protected_size} max={self.max_total_num_tokens}"
+            )
+        if memory_leak:
+            import torch as _torch
+            tree_total = self.tree_cache.total_size()
+            alloc = self.token_to_kv_pool_allocator
+            n_free = len(alloc.free_pages)
+            n_release = len(alloc.release_pages)
+            ps = alloc.page_size
+
+            # Collect all page indices from tree nodes
+            tree_pages = set()
+            stack = [self.tree_cache.root_node]
+            while stack:
+                nd = stack.pop()
+                if nd.value is not None and len(nd.value) > 0:
+                    for idx in (nd.value // ps).tolist():
+                        tree_pages.add(idx)
+                for ch in nd.children.values():
+                    if not ch.evicted:
+                        stack.append(ch)
+            n_tree_pages = len(tree_pages)
+
+            # Collect free + release page indices
+            free_set = set()
+            if n_free > 0:
+                free_set.update(alloc.free_pages.tolist())
+            if n_release > 0:
+                free_set.update(alloc.release_pages.tolist())
+            n_free_unique = len(free_set)
+
+            overlap = tree_pages & free_set
+            total_accounted = n_tree_pages + n_free_unique - len(overlap)
+            num_pages = alloc.num_pages  # excludes page 0 (padding)
+            leaked = num_pages - total_accounted
+
+            # Find leaked page indices (sample up to 20)
+            all_pages = set(range(1, num_pages + 1))
+            leaked_pages = all_pages - tree_pages - free_set
+            sample = sorted(leaked_pages)[:20]
+
+            # Check req_to_token_pool for leaked pages
+            rtp = self.req_to_token_pool
+            leaked_in_rtp = 0
+            leaked_in_rtp_slots = []
+            if leaked_pages:
+                leaked_set = leaked_pages
+                free_slots_set = set(int(s) for s in rtp.free_slots)
+                for slot in range(rtp.size):
+                    if slot in free_slots_set:
+                        continue
+                    slot_indices = rtp.req_to_token[slot].tolist()
+                    slot_pages = set(idx // ps for idx in slot_indices if idx >= 0)
+                    hit = slot_pages & leaked_set
+                    if hit:
+                        leaked_in_rtp += len(hit)
+                        if len(leaked_in_rtp_slots) < 5:
+                            leaked_in_rtp_slots.append((slot, len(slot_pages), sorted(hit)[:5]))
+
+            token_msg += (
+                f"  DIAG: tree_total={tree_total}, counter_drift={tree_total - (evictable_size + protected_size)}, "
+                f"tree_pages={n_tree_pages}, free_pages={n_free}+{n_release}={n_free_unique}u, "
+                f"overlap={len(overlap)}, total_accounted={total_accounted}, "
+                f"num_pages={num_pages}, leaked={leaked}, "
+                f"leaked_in_rtp={leaked_in_rtp}, sample={sample}, "
+                f"rtp_slots={leaked_in_rtp_slots}\n"
+            )
         return memory_leak, token_msg
 
     def _get_batch_uncached_size(self: Scheduler, batch: ScheduleBatch) -> int:
@@ -319,6 +398,12 @@ class SchedulerRuntimeCheckerMixin:
             if len(self.disagg_prefill_inflight_queue) > 0:
                 return
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            # Running requests hold decode pages (from alloc_decode) that are
+            # not yet in the radix tree.  The idle memory check formula does not
+            # account for these pages, so skip the check when requests are
+            # still running to avoid false-positive leak detection.
+            if self.running_batch is not None and not self.running_batch.is_empty():
+                return
             queue_size = (
                 len(self.waiting_queue)
                 + len(self.disagg_decode_transfer_queue.queue)

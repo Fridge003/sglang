@@ -238,7 +238,7 @@ class DecodePreallocQueue:
         self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
         self.scheduler = scheduler
         self.transfer_queue = transfer_queue
-        self.tree_cache = tree_cache  # this is always a chunk cache
+        self.tree_cache = tree_cache  # RadixCache when enabled, ChunkCache otherwise
         self.gloo_group = gloo_group
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -586,17 +586,21 @@ class DecodePreallocQueue:
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
                 break
 
+            # Match prefix against decode-side radix cache
+            prefix_len = self._match_prefix_and_lock(decode_req.req)
+
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
             origin_input_len = len(decode_req.req.origin_input_ids)
             required_tokens_for_request = (
-                origin_input_len + self.num_reserved_decode_tokens
+                origin_input_len - prefix_len + self.num_reserved_decode_tokens
             )
 
             if (
                 max(
                     required_tokens_for_request,
                     origin_input_len
+                    - prefix_len
                     + min(
                         decode_req.req.sampling_params.max_new_tokens,
                         CLIP_MAX_NEW_TOKEN,
@@ -605,16 +609,27 @@ class DecodePreallocQueue:
                 )
                 > allocatable_tokens
             ):
+                # Unlock prefix before breaking
+                if prefix_len > 0:
+                    self.tree_cache.dec_lock_ref(decode_req.req.last_node)
+                    decode_req.req.last_node = None
                 break
             if required_tokens_for_request > allocatable_tokens:
+                if prefix_len > 0:
+                    self.tree_cache.dec_lock_ref(decode_req.req.last_node)
+                    decode_req.req.last_node = None
                 break
 
             allocatable_tokens -= required_tokens_for_request
-            self._pre_alloc(decode_req.req)
+            self._pre_alloc(decode_req.req, prefix_len=prefix_len)
 
+            # Mark prefix as protected so cache_finished_req doesn't free shared indices
+            decode_req.req.cache_protected_len = prefix_len
+
+            # Only send non-prefix KV indices to prefill
             kv_indices = (
                 self.req_to_token_pool.req_to_token[decode_req.req.req_pool_idx][
-                    : len(decode_req.req.origin_input_ids)
+                    prefix_len : len(decode_req.req.origin_input_ids)
                 ]
                 .cpu()
                 .numpy()
@@ -666,7 +681,10 @@ class DecodePreallocQueue:
             assert decode_req.metadata_buffer_index is not None
             page_indices = kv_to_page_indices(kv_indices, page_size)
             decode_req.kv_receiver.init(
-                page_indices, decode_req.metadata_buffer_index, state_indices
+                page_indices,
+                decode_req.metadata_buffer_index,
+                state_indices,
+                decode_prefix_len=prefix_len,
             )
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
@@ -740,7 +758,40 @@ class DecodePreallocQueue:
             )
         return allocatable_tokens
 
-    def _pre_alloc(self, req: Req) -> torch.Tensor:
+    def _match_prefix_and_lock(self, req: Req) -> int:
+        """Match prefix against decode radix cache. Returns page-aligned prefix_len."""
+        if self.tree_cache.disable:
+            return 0
+
+        if req.last_node is not None:
+            self.tree_cache.dec_lock_ref(req.last_node)
+            req.last_node = None
+
+        from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+
+        match_result = self.tree_cache.match_prefix(
+            MatchPrefixParams(
+                key=RadixKey(token_ids=req.origin_input_ids, extra_key=req.extra_key)
+            )
+        )
+        prefix_indices = match_result.device_indices
+        last_node = match_result.last_device_node
+        prefix_len = len(prefix_indices)
+
+        if prefix_len > 0:
+            self.tree_cache.inc_lock_ref(last_node)
+            req.prefix_indices = prefix_indices
+        else:
+            req.prefix_indices = torch.empty((0,), dtype=torch.int64)
+
+        # Always set last_node (root_node when no match) so that
+        # cache_unfinished_req's dec_lock_ref(req.last_node) doesn't crash.
+        req.last_node = last_node
+
+        return prefix_len
+
+    def _pre_alloc(self, req: Req, prefix_len: int = 0) -> torch.Tensor:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
         req_pool_indices = self.req_to_token_pool.alloc([req])
 
@@ -750,30 +801,53 @@ class DecodePreallocQueue:
 
         # Alloc all tokens for the prebuilt req (except for the reserved input token for decoding)
         fill_len = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
+        new_tokens = fill_len - prefix_len
         req.kv_allocated_len = fill_len
         req.kv_committed_len = fill_len
+
         if self.token_to_kv_pool_allocator.page_size == 1:
-            kv_loc = self.token_to_kv_pool_allocator.alloc(fill_len)
+            kv_loc = self.token_to_kv_pool_allocator.alloc(new_tokens)
         else:
             device = self.token_to_kv_pool_allocator.device
+            last_loc_val = (
+                req.prefix_indices[-1].item() if prefix_len > 0 else -1
+            )
             kv_loc = self.token_to_kv_pool_allocator.alloc_extend(
-                prefix_lens=torch.tensor([0], dtype=torch.int64, device=device),
-                prefix_lens_cpu=torch.tensor([0], dtype=torch.int64),
-                seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
+                prefix_lens=torch.tensor(
+                    [prefix_len], dtype=torch.int64, device=device
+                ),
+                prefix_lens_cpu=torch.tensor([prefix_len], dtype=torch.int64),
+                seq_lens=torch.tensor(
+                    [fill_len], dtype=torch.int64, device=device
+                ),
                 seq_lens_cpu=torch.tensor([fill_len], dtype=torch.int64),
-                last_loc=torch.tensor([-1], dtype=torch.int64, device=device),
-                extend_num_tokens=fill_len,
+                last_loc=torch.tensor(
+                    [last_loc_val], dtype=torch.int64, device=device
+                ),
+                extend_num_tokens=new_tokens,
             )
 
         assert (
             kv_loc is not None
         ), "KV cache is full! There is a bug in memory estimation."
 
-        self.req_to_token_pool.write((req.req_pool_idx, slice(0, len(kv_loc))), kv_loc)
+        if prefix_len > 0:
+            self.req_to_token_pool.write(
+                (req.req_pool_idx, slice(0, prefix_len)),
+                req.prefix_indices.to(torch.int32),
+            )
+            self.req_to_token_pool.write(
+                (req.req_pool_idx, slice(prefix_len, prefix_len + len(kv_loc))),
+                kv_loc,
+            )
+        else:
+            self.req_to_token_pool.write(
+                (req.req_pool_idx, slice(0, len(kv_loc))), kv_loc
+            )
 
         # populate metadata
         req.fill_ids = req.origin_input_ids + req.output_ids
-        req.set_extend_input_len(len(req.fill_ids))
+        req.set_extend_input_len(len(req.fill_ids) - prefix_len)
 
         return kv_loc
 
@@ -1134,7 +1208,9 @@ class SchedulerDisaggregationDecodeMixin:
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt()
+        self.token_to_kv_pool_allocator.free_group_begin()
         new_batch.process_prebuilt(self.server_args, self.future_map)
+        self.token_to_kv_pool_allocator.free_group_end()
 
         return new_batch
 
