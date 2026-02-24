@@ -32,7 +32,6 @@ if is_npu():
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.layers import deep_gemm_wrapper
 from sglang.srt.layers.attention.nsa.utils import (
-    cp_all_gather_rerange_output,
     is_nsa_prefill_cp_in_seq_split,
     rotate_activation,
 )
@@ -750,7 +749,9 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
             weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         else:
             query, key = self._get_q_k_bf16(q_lora, x, positions, enable_dual_stream)
-            key = self.cp_allgather_and_rerange_keys(key, forward_batch)
+            key = self.cp_allgather_and_rerange_keys(
+                key, forward_batch, torch.cuda.current_stream()
+            )
 
             if enable_dual_stream:
                 current_stream = torch.cuda.current_stream()
@@ -980,14 +981,9 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
         )  # [bs, 1, d]
         k = torch.cat([k_pe, k_nope.unsqueeze(1)], dim=-1)  # [bs, 1, 128]
 
-        if (
-            is_prefill
-            and self.nsa_enable_prefill_cp
-            and forward_batch.nsa_cp_metadata is not None
-        ):
-            k = cp_all_gather_rerange_output(
+        if is_prefill:
+            k = self.cp_allgather_and_rerange_keys(
                 k.contiguous().view(-1, self.head_dim),
-                self.cp_size,
                 forward_batch,
                 torch.npu.current_stream(),
             )

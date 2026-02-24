@@ -44,15 +44,15 @@ class IndexerContextParallelMixin:
             self.cp_rank = None
 
     def cp_allgather_and_rerange_keys(
-        self, key: torch.Tensor, forward_batch: ForwardBatch
+        self, key: torch.Tensor, forward_batch: ForwardBatch, stream
     ):
-        # allgather+rerange
+        # allgather+rerange when enabling cp
         if forward_batch.nsa_cp_metadata is not None and self.nsa_enable_prefill_cp:
             key = cp_all_gather_rerange_output(
                 key.contiguous(),
                 self.cp_size,
                 forward_batch,
-                torch.cuda.current_stream(),
+                stream,
             )
         return key
 
