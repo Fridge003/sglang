@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -12,6 +12,7 @@ from sglang.srt.layers.attention.nsa.nsa_indexer_metadata import BaseIndexerMeta
 from sglang.srt.layers.attention.nsa.utils import (
     cp_all_gather_rerange_output,
     is_nsa_enable_prefill_cp,
+    is_nsa_prefill_cp_in_seq_split,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import is_cuda, is_npu
@@ -56,7 +57,7 @@ class IndexerContextParallelMixin:
             )
         return key
 
-    def _get_topk_ragged_with_cp(
+    def _get_topk_ragged_with_cp_core(
         self,
         forward_batch: ForwardBatch,
         layer_id: int,
@@ -65,7 +66,6 @@ class IndexerContextParallelMixin:
         metadata: BaseIndexerMetadata,
         kv_len: int,
         actual_seq_q: int,
-        cp_index: List[Tuple[int, int, int]] = None,
     ) -> torch.Tensor:
         if TYPE_CHECKING:
             assert isinstance(forward_batch.token_to_kv_pool, NSATokenToKVPool)
@@ -88,122 +88,103 @@ class IndexerContextParallelMixin:
             forward_batch.seq_lens_cpu is not None
             and forward_batch.extend_seq_lens_cpu is not None
         )
-        if cp_index is not None:
-            # TODO Multi-batch support has accuracy issues
-            for batch_idx, start_seq_position, end_seq_position in cp_index:
-                pre_chunk_offset = (
-                    forward_batch.seq_lens_cpu[batch_idx].item()
-                    - forward_batch.extend_seq_lens_cpu[batch_idx]
-                )
-                start_seq_position += pre_chunk_offset
-                end_seq_position += pre_chunk_offset
-                if offset == 0 and batch_idx != 0:
-                    offset += forward_batch.extend_seq_lens_cpu[batch_idx - 1]
-                k_fp8 = forward_batch.token_to_kv_pool.get_index_k_continuous(
-                    layer_id,
-                    end_seq_position,
-                    block_tables[batch_idx],
-                )
-                k_scale = forward_batch.token_to_kv_pool.get_index_k_scale_continuous(
-                    layer_id,
-                    end_seq_position,
-                    block_tables[batch_idx],
-                )
+        kv_len = (
+            forward_batch.seq_lens_cpu[0].item()
+            - forward_batch.extend_seq_lens_cpu[0]
+            + kv_len
+        )
+        k_fp8 = forward_batch.token_to_kv_pool.get_index_k_continuous(
+            layer_id,
+            kv_len,
+            block_tables[0],
+        )
+        k_scale = forward_batch.token_to_kv_pool.get_index_k_scale_continuous(
+            layer_id,
+            kv_len,
+            block_tables[0],
+        )
 
-                extend_seq_len = end_seq_position - start_seq_position
-                ks = torch.full(
-                    (extend_seq_len,), offset, dtype=torch.int32, device="cuda"
-                )
-                k_fp8_list.append(k_fp8)
-                k_scale_list.append(k_scale)
-                ks_list.append(ks)
-                ke_offset = torch.arange(
-                    start_seq_position + 1,
-                    end_seq_position + 1,
-                    dtype=torch.int32,
-                    device="cuda",
-                )
-                ke_offset_list.append(ke_offset)
-                actual_seq_q = torch.tensor(
-                    [extend_seq_len], dtype=torch.int32, device="cuda"
-                )
-                actual_seq_q_list.append(actual_seq_q)
-                batch_idx_list.append(batch_idx)
+        k_fp8 = k_fp8.view(torch.float8_e4m3fn)
+        k_scale = k_scale.view(torch.float32).squeeze(-1)
+        kv_fp8 = (k_fp8, k_scale)
+        ks = torch.full((actual_seq_q,), offset, dtype=torch.int32, device="cuda")
+        ke_offset = torch.arange(
+            (kv_len - actual_seq_q) + 1,
+            kv_len + 1,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        ke = ks + ke_offset
 
-            k_fp8 = torch.cat(k_fp8_list, dim=0).view(torch.float8_e4m3fn)
-            k_scale = torch.cat(k_scale_list, dim=0).view(torch.float32).squeeze(-1)
-            kv_fp8 = (k_fp8, k_scale)
-            ks = torch.cat(ks_list, dim=0)
-            ke_offset = torch.cat(ke_offset_list, dim=0)
-            ke = ks + ke_offset
-            actual_seq_q = torch.cat(actual_seq_q_list, dim=0)
-            with self._with_real_sm_count():
-                logits = deep_gemm.fp8_mqa_logits(
-                    q_fp8,
-                    kv_fp8,
-                    weights,
-                    ks,
-                    ke,
-                    clean_logits=False,
-                )
-            topk_result = metadata.topk_transform(
-                logits,
-                self.index_topk,
-                ks=ks,
-                cu_seqlens_q=actual_seq_q,
-                ke_offset=ke_offset,
-                batch_idx_list=batch_idx_list,
+        with self._with_real_sm_count():
+            logits = deep_gemm.fp8_mqa_logits(
+                q_fp8,
+                kv_fp8,
+                weights,
+                ks,
+                ke,
+                clean_logits=False,
             )
-        else:
-            kv_len = (
-                forward_batch.seq_lens_cpu[0].item()
-                - forward_batch.extend_seq_lens_cpu[0]
-                + kv_len
-            )
-            k_fp8 = forward_batch.token_to_kv_pool.get_index_k_continuous(
-                layer_id,
-                kv_len,
-                block_tables[0],
-            )
-            k_scale = forward_batch.token_to_kv_pool.get_index_k_scale_continuous(
-                layer_id,
-                kv_len,
-                block_tables[0],
-            )
-
-            k_fp8 = k_fp8.view(torch.float8_e4m3fn)
-            k_scale = k_scale.view(torch.float32).squeeze(-1)
-            kv_fp8 = (k_fp8, k_scale)
-            ks = torch.full((actual_seq_q,), offset, dtype=torch.int32, device="cuda")
-            ke_offset = torch.arange(
-                (kv_len - actual_seq_q) + 1,
-                kv_len + 1,
-                dtype=torch.int32,
-                device="cuda",
-            )
-            ke = ks + ke_offset
-
-            with self._with_real_sm_count():
-                logits = deep_gemm.fp8_mqa_logits(
-                    q_fp8,
-                    kv_fp8,
-                    weights,
-                    ks,
-                    ke,
-                    clean_logits=False,
-                )
-            actual_seq_q = torch.tensor([actual_seq_q], dtype=torch.int32).to(
-                device="cuda", non_blocking=True
-            )
-            topk_result = metadata.topk_transform(
-                logits,
-                self.index_topk,
-                ks=ks,
-                cu_seqlens_q=actual_seq_q,
-                ke_offset=ke_offset,
-            )
+        actual_seq_q = torch.tensor([actual_seq_q], dtype=torch.int32).to(
+            device="cuda", non_blocking=True
+        )
+        topk_result = metadata.topk_transform(
+            logits,
+            self.index_topk,
+            ks=ks,
+            cu_seqlens_q=actual_seq_q,
+            ke_offset=ke_offset,
+        )
 
         return topk_result
+
+    def get_topk_ragged_with_cp_in_seq_split(
+        self,
+        forward_batch: ForwardBatch,
+        layer_id: int,
+        q_fp8: torch.Tensor,
+        weights: torch.Tensor,
+        metadata: BaseIndexerMetadata,
+    ):
+        if not (
+            forward_batch.nsa_cp_metadata is not None
+            and is_nsa_prefill_cp_in_seq_split()
+        ):
+            return None
+
+        kv_len_prev = forward_batch.nsa_cp_metadata.kv_len_prev
+        kv_len_next = forward_batch.nsa_cp_metadata.kv_len_next
+        actual_seq_q_prev = forward_batch.nsa_cp_metadata.actual_seq_q_prev
+        actual_seq_q_next = forward_batch.nsa_cp_metadata.actual_seq_q_next
+
+        # TODO support mutil-batch
+        # cp_batch_seq_index_prev = forward_batch.nsa_cp_metadata["cp_batch_seq_index_prev"]
+        # cp_batch_seq_index_next = forward_batch.nsa_cp_metadata["cp_batch_seq_index_next"]
+        # TODO prev, next, combined into a single call
+        q_fp8_prev, q_fp8_next = torch.split(q_fp8, (q_fp8.shape[0] + 1) // 2, dim=0)
+        weights_prev, weights_next = torch.split(
+            weights, (weights.shape[0] + 1) // 2, dim=0
+        )
+        topk_result_prev = self._get_topk_ragged_with_cp_core(
+            forward_batch,
+            layer_id,
+            q_fp8_prev,
+            weights_prev,
+            metadata,
+            kv_len_prev,
+            actual_seq_q_prev,
+        )
+
+        topk_result_next = self._get_topk_ragged_with_cp_core(
+            forward_batch,
+            layer_id,
+            q_fp8_next,
+            weights_next,
+            metadata,
+            kv_len_next,
+            actual_seq_q_next,
+        )
+        return torch.cat([topk_result_prev, topk_result_next], dim=0)
 
     def do_npu_cp_balance_indexer(
         self,

@@ -31,10 +31,7 @@ if is_npu():
 
 from sglang.srt.distributed.parallel_state import get_pp_group
 from sglang.srt.layers import deep_gemm_wrapper
-from sglang.srt.layers.attention.nsa.utils import (
-    is_nsa_prefill_cp_in_seq_split,
-    rotate_activation,
-)
+from sglang.srt.layers.attention.nsa.utils import rotate_activation
 from sglang.srt.layers.linear import ReplicatedLinear
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.rotary_embedding import get_rope_wrapper
@@ -752,46 +749,11 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
                 forward_batch, layer_id, q_fp8, weights, metadata
             )
         else:
-            if (
-                forward_batch.nsa_cp_metadata is not None
-                and is_nsa_prefill_cp_in_seq_split()
-            ):
-                kv_len_prev = forward_batch.nsa_cp_metadata.kv_len_prev
-                kv_len_next = forward_batch.nsa_cp_metadata.kv_len_next
-                actual_seq_q_prev = forward_batch.nsa_cp_metadata.actual_seq_q_prev
-                actual_seq_q_next = forward_batch.nsa_cp_metadata.actual_seq_q_next
-
-                # TODO support mutil-batch
-                # cp_batch_seq_index_prev = forward_batch.nsa_cp_metadata["cp_batch_seq_index_prev"]
-                # cp_batch_seq_index_next = forward_batch.nsa_cp_metadata["cp_batch_seq_index_next"]
-                # TODO prev, next, combined into a single call
-                q_fp8_prev, q_fp8_next = torch.split(
-                    q_fp8, (q_fp8.shape[0] + 1) // 2, dim=0
-                )
-                weights_prev, weights_next = torch.split(
-                    weights, (weights.shape[0] + 1) // 2, dim=0
-                )
-                topk_result_prev = self._get_topk_ragged_with_cp(
-                    forward_batch,
-                    layer_id,
-                    q_fp8_prev,
-                    weights_prev,
-                    metadata,
-                    kv_len_prev,
-                    actual_seq_q_prev,
-                )
-
-                topk_result_next = self._get_topk_ragged_with_cp(
-                    forward_batch,
-                    layer_id,
-                    q_fp8_next,
-                    weights_next,
-                    metadata,
-                    kv_len_next,
-                    actual_seq_q_next,
-                )
-                return torch.cat([topk_result_prev, topk_result_next], dim=0)
-            else:
+            topk_result = self.get_topk_ragged_with_cp_in_seq_split(
+                forward_batch, layer_id, q_fp8, weights, metadata
+            )
+            if topk_result is None:
+                # Applying normal topk ragged method when not enabling CP
                 topk_result = self._get_topk_ragged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
