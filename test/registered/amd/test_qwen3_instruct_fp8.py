@@ -68,7 +68,7 @@ class TestQwen3Instruct2507FP8(CustomTestCase):
 
         if is_in_ci():
             write_github_step_summary(
-                f"### test_gsm8k (self.model)\n" '{metrics["accuracy"]=:.3f}\n'
+                f"### test_gsm8k ({self.model})\n" f'{metrics["accuracy"]=:.3f}\n'
             )
             self.assertGreater(metrics["accuracy"], 0.95)
 
@@ -79,7 +79,9 @@ class TestQwen3Instruct2507FP8(CustomTestCase):
         print(f"{speed=:.2f}")
 
         if is_in_ci():
-            write_github_step_summary(f"### test_bs_1_speed (self.model)\n")
+            write_github_step_summary(
+                f"### test_bs_1_speed ({self.model})\n" f"{speed=:.2f} token/s\n"
+            )
             if is_in_amd_ci():
                 self.assertGreater(speed, 40)
             else:
