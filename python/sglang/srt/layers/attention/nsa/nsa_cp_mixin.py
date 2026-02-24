@@ -10,6 +10,7 @@ from sglang.srt.distributed import (
 )
 from sglang.srt.layers.attention.nsa.nsa_indexer_metadata import BaseIndexerMetadata
 from sglang.srt.layers.attention.nsa.utils import (
+    cp_all_gather_rerange_output,
     is_nsa_enable_prefill_cp,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
@@ -41,6 +42,19 @@ class IndexerContextParallelMixin:
         else:
             self.cp_size = None
             self.cp_rank = None
+
+    def cp_allgather_and_rerange_keys(
+        self, key: torch.Tensor, forward_batch: ForwardBatch
+    ):
+        # allgather+rerange
+        if forward_batch.nsa_cp_metadata is not None and self.nsa_enable_prefill_cp:
+            key = cp_all_gather_rerange_output(
+                key.contiguous(),
+                self.cp_size,
+                forward_batch,
+                torch.cuda.current_stream(),
+            )
+        return key
 
     def _get_topk_ragged_with_cp(
         self,

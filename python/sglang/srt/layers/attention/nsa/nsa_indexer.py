@@ -79,6 +79,7 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
         self.q_lora_rank = q_lora_rank
         self.layer_id = layer_id
         self.alt_stream = alt_stream
+        self.init_cp()
         if _is_cuda:
             self.sm_count = deep_gemm.get_num_sms()
             self.half_device_sm_count = ceil_align(self.sm_count // 2, 8)
@@ -173,7 +174,6 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
         x: torch.Tensor,
         positions: torch.Tensor,
         enable_dual_stream: bool,
-        forward_batch: ForwardBatch,
     ):
         if enable_dual_stream:
             current_stream = torch.cuda.current_stream()
@@ -230,21 +230,12 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
             query = rotate_activation(query)
             key = rotate_activation(key)
 
-        # allgather+rerrange
-        if forward_batch.nsa_cp_metadata is not None and self.nsa_enable_prefill_cp:
-            key = cp_all_gather_rerange_output(
-                key.contiguous(),
-                self.cp_size,
-                forward_batch,
-                torch.cuda.current_stream(),
-            )
         return query, key
 
     def _get_k_bf16(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
-        enable_dual_stream: bool,
     ):
         # Compute only key, skip query
         key, _ = self.wk(x)
@@ -578,7 +569,7 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
         x_meta = x[0] if isinstance(x, tuple) else x
 
         # Fast path: only compute and store k cache, skip all q and weights ops
-        key = self._get_k_bf16(x, positions, enable_dual_stream)
+        key = self._get_k_bf16(x, positions)
         k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
 
         if not forward_batch.out_cache_loc.is_contiguous():
@@ -758,9 +749,8 @@ class Indexer(MultiPlatformOp, IndexerContextParallelMixin):
             current_stream.wait_stream(self.alt_stream)
             weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         else:
-            query, key = self._get_q_k_bf16(
-                q_lora, x, positions, enable_dual_stream, forward_batch=forward_batch
-            )
+            query, key = self._get_q_k_bf16(q_lora, x, positions, enable_dual_stream)
+            key = self.cp_allgather_and_rerange_keys(key, forward_batch)
 
             if enable_dual_stream:
                 current_stream = torch.cuda.current_stream()
