@@ -888,13 +888,20 @@ class HiRadixCache(RadixCache):
                 continue
 
             if self._is_pinned(x):
-                # Still active: backup to host, don't evict from tree
-                if not x.backuped:
-                    num_evicted += self.write_backup(x, write_back=True)
-                    write_back_nodes.append(x)
-                else:
+                # Still active: demote to host if possible
+                if x.backuped:
                     num_evicted += self._evict_backuped(x)
-                continue  # skip tree removal
+                    continue
+                written = self.write_backup(x, write_back=True)
+                if written > 0:
+                    write_back_nodes.append(x)
+                    continue  # backup succeeded, pin holds on host
+                # Host full -- drop pin so GPU can be freed
+                self._clear_pin(x)
+                logger.warning(
+                    "[PIN] evict: can't backup node %d to host, releasing pin",
+                    x.id,
+                )
             elif x.pin_expiry > 0:
                 # Expired pin: clear and fall through to normal eviction
                 self._clear_pin(x)
