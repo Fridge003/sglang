@@ -20,6 +20,7 @@ __pycache__/
 **/sdist/
 **/var/
 **/wheels/
+!docker/wheels/
 **/share/python-wheels/
 *.egg-info/
 .installed.cfg
