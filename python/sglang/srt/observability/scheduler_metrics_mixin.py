@@ -25,7 +25,6 @@ from sglang.srt.managers.scheduler import ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.observability.metrics_collector import (
     DPCooperationInfo,
-    HiCacheMetricsCollector,
     SchedulerMetricsCollector,
     SchedulerStats,
     compute_routing_key_stats,
@@ -126,6 +125,7 @@ class SchedulerMetricsMixin:
             self.metrics_collector = SchedulerMetricsCollector(
                 labels=labels,
                 enable_lora=self.enable_lora,
+                enable_hierarchical_cache=self.enable_hierarchical_cache,
                 server_args=self.server_args,
             )
 
@@ -298,9 +298,9 @@ class SchedulerMetricsMixin:
             # Others
             self.calculate_utilization()
             self.update_lora_metrics()
+            self._log_hicache_stats()
             self.metrics_collector.log_stats(self.stats)
             self._emit_kv_metrics()
-        self._log_hicache_stats()
         self._publish_kv_events()
 
     def log_decode_stats(
@@ -471,9 +471,9 @@ class SchedulerMetricsMixin:
             # Others
             self.calculate_utilization()
             self.update_lora_metrics()
+            self._log_hicache_stats()
             self.metrics_collector.log_stats(self.stats)
             self._emit_kv_metrics()
-        self._log_hicache_stats()
         self._publish_kv_events()
 
     def log_decode_stats_every_iteration(
@@ -534,32 +534,18 @@ class SchedulerMetricsMixin:
             self.kv_event_publisher.publish(batch)
 
     def _log_hicache_stats(self: Scheduler):
-        """Push HiCache host-tier and PIN metrics to Prometheus.
+        """Populate HiCache host-tier stats on self.stats.
 
-        Lazy-init: on first call, detect whether tree_cache is HiRadixCache.
-        If not, set a sentinel so subsequent calls are a no-op.
+        These are pushed to Prometheus by SchedulerMetricsCollector.log_stats().
         """
-        if not self.enable_metrics:
-            return
-
-        if not hasattr(self, "_hicache_metrics_collector"):
-            from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
-
-            if isinstance(self.tree_cache, HiRadixCache):
-                self._hicache_metrics_collector = HiCacheMetricsCollector(
-                    labels=self.metrics_collector.labels,
-                )
-            else:
-                self._hicache_metrics_collector = None
-
-        collector = self._hicache_metrics_collector
-        if collector is None:
+        if not self.enable_hierarchical_cache:
             return
 
         host_pool = self.tree_cache.token_to_kv_pool_host
-        host_used = host_pool.size - host_pool.available_size()
-        host_total = host_pool.size
-        collector.update(host_used, host_total)
+        self.stats.hicache_host_used_tokens = (
+            host_pool.size - host_pool.available_size()
+        )
+        self.stats.hicache_host_total_tokens = host_pool.size
 
     def update_lora_metrics(self: Scheduler):
         """Update LoRA pool metrics for monitoring and autoscaling."""
