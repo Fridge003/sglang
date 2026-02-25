@@ -899,10 +899,6 @@ class HiRadixCache(RadixCache):
             elif x.pin_expiry > 0:
                 # Expired pin: clear and fall through to normal eviction
                 self._clear_pin(x)
-                logger.debug(
-                    "[PIN] evict: pin expired on node %d, allowing eviction",
-                    x.id,
-                )
 
             if not x.backuped:
                 if self.cache_controller.write_policy == "write_back":
@@ -1015,17 +1011,6 @@ class HiRadixCache(RadixCache):
         else:
             ancester_node = node
 
-        total_host_tokens = sum(len(n.host_value) for n in nodes_to_load)
-        logger.debug(
-            "load_back: node_id=%d, nodes_to_load=%d, "
-            "total_host_tokens=%d, mem_quota=%s, evictable_size=%d",
-            last_hit_node.id,
-            len(nodes_to_load),
-            total_host_tokens,
-            mem_quota,
-            self.evictable_size_,
-        )
-
         # protect the ancestor nodes from eviction
         delta = self.inc_lock_ref(ancester_node)
 
@@ -1042,16 +1027,7 @@ class HiRadixCache(RadixCache):
             host_indices=host_indices, node_id=last_hit_node.id
         )
         if device_indices is None:
-            logger.debug(
-                "load_back: first load failed, evicting %d tokens (evictable_size=%d)",
-                len(host_indices),
-                self.evictable_size_,
-            )
-            evict_result = self.evict(EvictParams(num_tokens=len(host_indices)))
-            logger.debug(
-                "load_back: evicted %d tokens, retrying load",
-                evict_result.num_tokens_evicted,
-            )
+            self.evict(EvictParams(num_tokens=len(host_indices)))
             device_indices = self.cache_controller.load(
                 host_indices=host_indices, node_id=last_hit_node.id
             )
@@ -1093,9 +1069,6 @@ class HiRadixCache(RadixCache):
         if last_node.evicted:
             loading_values = self.load_back(last_node, mem_quota)
             if loading_values is not None:
-                logger.debug(
-                    f"loading back {len(loading_values)} tokens for node {last_node.id}"
-                )
                 return loading_values, last_node
 
             while last_node.evicted:
@@ -1309,17 +1282,6 @@ class HiRadixCache(RadixCache):
             last_node = last_node.parent
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
-
-        if host_hit_length > 0 or len(value) > 0:
-            logger.debug(
-                "match_prefix: device_tokens=%d, host_hit_length=%d, "
-                "key_len=%d, last_device_node=%d, last_host_node=%d",
-                len(value),
-                host_hit_length,
-                page_aligned_len,
-                last_node.id,
-                last_host_node.id,
-            )
 
         return MatchResult(
             device_indices=value,
