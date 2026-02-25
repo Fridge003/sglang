@@ -261,7 +261,7 @@ def handle_rerun_stage(
         "stage-c-test-8-gpu-h200",
         "stage-c-test-8-gpu-h20",
         "stage-c-test-4-gpu-b200",
-        "stage-c-test-4-gpu-gb200",
+        # "stage-c-test-4-gpu-gb200",  # Temporarily disabled — no GB200 runner
         "stage-c-test-deepep-4-gpu",
         "stage-c-test-deepep-8-gpu-h200",
         "multimodal-gen-test-1-gpu",
