@@ -60,6 +60,9 @@ jobs:
         with:
           ref: ${{ inputs.pr_number && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
 
+      - name: Ensure sgl-kernel-whl directory exists
+        run: mkdir -p docker/sgl-kernel-whl/
+
       - name: Download sgl-kernel wheel from artifacts
         if: ${{ matrix.kernel_artifact }}
         uses: actions/download-artifact@v4
