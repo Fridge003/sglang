@@ -1129,22 +1129,25 @@ class SGLangFailuresAnalyzer:
             # on a previous attempt (avoids false positives from "rerun all jobs")
             if potential_flaky_jobs:
                 all_attempt_jobs = self.get_jobs_for_run(run_id, filter="all")
-                # Build set of job names that failed on an earlier attempt
-                failed_on_earlier_attempt = set()
+                # Build map: job_name -> set of (attempt, conclusion) pairs
+                job_attempt_results: Dict[str, List[Tuple[int, str]]] = defaultdict(
+                    list
+                )
                 for aj in all_attempt_jobs:
-                    aj_name = aj.get("name", "")
-                    aj_attempt = aj.get("run_attempt", 1)
-                    aj_conclusion = aj.get("conclusion")
-                    # If this job failed on an earlier attempt, mark it
-                    if (
-                        aj_attempt < run.get("run_attempt", 1)
-                        and aj_conclusion == "failure"
-                    ):
-                        failed_on_earlier_attempt.add(aj_name)
+                    job_attempt_results[aj.get("name", "")].append(
+                        (aj.get("run_attempt", 1), aj.get("conclusion", ""))
+                    )
 
                 # Only count truly flaky jobs (ones that actually failed before)
                 for pf in potential_flaky_jobs:
-                    if pf["job_name"] in failed_on_earlier_attempt:
+                    pf_attempt = pf["run_attempt"]
+                    attempts = job_attempt_results.get(pf["job_name"], [])
+                    # Check if any earlier attempt for this job was a failure
+                    had_earlier_failure = any(
+                        attempt < pf_attempt and conclusion == "failure"
+                        for attempt, conclusion in attempts
+                    )
+                    if had_earlier_failure:
                         job_flaky_count[pf["job_name"]] += 1
                         job_flaky_runs[pf["job_name"]].append(pf)
 
@@ -1441,9 +1444,10 @@ class SGLangFailuresAnalyzer:
             1 for d in nightly_scheduled_combined.values() if d["current_streak"] >= 2
         )
 
-        # Aggregate flaky jobs from scheduled data
-        # Map workflow data variable names to (hardware, test_type)
-        scheduled_workflow_map = [
+        # Aggregate flaky jobs from scheduled + general Nvidia data
+        # General Nvidia runs have higher volume, good for flaky detection
+        flaky_workflow_map = [
+            # Scheduled runs (all hardware)
             (pr_test_nvidia_scheduled_data, "Nvidia", "PR Test"),
             (pr_test_amd_scheduled_data, "AMD", "PR Test"),
             (pr_test_xeon_scheduled_data, "Intel", "PR Test"),
@@ -1453,6 +1457,9 @@ class SGLangFailuresAnalyzer:
             (nightly_amd_scheduled_data, "AMD", "Nightly"),
             (nightly_intel_scheduled_data, "Intel", "Nightly"),
             (nightly_npu_scheduled_data, "NPU", "Nightly"),
+            # General Nvidia runs
+            (pr_test_nvidia_general_data, "Nvidia", "PR Test"),
+            (nightly_nvidia_general_data, "Nvidia", "Nightly"),
         ]
         # Only include flaky runs from the past 24 hours
         from datetime import timedelta, timezone
@@ -1460,7 +1467,7 @@ class SGLangFailuresAnalyzer:
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
 
         flaky_jobs = {}
-        for workflow_data, hardware, test_type in scheduled_workflow_map:
+        for workflow_data, hardware, test_type in flaky_workflow_map:
             for job_name, job_data in workflow_data.items():
                 all_flaky_runs = job_data.get("flaky_runs", [])
                 # Filter to only flaky runs within the past 24 hours
@@ -1478,15 +1485,31 @@ class SGLangFailuresAnalyzer:
                             pass
 
                 if recent_flaky_runs:
-                    flaky_jobs[f"{hardware}/{test_type}/{job_name}"] = {
-                        "job_name": job_name,
-                        "hardware": hardware,
-                        "test_type": test_type,
-                        "flaky_count": len(recent_flaky_runs),
-                        "total_runs": job_data.get("total_runs", 0),
-                        "flaky_rate": job_data.get("flaky_rate", 0),
-                        "recent_flaky_runs": recent_flaky_runs,
-                    }
+                    key = f"{hardware}/{test_type}/{job_name}"
+                    if key in flaky_jobs:
+                        # Merge runs from general data into scheduled data
+                        # Deduplicate by run_number to avoid double-counting
+                        existing_run_nums = {
+                            r.get("run_number")
+                            for r in flaky_jobs[key]["recent_flaky_runs"]
+                        }
+                        for fr in recent_flaky_runs:
+                            if fr.get("run_number") not in existing_run_nums:
+                                flaky_jobs[key]["recent_flaky_runs"].append(fr)
+                        flaky_jobs[key]["flaky_count"] = len(
+                            flaky_jobs[key]["recent_flaky_runs"]
+                        )
+                        flaky_jobs[key]["total_runs"] += job_data.get("total_runs", 0)
+                    else:
+                        flaky_jobs[key] = {
+                            "job_name": job_name,
+                            "hardware": hardware,
+                            "test_type": test_type,
+                            "flaky_count": len(recent_flaky_runs),
+                            "total_runs": job_data.get("total_runs", 0),
+                            "flaky_rate": job_data.get("flaky_rate", 0),
+                            "recent_flaky_runs": recent_flaky_runs,
+                        }
 
         report_data = {
             "summary": {
