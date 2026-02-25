@@ -885,7 +885,12 @@ class ServerArgs:
 
     def _handle_npu_backends(self):
         if self.device == "npu":
-            from sglang.srt.hardware_backend.npu.utils import set_default_server_args
+            from sglang.srt.hardware_backend.npu.utils import (
+                init_npu_backend,
+                set_default_server_args,
+            )
+
+            init_npu_backend()
 
             set_default_server_args(self)
 
@@ -2551,6 +2556,9 @@ class ServerArgs:
             logger.warning("KV cache is forced as chunk cache for decode server")
 
         elif self.disaggregation_mode == "prefill":
+            assert (
+                self.disaggregation_transfer_backend != "fake"
+            ), "Prefill server does not support 'fake' as the transfer backend"
             if self.disaggregation_decode_tp is None:
                 self.disaggregation_decode_tp = self.tp_size
             if self.disaggregation_decode_dp is None:
@@ -3859,7 +3867,15 @@ class ServerArgs:
         parser.add_argument(
             "--mm-attention-backend",
             type=str,
-            choices=["sdpa", "fa3", "fa4", "triton_attn", "ascend_attn", "aiter_attn"],
+            choices=[
+                "sdpa",
+                "fa3",
+                "fa4",
+                "triton_attn",
+                "ascend_attn",
+                "aiter_attn",
+                "flashinfer_cudnn",
+            ],
             default=ServerArgs.mm_attention_backend,
             help="Set multimodal attention backend.",
         )
