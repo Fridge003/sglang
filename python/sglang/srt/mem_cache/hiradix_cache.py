@@ -930,9 +930,7 @@ class HiRadixCache(RadixCache):
         return EvictResult(num_tokens_evicted=num_evicted)
 
     def _evict_backuped(self, node: TreeNode):
-        # GPU -> CPU demotion: do NOT emit BlockRemoved.
-        # Block is still accessible via load_back. Router must continue
-        # routing to this worker for prefix overlap.
+        # GPU -> CPU demotion: no BlockRemoved since block is still reachable via load_back
         num_evicted = self.cache_controller.evict_device(node.value)
         assert num_evicted > 0
         self.evictable_size_ -= num_evicted
@@ -944,9 +942,7 @@ class HiRadixCache(RadixCache):
         return num_evicted
 
     def _evict_regular(self, node: TreeNode):
-        # evict a node not initiated write to host
-        # Block deleted entirely (no CPU copy) -- emit BlockRemoved
-        # so the router removes this block from its index.
+        # evict a node not initiated write to host -- emit BlockRemoved
         self._record_remove_event(node)
         self.cache_controller.mem_pool_device_allocator.free(node.value)
         num_evicted = len(node.value)
@@ -996,8 +992,6 @@ class HiRadixCache(RadixCache):
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
     ) -> Optional[torch.Tensor]:
-        # CPU -> GPU promotion: no event needed.
-        # Router already considers this block present on the worker.
 
         start_time = time.perf_counter()
         last_hit_node = node
@@ -1069,6 +1063,9 @@ class HiRadixCache(RadixCache):
         if last_node.evicted:
             loading_values = self.load_back(last_node, mem_quota)
             if loading_values is not None:
+                logger.debug(
+                    f"loading back {len(loading_values)} tokens for node {last_node.id}"
+                )
                 return loading_values, last_node
 
             while last_node.evicted:
