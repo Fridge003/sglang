@@ -731,42 +731,6 @@ class HiRadixCache(RadixCache):
     def evictable_size(self):
         return self.evictable_size_
 
-    ##### PIN / FLUSH #####
-
-    def flush(self) -> dict:
-        """Flush unpinned cache from GPU and CPU, preserving pinned blocks."""
-        logger.debug(
-            "flush: evictable_size=%d, protected_size=%d, "
-            "evictable_leaves=%d, evictable_host_leaves=%d",
-            self.evictable_size_,
-            self.protected_size_,
-            len(self.evictable_leaves),
-            len(self.evictable_host_leaves),
-        )
-
-        # Evict everything evictable from GPU
-        gpu_before = self.evictable_size_
-        if gpu_before > 0:
-            self.evict(EvictParams(num_tokens=gpu_before))
-        gpu_evicted = gpu_before - self.evictable_size_
-
-        # Evict everything evictable from host (pinned blocks are skipped)
-        host_before = len(self.evictable_host_leaves)
-        self.evict_host(sys.maxsize)
-        host_after = len(self.evictable_host_leaves)
-
-        logger.debug(
-            "flush: GPU evicted %d tokens, host leaves %d->%d",
-            gpu_evicted,
-            host_before,
-            host_after,
-        )
-        return {
-            "gpu_evicted": gpu_evicted,
-            "host_leaves_before": host_before,
-            "host_leaves_after": host_after,
-        }
-
     def _is_pinned(self, node: TreeNode) -> bool:
         """Check if a node has an active (non-expired) pin."""
         return node.pin_expiry > 0 and time.monotonic() <= node.pin_expiry
