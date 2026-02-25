@@ -2594,19 +2594,28 @@ class Scheduler(
                 nodes_pinned=0,
                 message="PIN requires --enable-hierarchical-cache",
             )
-        nodes_pinned = self.tree_cache.pin_prefix(
+        if getattr(self.tree_cache, "_max_pinned_tokens", 0) <= 0:
+            return PinPrefixReqOutput(
+                success=False,
+                nodes_pinned=0,
+                message="Pinning is disabled (SGLANG_HICACHE_MAX_PINNED_RATIO is 0)",
+            )
+        nodes_pinned, reject_reason = self.tree_cache.pin_prefix(
             recv_req.token_ids, recv_req.ttl_seconds
         )
         if nodes_pinned == 0:
             return PinPrefixReqOutput(
                 success=False,
                 nodes_pinned=0,
-                message="No matching prefix found in cache to pin",
+                message=reject_reason or "No matching prefix found in cache to pin",
             )
+        msg = f"Pinned {nodes_pinned} nodes (ttl={recv_req.ttl_seconds}s)"
+        if reject_reason:
+            msg += f"; {reject_reason}"
         return PinPrefixReqOutput(
             success=True,
             nodes_pinned=nodes_pinned,
-            message=f"Pinned {nodes_pinned} nodes (ttl={recv_req.ttl_seconds}s)",
+            message=msg,
         )
 
     def _is_no_request(self):
