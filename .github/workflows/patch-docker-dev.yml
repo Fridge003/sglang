@@ -35,7 +35,7 @@ jobs:
         run: |
           IMAGE="lmsysorg/sglang:${{ inputs.image_tag }}"
           docker pull "${IMAGE}"
-          if BASE_SHA=$(docker run --rm "${IMAGE}" git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null); then
+          if BASE_SHA=$(docker run --rm --entrypoint git "${IMAGE}" -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null); then
             echo "Image built from commit: ${BASE_SHA}"
           else
             BASE_SHA=""
