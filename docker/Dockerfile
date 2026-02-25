@@ -209,7 +209,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Install sgl-kernel (separate layer, no pip cache mount or --no-cache-dir to
 # ensure fresh wheel downloads — the BuildKit pip cache mount on other layers
 # can serve stale packages even when docker build --no-cache is used)
-COPY docker/wheels/ /tmp/sgl-kernel-wheels/
+COPY docker/sgl-kernel-whl/ /tmp/sgl-kernel-wheels/
 RUN if [ "$CUDA_VERSION" = "12.6.1" ]; then \
         python3 -m pip install --no-cache-dir https://${GITHUB_ARTIFACTORY}/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu124-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
