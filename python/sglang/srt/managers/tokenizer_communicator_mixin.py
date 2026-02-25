@@ -421,9 +421,9 @@ class TokenizerCommunicatorMixin:
             PinPrefixReqInput(token_ids=token_ids, ttl_seconds=ttl_seconds)
         )
         all_success, all_message = _Communicator.merge_results(results)
-        total = sum(r.pinned_count for r in results)
+        total = sum(r.nodes_pinned for r in results)
         return PinPrefixReqOutput(
-            success=all_success, pinned_count=total, message=all_message
+            success=all_success, nodes_pinned=total, message=all_message
         )
 
     async def start_profile(

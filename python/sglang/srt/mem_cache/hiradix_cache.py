@@ -772,6 +772,11 @@ class HiRadixCache(RadixCache):
         """Pin nodes along a prefix path by walking the tree via token_ids."""
         if self.disable or not token_ids:
             return 0
+        
+        # check the percentage of cache that is currently pinned
+        # for now we hardcode that only 50% of the cache can consist of pinned nodes
+        if self.protected_size_ > self.total_size_ * 0.5:
+            return 0
 
         key, _ = self.maybe_bigram_convert(self._to_radix_key(token_ids))
         if self.page_size != 1:
@@ -781,7 +786,7 @@ class HiRadixCache(RadixCache):
             return 0
 
         expiry = time.monotonic() + ttl_seconds
-        pinned = 0
+        nodes_pinned = 0
         node = self.root_node
         child_key = self.get_child_key_fn(key)
 
@@ -796,7 +801,7 @@ class HiRadixCache(RadixCache):
             # Extend expiry (never shorten), store TTL for refresh-on-hit
             child.pin_expiry = max(child.pin_expiry, expiry)
             child.pin_ttl = max(child.pin_ttl, ttl_seconds)
-            pinned += 1
+            nodes_pinned += 1
 
             if prefix_len < len(child.key):
                 break
@@ -807,9 +812,9 @@ class HiRadixCache(RadixCache):
                 child_key = self.get_child_key_fn(key)
 
         logger.info(
-            "[PIN] pin_prefix: pinned %d nodes, ttl=%ds", pinned, ttl_seconds
+            "[PIN] pin_prefix: nodes_pinned=%d, ttl=%ds", nodes_pinned, ttl_seconds
         )
-        return pinned
+        return nodes_pinned
 
     def _to_radix_key(self, token_ids: List[int]) -> RadixKey:
         """Convert raw token_ids to a RadixKey for tree walking.

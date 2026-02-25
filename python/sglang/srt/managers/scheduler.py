@@ -2591,20 +2591,22 @@ class Scheduler(
         if not hasattr(self.tree_cache, "pin_prefix"):
             return PinPrefixReqOutput(
                 success=False,
-                pinned_count=0,
+                nodes_pinned=0,
                 message="PIN requires --enable-hierarchical-cache",
             )
-        pinned = self.tree_cache.pin_prefix(recv_req.token_ids, recv_req.ttl_seconds)
-        if pinned == 0:
+        nodes_pinned = self.tree_cache.pin_prefix(
+            recv_req.token_ids, recv_req.ttl_seconds
+        )
+        if nodes_pinned == 0:
             return PinPrefixReqOutput(
                 success=False,
-                pinned_count=0,
+                nodes_pinned=0,
                 message="No matching prefix found in cache to pin",
             )
         return PinPrefixReqOutput(
             success=True,
-            pinned_count=pinned,
-            message=f"Pinned {pinned} nodes (ttl={recv_req.ttl_seconds}s)",
+            nodes_pinned=nodes_pinned,
+            message=f"Pinned {nodes_pinned} nodes (ttl={recv_req.ttl_seconds}s)",
         )
 
     def _is_no_request(self):

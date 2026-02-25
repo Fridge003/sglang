@@ -857,7 +857,7 @@ async def pin_prefix(obj: PinPrefixReqInput):
     return ORJSONResponse(
         content={
             "status": "ok" if ret.success else "error",
-            "pinned_count": ret.pinned_count,
+            "nodes_pinned": ret.nodes_pinned,
             "message": ret.message,
         },
         status_code=200 if ret.success else HTTPStatus.BAD_REQUEST,

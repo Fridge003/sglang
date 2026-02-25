@@ -1218,7 +1218,7 @@ class PinPrefixReqInput(BaseReq):
 @dataclass
 class PinPrefixReqOutput(BaseReq):
     success: bool
-    pinned_count: int = 0
+    nodes_pinned: int = 0
     message: str = ""
 
 
