@@ -102,12 +102,17 @@ class SGLangFailuresAnalyzer:
         print(f"Collected {len(all_runs)} total runs")
         return all_runs
 
-    def get_jobs_for_run(self, run_id: int) -> List[Dict]:
-        """Get all jobs for a specific workflow run, handling pagination."""
+    def get_jobs_for_run(self, run_id: int, filter: str = "latest") -> List[Dict]:
+        """Get all jobs for a specific workflow run, handling pagination.
+
+        Args:
+            run_id: The workflow run ID
+            filter: Job filter - "latest" (default) or "all" (all attempts)
+        """
         try:
             all_jobs = []
             url = f"{self.base_url}/repos/{self.repo}/actions/runs/{run_id}/jobs"
-            params = {"per_page": 100}  # Max per page
+            params = {"per_page": 100, "filter": filter}
 
             while url:
                 response = self.session.get(url, params=params, timeout=30)
@@ -1014,7 +1019,9 @@ class SGLangFailuresAnalyzer:
                 run_info["pr_number"] = pull_requests[0].get("number")
 
             # Get jobs for this run
-            jobs = self.get_jobs_for_run(run.get("id"))
+            run_id = run.get("id")
+            jobs = self.get_jobs_for_run(run_id)
+            potential_flaky_jobs = []
 
             for job in jobs:
                 job_name = job.get("name", "")
@@ -1073,11 +1080,11 @@ class SGLangFailuresAnalyzer:
                 # Track recent runs (last 5 for each job)
                 run_attempt = job.get("run_attempt", 1)
 
-                # Track flaky: passed on rerun (run_attempt > 1 means it failed earlier)
+                # Collect potential flaky candidates (verified below)
                 if run_attempt > 1 and conclusion == "success":
-                    job_flaky_count[job_name] += 1
-                    job_flaky_runs[job_name].append(
+                    potential_flaky_jobs.append(
                         {
+                            "job_name": job_name,
                             "run_number": run_info["run_number"],
                             "run_attempt": run_attempt,
                             "job_url": job.get("html_url", run_info["url"]),
@@ -1117,6 +1124,29 @@ class SGLangFailuresAnalyzer:
                         "run_attempt": run_attempt,
                     }
                 )
+
+            # Verify potential flaky jobs by checking if they actually failed
+            # on a previous attempt (avoids false positives from "rerun all jobs")
+            if potential_flaky_jobs:
+                all_attempt_jobs = self.get_jobs_for_run(run_id, filter="all")
+                # Build set of job names that failed on an earlier attempt
+                failed_on_earlier_attempt = set()
+                for aj in all_attempt_jobs:
+                    aj_name = aj.get("name", "")
+                    aj_attempt = aj.get("run_attempt", 1)
+                    aj_conclusion = aj.get("conclusion")
+                    # If this job failed on an earlier attempt, mark it
+                    if (
+                        aj_attempt < run.get("run_attempt", 1)
+                        and aj_conclusion == "failure"
+                    ):
+                        failed_on_earlier_attempt.add(aj_name)
+
+                # Only count truly flaky jobs (ones that actually failed before)
+                for pf in potential_flaky_jobs:
+                    if pf["job_name"] in failed_on_earlier_attempt:
+                        job_flaky_count[pf["job_name"]] += 1
+                        job_flaky_runs[pf["job_name"]].append(pf)
 
             time.sleep(0.05)
 
@@ -1424,19 +1454,38 @@ class SGLangFailuresAnalyzer:
             (nightly_intel_scheduled_data, "Intel", "Nightly"),
             (nightly_npu_scheduled_data, "NPU", "Nightly"),
         ]
+        # Only include flaky runs from the past 24 hours
+        from datetime import timedelta, timezone
+
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
+
         flaky_jobs = {}
         for workflow_data, hardware, test_type in scheduled_workflow_map:
             for job_name, job_data in workflow_data.items():
-                flaky_count = job_data.get("flaky_count", 0)
-                if flaky_count >= 1:
+                all_flaky_runs = job_data.get("flaky_runs", [])
+                # Filter to only flaky runs within the past 24 hours
+                recent_flaky_runs = []
+                for fr in all_flaky_runs:
+                    created_at = fr.get("created_at", "")
+                    if created_at:
+                        try:
+                            run_time = datetime.fromisoformat(
+                                created_at.replace("Z", "+00:00")
+                            )
+                            if run_time >= cutoff_time:
+                                recent_flaky_runs.append(fr)
+                        except (ValueError, TypeError):
+                            pass
+
+                if recent_flaky_runs:
                     flaky_jobs[f"{hardware}/{test_type}/{job_name}"] = {
                         "job_name": job_name,
                         "hardware": hardware,
                         "test_type": test_type,
-                        "flaky_count": flaky_count,
+                        "flaky_count": len(recent_flaky_runs),
                         "total_runs": job_data.get("total_runs", 0),
                         "flaky_rate": job_data.get("flaky_rate", 0),
-                        "recent_flaky_runs": job_data.get("flaky_runs", []),
+                        "recent_flaky_runs": recent_flaky_runs,
                     }
 
         report_data = {
