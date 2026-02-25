@@ -591,6 +591,7 @@ class HiRadixCache(RadixCache):
         # Clear per-request tracking dicts
         self.prefetch_loaded_tokens_by_reqid.clear()
         self.evictable_host_leaves.clear()
+        self.pinned_size_ = 0
         super().reset()
 
     def get_height(self, node: TreeNode):
@@ -1319,6 +1320,7 @@ class HiRadixCache(RadixCache):
                 host_hit_length=0,
             )
 
+        page_aligned_len = len(key)
         if self.page_size != 1:
             page_aligned_len = len(key) // self.page_size * self.page_size
             key = key[:page_aligned_len]
