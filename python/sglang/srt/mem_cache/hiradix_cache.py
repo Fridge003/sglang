@@ -917,6 +917,7 @@ class HiRadixCache(RadixCache):
                     continue
                 written = self.write_backup(x, write_back=True)
                 if written > 0:
+                    num_evicted += written
                     write_back_nodes.append(x)
                     continue  # backup succeeded, pin holds on host
                 # Host full -- drop pin so GPU can be freed
