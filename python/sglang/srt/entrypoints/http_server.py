@@ -855,7 +855,9 @@ async def pin_prefix(obj: PinPrefixReqInput):
     """Pin a prefix by token_ids to resist eviction."""
     if not _global_state.tokenizer_manager.server_args.admin_api_key:
         return _admin_api_key_missing_response()
-    ret = await _global_state.tokenizer_manager.pin_prefix(obj.token_ids, obj.ttl_seconds)
+    ret = await _global_state.tokenizer_manager.pin_prefix(
+        obj.token_ids, obj.ttl_seconds
+    )
     return ORJSONResponse(
         content={
             "status": "ok" if ret.success else "error",

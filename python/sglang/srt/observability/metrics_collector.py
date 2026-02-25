@@ -1487,5 +1487,3 @@ class RadixCacheMetricsCollector:
 
     def observe_load_back_duration(self, duration_seconds: float) -> None:
         self.load_back_duration_seconds.labels(**self.labels).observe(duration_seconds)
-
-

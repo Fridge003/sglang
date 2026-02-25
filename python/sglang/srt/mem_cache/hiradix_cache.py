@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import atexit
 import heapq
-import sys
 import json
 import logging
 import os
@@ -170,10 +169,14 @@ class HiRadixCache(RadixCache):
         # Pin budget: max tokens that can be pinned = ratio * host pool capacity.
         pin_ratio = envs.SGLANG_HICACHE_MAX_PINNED_RATIO.get()
         if pin_ratio < 0 or pin_ratio >= 1:
-            raise ValueError(f"SGLANG_HICACHE_MAX_PINNED_RATIO must be in [0, 1), got {pin_ratio}")
+            raise ValueError(
+                f"SGLANG_HICACHE_MAX_PINNED_RATIO must be in [0, 1), got {pin_ratio}"
+            )
         self._max_pinned_tokens = int(self.token_to_kv_pool_host.size * pin_ratio)
         self.pinned_size_ = 0
-        logger.info("Pin budget: %d tokens (ratio=%.3f)", self._max_pinned_tokens, pin_ratio)
+        logger.info(
+            "Pin budget: %d tokens (ratio=%.3f)", self._max_pinned_tokens, pin_ratio
+        )
 
         super().__init__(params=params)
 
