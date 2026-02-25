@@ -811,6 +811,12 @@ class HiRadixCache(RadixCache):
                 child.host_ref_counter += 1
                 self.pinned_size_ += len(child.key)
 
+                # Eagerly back up to host so eviction finds pinned nodes
+                # already backuped and never enters the write_back drain
+                # path, which would leak lock_ref on in-flight
+                # write-through entries. No-op under write_back policy.
+                self._inc_hit_count(child)
+
             # Extend expiry and store TTL for refresh-on-hit
             child.pin_expiry = max(child.pin_expiry, expiry)
             child.pin_ttl = max(child.pin_ttl, ttl_seconds)
@@ -954,7 +960,7 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
-        if write_back_nodes:
+        if self.cache_controller.write_policy == "write_back":
             self.writing_check(write_back=True)
             for node in write_back_nodes:
                 assert node.backuped
