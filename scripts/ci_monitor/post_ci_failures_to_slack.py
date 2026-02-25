@@ -153,33 +153,57 @@ def post_ci_failures_to_slack(report_file: str) -> bool:
                 f"https://github.com/sgl-project/sglang/actions/runs/{run_id}"
             )
 
-        if not hardware_jobs:
-            summary = "✅ No critical failures detected in scheduled runs"
+        # Collect flaky jobs from report data
+        flaky_jobs = report_data.get("flaky_jobs", {})
+        flaky_list = sorted(
+            flaky_jobs.values(),
+            key=lambda x: (x.get("flaky_count", 0), x.get("flaky_rate", 0)),
+            reverse=True,
+        )
+
+        if not hardware_jobs and not flaky_list:
+            summary = "✅ No critical failures or flaky jobs detected in scheduled runs"
             if workflow_url:
                 summary += f"\n<{workflow_url}|View CI Monitor Run>"
             color = "good"
         else:
             # Ping relevant people when there are failures
             mentions = "<@U09R55D8EAY> <@U09ABMCKQPM>"
-            summary_lines = [f"{mentions} 🚨 *CI Critical Failures (Scheduled Runs)*"]
+            summary_lines = []
 
-            # Iterate in hardware priority order, with PR Test before Nightly
-            test_type_order = ["PR Test", "Nightly"]
-            for hardware in hardware_order:
-                if hardware not in hardware_jobs:
-                    continue
-                summary_lines.append(f"\n*{hardware}:*")
-                for test_type in test_type_order:
-                    if test_type not in hardware_jobs[hardware]:
+            if hardware_jobs:
+                summary_lines.append(
+                    f"{mentions} 🚨 *CI Critical Failures (Scheduled Runs)*"
+                )
+
+                # Iterate in hardware priority order, with PR Test before Nightly
+                test_type_order = ["PR Test", "Nightly"]
+                for hardware in hardware_order:
+                    if hardware not in hardware_jobs:
                         continue
-                    jobs = hardware_jobs[hardware][test_type]
-                    job_list = ", ".join(jobs)
-                    summary_lines.append(f"  • {test_type}: {job_list}")
+                    summary_lines.append(f"\n*{hardware}:*")
+                    for test_type in test_type_order:
+                        if test_type not in hardware_jobs[hardware]:
+                            continue
+                        jobs = hardware_jobs[hardware][test_type]
+                        job_list = ", ".join(jobs)
+                        summary_lines.append(f"  • {test_type}: {job_list}")
+
+            if flaky_list:
+                if not hardware_jobs:
+                    summary_lines.append(mentions)
+                flaky_job_names = [fj["job_name"] for fj in flaky_list[:5]]
+                summary_lines.append(
+                    f"\n⚠️ *Flaky Jobs ({len(flaky_list)} jobs passed after rerun):* "
+                    + ", ".join(flaky_job_names)
+                )
+                if len(flaky_list) > 5:
+                    summary_lines.append(f"  ...and {len(flaky_list) - 5} more")
 
             if workflow_url:
                 summary_lines.append(f"\n<{workflow_url}|View Full CI Monitor Report>")
             summary = "\n".join(summary_lines)
-            color = "danger"
+            color = "danger" if hardware_jobs else "warning"
 
         # Post parent message
         response = client.chat_postMessage(
@@ -197,43 +221,77 @@ def post_ci_failures_to_slack(report_file: str) -> bool:
 
         thread_ts = response["ts"]
 
-        # If there are failures, post detailed breakdown in thread
-        if hardware_jobs:
-            details_lines = ["*Detailed Failure Breakdown*\n"]
+        # Post detailed breakdown in thread (failures + flaky together)
+        if hardware_jobs or flaky_list:
+            details_lines = []
 
-            # Sort critical_failures by hardware order, then test_order
-            hardware_order_map = {hw: i for i, hw in enumerate(hardware_order)}
-            sorted_failures = sorted(
-                critical_failures,
-                key=lambda x: (
-                    hardware_order_map.get(x.get("hardware", ""), 99),
-                    x.get("test_order", 99),
-                    x.get("job_name", ""),
-                ),
-            )
+            if hardware_jobs:
+                details_lines.append("*Detailed Failure Breakdown*\n")
 
-            current_hardware = None
-            for job in sorted_failures:
-                hardware = job.get("hardware", "Unknown")
-                test_type = job.get("test_type", "Unknown")
-                job_name = job.get("job_name", "unknown")
-                consecutive = job.get("consecutive_failures", 0)
-                first_url = job.get("first_failed_url", "")
-                first_at = job.get("first_failed_at", "unknown")
-                last_url = job.get("last_failed_url", "")
-                last_at = job.get("last_failed_at", "unknown")
-
-                # Add hardware section header
-                if hardware != current_hardware:
-                    details_lines.append(f"\n*━━━ {hardware} ━━━*")
-                    current_hardware = hardware
-
-                details_lines.append(
-                    f"• *{test_type}* → `{job_name}`\n"
-                    f"  Consecutive failures: {consecutive}\n"
-                    f"  First failed: <{first_url}|{first_at}>\n"
-                    f"  Last failed: <{last_url}|{last_at}>\n"
+                # Sort critical_failures by hardware order, then test_order
+                hardware_order_map = {hw: i for i, hw in enumerate(hardware_order)}
+                sorted_failures = sorted(
+                    critical_failures,
+                    key=lambda x: (
+                        hardware_order_map.get(x.get("hardware", ""), 99),
+                        x.get("test_order", 99),
+                        x.get("job_name", ""),
+                    ),
                 )
+
+                current_hardware = None
+                for job in sorted_failures:
+                    hardware = job.get("hardware", "Unknown")
+                    test_type = job.get("test_type", "Unknown")
+                    job_name = job.get("job_name", "unknown")
+                    consecutive = job.get("consecutive_failures", 0)
+                    first_url = job.get("first_failed_url", "")
+                    first_at = job.get("first_failed_at", "unknown")
+                    last_url = job.get("last_failed_url", "")
+                    last_at = job.get("last_failed_at", "unknown")
+
+                    # Add hardware section header
+                    if hardware != current_hardware:
+                        details_lines.append(f"\n*━━━ {hardware} ━━━*")
+                        current_hardware = hardware
+
+                    details_lines.append(
+                        f"• *{test_type}* → `{job_name}`\n"
+                        f"  Consecutive failures: {consecutive}\n"
+                        f"  First failed: <{first_url}|{first_at}>\n"
+                        f"  Last failed: <{last_url}|{last_at}>\n"
+                    )
+
+            if flaky_list:
+                details_lines.append("\n*━━━ Flaky Jobs (Passed After Rerun) ━━━*\n")
+                for fj in flaky_list:
+                    job_name = fj.get("job_name", "unknown")
+                    hardware = fj.get("hardware", "Unknown")
+                    test_type = fj.get("test_type", "Unknown")
+                    flaky_count = fj.get("flaky_count", 0)
+                    total_runs = fj.get("total_runs", 0)
+                    flaky_rate = fj.get("flaky_rate", 0)
+
+                    # Build links to recent flaky runs
+                    recent_links = []
+                    for fr in fj.get("recent_flaky_runs", [])[-3:]:
+                        run_num = fr.get("run_number", "?")
+                        attempt = fr.get("run_attempt", 2)
+                        url = fr.get("job_url", "")
+                        if url:
+                            recent_links.append(
+                                f"<{url}|#{run_num} (attempt {attempt})>"
+                            )
+                        else:
+                            recent_links.append(f"#{run_num} (attempt {attempt})")
+
+                    recent_str = ", ".join(recent_links) if recent_links else "N/A"
+
+                    details_lines.append(
+                        f"• *{hardware} {test_type}* → `{job_name}`\n"
+                        f"  Flaky: {flaky_count}/{total_runs} runs ({flaky_rate:.0f}%)\n"
+                        f"  Recent: {recent_str}\n"
+                    )
 
             details_text = "\n".join(details_lines)
 

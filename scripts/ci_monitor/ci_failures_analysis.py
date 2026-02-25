@@ -984,6 +984,9 @@ class SGLangFailuresAnalyzer:
         job_max_streak: Dict[str, int] = defaultdict(int)
         job_total_failures: Dict[str, int] = defaultdict(int)
         job_total_runs: Dict[str, int] = defaultdict(int)
+        # Track flaky jobs (failed on first attempt, passed on rerun)
+        job_flaky_count: Dict[str, int] = defaultdict(int)
+        job_flaky_runs: Dict[str, List[Dict]] = defaultdict(list)
         job_first_failure_in_streak: Dict[str, Optional[Dict]] = {}
         job_last_failure_in_streak: Dict[str, Optional[Dict]] = {}
         job_recovery_info: Dict[str, Optional[Dict]] = {}
@@ -1070,6 +1073,18 @@ class SGLangFailuresAnalyzer:
                 # Track recent runs (last 5 for each job)
                 run_attempt = job.get("run_attempt", 1)
 
+                # Track flaky: passed on rerun (run_attempt > 1 means it failed earlier)
+                if run_attempt > 1 and conclusion == "success":
+                    job_flaky_count[job_name] += 1
+                    job_flaky_runs[job_name].append(
+                        {
+                            "run_number": run_info["run_number"],
+                            "run_attempt": run_attempt,
+                            "job_url": job.get("html_url", run_info["url"]),
+                            "created_at": run_info["created_at"],
+                        }
+                    )
+
                 # Create status emoji with superscript if retry attempt > 1
                 if conclusion == "success":
                     status = "✅"
@@ -1111,20 +1126,25 @@ class SGLangFailuresAnalyzer:
             # Get last 10 runs (oldest to latest, chronological order)
             recent_runs = job_recent_runs.get(job_name, [])[-10:]
 
+            flaky_count = job_flaky_count.get(job_name, 0)
+            total_runs = job_total_runs[job_name]
             job_streak_data[job_name] = {
                 "current_streak": job_current_streak[job_name],
                 "max_streak": job_max_streak[job_name],
                 "total_failures": job_total_failures[job_name],
-                "total_runs": job_total_runs[job_name],
+                "total_runs": total_runs,
                 "failure_rate": (
-                    job_total_failures[job_name] / job_total_runs[job_name] * 100
-                    if job_total_runs[job_name] > 0
+                    job_total_failures[job_name] / total_runs * 100
+                    if total_runs > 0
                     else 0
                 ),
                 "first_failure_in_streak": job_first_failure_in_streak.get(job_name),
                 "last_failure_in_streak": job_last_failure_in_streak.get(job_name),
                 "recovery_info": job_recovery_info.get(job_name),
                 "recent_runs": recent_runs,  # Last 10 runs with status emoji
+                "flaky_count": flaky_count,
+                "flaky_rate": (flaky_count / total_runs * 100 if total_runs > 0 else 0),
+                "flaky_runs": job_flaky_runs.get(job_name, [])[-5:],  # Last 5
             }
 
         return job_streak_data, job_current_streak
@@ -1391,6 +1411,34 @@ class SGLangFailuresAnalyzer:
             1 for d in nightly_scheduled_combined.values() if d["current_streak"] >= 2
         )
 
+        # Aggregate flaky jobs from scheduled data
+        # Map workflow data variable names to (hardware, test_type)
+        scheduled_workflow_map = [
+            (pr_test_nvidia_scheduled_data, "Nvidia", "PR Test"),
+            (pr_test_amd_scheduled_data, "AMD", "PR Test"),
+            (pr_test_xeon_scheduled_data, "Intel", "PR Test"),
+            (pr_test_xpu_scheduled_data, "XPU", "PR Test"),
+            (pr_test_npu_scheduled_data, "NPU", "PR Test"),
+            (nightly_nvidia_scheduled_data, "Nvidia", "Nightly"),
+            (nightly_amd_scheduled_data, "AMD", "Nightly"),
+            (nightly_intel_scheduled_data, "Intel", "Nightly"),
+            (nightly_npu_scheduled_data, "NPU", "Nightly"),
+        ]
+        flaky_jobs = {}
+        for workflow_data, hardware, test_type in scheduled_workflow_map:
+            for job_name, job_data in workflow_data.items():
+                flaky_count = job_data.get("flaky_count", 0)
+                if flaky_count >= 1:
+                    flaky_jobs[f"{hardware}/{test_type}/{job_name}"] = {
+                        "job_name": job_name,
+                        "hardware": hardware,
+                        "test_type": test_type,
+                        "flaky_count": flaky_count,
+                        "total_runs": job_data.get("total_runs", 0),
+                        "flaky_rate": job_data.get("flaky_rate", 0),
+                        "recent_flaky_runs": job_data.get("flaky_runs", []),
+                    }
+
         report_data = {
             "summary": {
                 "total_jobs": len(sorted_jobs),
@@ -1445,6 +1493,7 @@ class SGLangFailuresAnalyzer:
                 runner_test_failures if runner_test_failures else {}
             ),
             "online_runners": online_runners if online_runners else {},
+            "flaky_jobs": flaky_jobs,
         }
 
         # Save to JSON only if output file is specified
@@ -2376,6 +2425,65 @@ class SGLangFailuresAnalyzer:
                 show_test_failures=True,
                 test_failures_dict=job_test_failures_general,
             )
+
+            # Flaky Jobs Section
+            flaky_jobs = report_data.get("flaky_jobs", {})
+            if flaky_jobs:
+                summary_lines.append("## Flaky Jobs (Passed After Rerun)")
+                summary_lines.append("")
+                summary_lines.append(
+                    "_These jobs failed on their first attempt but passed after rerun. "
+                    "Gate/admin jobs are excluded._"
+                )
+                summary_lines.append("")
+                summary_lines.append(
+                    "| Job | Hardware | Test Type | Flaky Count | Total Runs | Flaky Rate | Recent Flaky Runs |"
+                )
+                summary_lines.append(
+                    "|-----|----------|-----------|-------------|------------|------------|-------------------|"
+                )
+
+                # Sort by flaky_count descending
+                sorted_flaky = sorted(
+                    flaky_jobs.values(),
+                    key=lambda x: (x["flaky_count"], x.get("flaky_rate", 0)),
+                    reverse=True,
+                )
+
+                for fj in sorted_flaky:
+                    job_name = fj["job_name"]
+                    hardware = fj["hardware"]
+                    test_type = fj["test_type"]
+                    flaky_count = fj["flaky_count"]
+                    total_runs = fj["total_runs"]
+                    flaky_rate = fj["flaky_rate"]
+
+                    # Build links to recent flaky runs
+                    recent_links = []
+                    for fr in fj.get("recent_flaky_runs", [])[-3:]:
+                        run_num = fr.get("run_number", "?")
+                        attempt = fr.get("run_attempt", 2)
+                        url = fr.get("job_url", "")
+                        if url:
+                            recent_links.append(
+                                f"[#{run_num} (attempt {attempt})]({url})"
+                            )
+                        else:
+                            recent_links.append(f"#{run_num} (attempt {attempt})")
+
+                    recent_str = ", ".join(recent_links) if recent_links else "N/A"
+
+                    summary_lines.append(
+                        f"| `{job_name}` | {hardware} | {test_type} | "
+                        f"{flaky_count} | {total_runs} | {flaky_rate:.0f}% | {recent_str} |"
+                    )
+
+                summary_lines.append("")
+            else:
+                summary_lines.append("## Flaky Jobs (Passed After Rerun)")
+                summary_lines.append("")
+                summary_lines.append("No flaky jobs detected in scheduled runs.")
+                summary_lines.append("")
 
             # Write summary
             with open(github_step_summary, "a", encoding="utf-8") as f:
