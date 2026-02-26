@@ -143,7 +143,7 @@ RUN if [ "$BUILD_LLVM" = "1" ]; then \
 # leak into AITER's version when AITER uses setuptools_scm)
 ENV SETUPTOOLS_SCM_PRETEND_VERSION=
 RUN pip uninstall -y aiter \
- && pip install psutil pybind11 # Required by AITER setup.py
+ && pip install -y psutil pybind11 # Required by AITER setup.py
 RUN git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout ${AITER_COMMIT} \
@@ -173,19 +173,6 @@ RUN cd aiter \
         else \
           sh -c "GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop"; \
         fi
-
-# -----------------------
-# Build vLLM
-ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
-ARG VLLM_BRANCH="9f6b92db47c3444b7a7d67451ba0c3a2d6af4c2c"
-RUN if [ "$BUILD_VLLM" = "1" ]; then \
-        git clone ${VLLM_REPO} \
-     && cd vllm \
-     && git checkout ${VLLM_BRANCH} \
-     && python -m pip install -r requirements/rocm.txt \
-     && python setup.py clean --all \
-     && python setup.py develop; \
-    fi
 
 # -----------------------
 # Build Mooncake
