@@ -159,7 +159,7 @@ class RoutedExpertsCapturer(ABC):
 
 
 class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
-    """Capturer for routed experts with host buffer"""
+    """Capturer for routed experts with double-buffered async D→H copy."""
 
     def __init__(
         self,
@@ -179,13 +179,22 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             num_experts_per_tok=self.num_experts_per_tok,
         )
 
-        self.device_cache = _RoutedExpertsDeviceCache(
-            max_running_requests=max_running_requests,
-            num_hidden_layers=self.num_hidden_layers,
-            num_experts_per_tok=self.num_experts_per_tok,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            device=device,
-        )
+        self._device_caches = [
+            _RoutedExpertsDeviceCache(
+                max_running_requests=max_running_requests,
+                num_hidden_layers=self.num_hidden_layers,
+                num_experts_per_tok=self.num_experts_per_tok,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                device=device,
+            )
+            for _ in range(2)
+        ]
+        self._active_idx = 0
+
+        self._copy_stream = torch.cuda.Stream(device=device)
+        self._pending_event: Optional[torch.cuda.Event] = None
+        self._pending_loc: Optional[torch.Tensor] = None
+        self._pending_data: Optional[torch.Tensor] = None
 
         if get_moe_a2a_backend().is_deepep():
             attn_tp_size = get_attention_tp_size() if is_dp_attention_enabled() else 1
@@ -198,12 +207,19 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                 device=device,
             )
 
-    def _sync_fwd_experts_buffer_DtoH(
-        self,
-        forward_batch: ForwardBatch,
-        can_run_graph: bool,
-        cuda_graph_batch: int,
-    ):
+    @property
+    def device_cache(self) -> _RoutedExpertsDeviceCache:
+        return self._device_caches[self._active_idx]
+
+    def _flush_pending_copy(self):
+        if self._pending_event is not None:
+            self._pending_event.synchronize()
+            self.host_cache.buffer[self._pending_loc] = self._pending_data
+            self._pending_event = None
+            self._pending_loc = None
+            self._pending_data = None
+
+    def _get_batch_bounds(self, forward_batch: ForwardBatch, can_run_graph: bool, cuda_graph_batch: int):
         # When DeepEP is enabled, capture() already does all_gather, so device_cache.buffer
         # contains data from all DP ranks. We should not slice by DP rank in this case.
         if is_dp_attention_enabled() and not get_moe_a2a_backend().is_deepep():
@@ -211,18 +227,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
             # handle with cuda graph padding
             if can_run_graph:
                 local_start_pos = get_attention_dp_rank() * cuda_graph_batch
-                local_end_pos = local_start_pos + local_num_tokens
-            else:
-                local_end_pos = local_start_pos + local_num_tokens
+            local_end_pos = local_start_pos + local_num_tokens
         else:
             local_start_pos = 0
             local_end_pos = forward_batch.out_cache_loc.shape[0]
-
-        # FIXME: sync explicitly here, overlap scheduler breaks here.
-        out_cache_loc_cpu = forward_batch.out_cache_loc.cpu()
-        self.host_cache.buffer[out_cache_loc_cpu] = self.device_cache.buffer[
-            local_start_pos:local_end_pos, :, : self.num_experts_per_tok
-        ].cpu()
+        return local_start_pos, local_end_pos
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor):
         if get_moe_a2a_backend().is_deepep():
@@ -239,13 +248,32 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
         seqlen: int,
         req_to_token_pool: ReqToTokenPool,
     ):
+        self._flush_pending_copy()
         cache_pool_idx = (
             req_to_token_pool.req_to_token[req_pool_idx][: seqlen - 1].cpu().clone()
         )
-        return self.get_host_cache().buffer[cache_pool_idx]
+        return self.host_cache.buffer[cache_pool_idx]
+
+    def _async_fwd_experts_buffer_DtoH(self, forward_batch, can_run_graph, cuda_graph_batch):
+        self._flush_pending_copy()
+
+        local_start_pos, local_end_pos = self._get_batch_bounds(
+            forward_batch, can_run_graph, cuda_graph_batch,
+        )
+
+        fwd_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self._copy_stream):
+            self._copy_stream.wait_stream(fwd_stream)
+            self._pending_loc = forward_batch.out_cache_loc.to("cpu", non_blocking=True)
+            self._pending_data = self.device_cache.buffer[
+                local_start_pos:local_end_pos, :, : self.num_experts_per_tok
+            ].to("cpu", non_blocking=True)
+            self._pending_event = self._copy_stream.record_event()
+
+        self._active_idx = 1 - self._active_idx
 
     def on_forward_end(self, forward_batch, can_run_graph, cuda_graph_batch):
-        self._sync_fwd_experts_buffer_DtoH(
+        self._async_fwd_experts_buffer_DtoH(
             forward_batch=forward_batch,
             can_run_graph=can_run_graph,
             cuda_graph_batch=cuda_graph_batch,
