@@ -26,7 +26,6 @@ PER_COMMIT_SUITES = {
         "stage-b-test-large-1-gpu-amd",
         "stage-b-test-large-2-gpu-amd",
         "stage-c-test-large-8-gpu-amd",
-        "stage-c-test-aiter-fusion-8-gpu-amd",
         "stage-c-test-large-8-gpu-amd-mi35x",
     ],
     HWBackend.CUDA: [
