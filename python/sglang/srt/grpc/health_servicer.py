@@ -6,8 +6,8 @@ native Kubernetes gRPC health probes for liveness and readiness checks.
 """
 
 import logging
-import time
-from typing import AsyncIterator
+import multiprocessing as mp
+from typing import AsyncIterator, List, Optional
 
 import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
@@ -33,16 +33,23 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
     OVERALL_SERVER = ""  # Empty string for overall server health
     SGLANG_SERVICE = "sglang.grpc.scheduler.SglangScheduler"
 
-    def __init__(self, request_manager, scheduler_info: dict):
+    def __init__(
+        self,
+        request_manager,
+        scheduler_info: dict,
+        scheduler_procs: Optional[List[mp.Process]] = None,
+    ):
         """
         Initialize health servicer.
 
         Args:
             request_manager: GrpcRequestManager instance for checking server state
             scheduler_info: Dict containing scheduler metadata
+            scheduler_procs: List of scheduler subprocess handles for liveness checks
         """
         self.request_manager = request_manager
         self.scheduler_info = scheduler_info
+        self.scheduler_procs = scheduler_procs or []
         self._serving_status = {}
 
         # Initially set to NOT_SERVING until model is loaded
@@ -75,6 +82,32 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
         )
         logger.info("Health service status set to NOT_SERVING")
 
+    def check_health(self) -> tuple:
+        """
+        Core health check logic shared by both the standard gRPC health
+        protocol and the custom SglangScheduler.HealthCheck RPC.
+
+        Returns:
+            (is_healthy, message) tuple
+        """
+        if self.request_manager.gracefully_exit:
+            return False, "Server is shutting down"
+
+        base_status = self._serving_status.get(
+            self.SGLANG_SERVICE, health_pb2.HealthCheckResponse.NOT_SERVING
+        )
+        if base_status != health_pb2.HealthCheckResponse.SERVING:
+            return False, "Service not yet serving"
+
+        for i, proc in enumerate(self.scheduler_procs):
+            if not proc.is_alive():
+                return (
+                    False,
+                    f"Scheduler process {i} is dead (exitcode={proc.exitcode})",
+                )
+
+        return True, "OK"
+
     async def Check(
         self,
         request: health_pb2.HealthCheckRequest,
@@ -93,17 +126,13 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
         service_name = request.service
         logger.debug(f"Health check request for service: '{service_name}'")
 
-        # Check if shutting down
-        if self.request_manager.gracefully_exit:
-            logger.debug("Health check: Server is shutting down")
-            return health_pb2.HealthCheckResponse(
-                status=health_pb2.HealthCheckResponse.NOT_SERVING
-            )
-
         # Overall server health - just check if process is alive
         if service_name == self.OVERALL_SERVER:
-            status = self._serving_status.get(
-                self.OVERALL_SERVER, health_pb2.HealthCheckResponse.NOT_SERVING
+            is_healthy, message = self.check_health()
+            status = (
+                health_pb2.HealthCheckResponse.SERVING
+                if is_healthy
+                else health_pb2.HealthCheckResponse.NOT_SERVING
             )
             logger.debug(
                 f"Overall health check: {health_pb2.HealthCheckResponse.ServingStatus.Name(status)}"
@@ -112,44 +141,17 @@ class SGLangHealthServicer(health_pb2_grpc.HealthServicer):
 
         # Specific service health - check if ready to serve
         elif service_name == self.SGLANG_SERVICE:
-            # Additional checks for service readiness
-
-            # Check base status first
-            base_status = self._serving_status.get(
-                self.SGLANG_SERVICE, health_pb2.HealthCheckResponse.NOT_SERVING
+            is_healthy, message = self.check_health()
+            status = (
+                health_pb2.HealthCheckResponse.SERVING
+                if is_healthy
+                else health_pb2.HealthCheckResponse.NOT_SERVING
             )
-
-            if base_status != health_pb2.HealthCheckResponse.SERVING:
-                logger.debug("Service health check: NOT_SERVING (base status)")
-                return health_pb2.HealthCheckResponse(status=base_status)
-
-            # Check if scheduler is responsive (received data recently)
-            time_since_last_receive = (
-                time.time() - self.request_manager.last_receive_tstamp
-            )
-
-            # If no recent activity and we have active requests, might be stuck
-            # NOTE: 30s timeout is hardcoded. This is more conservative than
-            # HEALTH_CHECK_TIMEOUT (20s) used for custom HealthCheck RPC.
-            # Consider making this configurable via environment variable in the future
-            # if different workloads need different responsiveness thresholds.
-            if (
-                time_since_last_receive > 30
-                and len(self.request_manager.rid_to_state) > 0
-            ):
-                logger.warning(
-                    f"Service health check: Scheduler not responsive "
-                    f"({time_since_last_receive:.1f}s since last receive, "
-                    f"{len(self.request_manager.rid_to_state)} pending requests)"
-                )
-                return health_pb2.HealthCheckResponse(
-                    status=health_pb2.HealthCheckResponse.NOT_SERVING
-                )
-
-            logger.debug("Service health check: SERVING")
-            return health_pb2.HealthCheckResponse(
-                status=health_pb2.HealthCheckResponse.SERVING
-            )
+            if not is_healthy:
+                logger.warning(f"Service health check: {message}")
+            else:
+                logger.debug("Service health check: SERVING")
+            return health_pb2.HealthCheckResponse(status=status)
 
         # Unknown service
         else:

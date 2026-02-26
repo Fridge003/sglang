@@ -44,7 +44,6 @@ from sglang.srt.utils import kill_process_tree
 from sglang.utils import get_exception_traceback
 
 logger = logging.getLogger(__name__)
-HEALTH_CHECK_TIMEOUT = int(os.getenv("SGLANG_HEALTH_CHECK_TIMEOUT", 20))
 
 
 def _convert_loads_to_protobuf(
@@ -291,92 +290,18 @@ class SGLangSchedulerServicer(sglang_scheduler_pb2_grpc.SglangSchedulerServicer)
         context: grpc.aio.ServicerContext,
     ) -> sglang_scheduler_pb2.HealthCheckResponse:
         """
-        Check the health of the inference server by sending a special request to generate one token.
-        Similar to HTTP server's /health endpoint.
+        Lightweight health check — delegates to the shared check_health()
+        logic in SGLangHealthServicer without sending inference requests
+        through the scheduler.
         """
-        rid = f"HEALTH_CHECK_{time.time()}"
-        logger.info(f"Receive health check request: {rid}")
+        logger.info("Receive health check request")
 
-        if self.request_manager.gracefully_exit:
-            logger.info(
-                "Health check request received during shutdown. Returning unhealthy."
-            )
-            return sglang_scheduler_pb2.HealthCheckResponse(
-                healthy=False, message="Server is shutting down"
-            )
+        is_healthy, message = self.health_servicer.check_health()
+        if not is_healthy:
+            logger.warning(f"Health check failed: {message}")
 
-        # Create a special health check request
-        sampling_params = SGLSamplingParams(max_new_tokens=1, temperature=0.0)
-        sampling_params.normalize(tokenizer=None)
-
-        # Create health check request
-        is_generation = self.scheduler_info.get("is_generation")
-        if is_generation is None:
-            is_generation = not self.server_args.is_embedding
-
-        if is_generation:
-            health_req = TokenizedGenerateReqInput(
-                rid=rid,
-                input_text="",
-                input_ids=[0],
-                sampling_params=sampling_params,
-                return_logprob=False,
-                logprob_start_len=-1,
-                top_logprobs_num=0,
-                stream=False,
-                mm_inputs=None,
-                token_ids_logprob=None,
-            )
-            # Set disaggregation params if needed
-            if self.server_args.disaggregation_mode != DisaggregationMode.NULL.value:
-                health_req.bootstrap_host = FAKE_BOOTSTRAP_HOST
-                health_req.bootstrap_room = 0
-        else:
-            sampling_params.max_new_tokens = 0
-            health_req = TokenizedEmbeddingReqInput(
-                rid=rid,
-                input_text="",
-                input_ids=[0],
-                image_inputs={"mm_items": []},
-                token_type_ids=[0],
-                sampling_params=sampling_params,
-            )
-
-        # Submit health check request
-        async def run_health_check():
-            try:
-                async for _ in self.request_manager.generate_request(
-                    obj=health_req,
-                    request_id=rid,
-                ):
-                    # Got at least one response, server is healthy
-                    return True
-            except Exception as e:
-                logger.warning(f"Health check failed: {e}")
-                return False
-            return False
-
-        task = asyncio.create_task(run_health_check())
-
-        # Wait for response with timeout
-        tic = time.time()
-        while time.time() < tic + HEALTH_CHECK_TIMEOUT:
-            await asyncio.sleep(1)
-            # Check if we got a response from scheduler
-            if self.request_manager.last_receive_tstamp > tic:
-                task.cancel()
-                # Clean up health check state
-                self.request_manager._cleanup_request_state(rid)
-                return sglang_scheduler_pb2.HealthCheckResponse(
-                    healthy=True, message="Health check passed"
-                )
-
-        # Timeout - server not responding
-        task.cancel()
-        self.request_manager._cleanup_request_state(rid)
-        logger.warning(f"Health check timeout after {HEALTH_CHECK_TIMEOUT}s")
         return sglang_scheduler_pb2.HealthCheckResponse(
-            healthy=False, message=f"Health check timeout after {HEALTH_CHECK_TIMEOUT}s"
+            healthy=is_healthy, message=message
         )
 
     async def Abort(
@@ -998,6 +923,7 @@ async def serve_grpc(
     health_servicer = SGLangHealthServicer(
         request_manager=request_manager,
         scheduler_info=scheduler_info,
+        scheduler_procs=scheduler_procs,
     )
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
 
