@@ -316,7 +316,8 @@ def get_config(
                 model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
             )
         except ValueError as e:
-            if not "deepseek_v32" in str(e):
+            err_str = str(e)
+            if "deepseek_v32" not in err_str and "DeepSeek-V3.2" not in err_str:
                 raise e
             config = _load_deepseek_v32_model(
                 model, trust_remote_code=trust_remote_code, revision=revision, **kwargs
