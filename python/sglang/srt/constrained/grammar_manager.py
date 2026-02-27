@@ -99,6 +99,30 @@ class GrammarManager:
                         error_msg = f"Invalid grammar request with cache hit: {key=}"
                         req.set_finish_with_abort(error_msg)
 
+        # Create reasoning tracker for plain reasoning requests (no constrained output).
+        # This enables tokens_after_think_end tracking for thinking-token cache awareness.
+        if req.grammar is None and req.require_reasoning:
+            # Resolve think_end_id from grammar_backend or scheduler (skip_tokenizer_init path)
+            think_end_id = None
+            if self.grammar_backend is not None and hasattr(
+                self.grammar_backend, "think_end_id"
+            ):
+                think_end_id = self.grammar_backend.think_end_id
+            elif hasattr(self.scheduler, "think_end_id"):
+                think_end_id = self.scheduler.think_end_id
+
+            if think_end_id is not None:
+                from sglang.srt.constrained.base_grammar_backend import (
+                    NoOpGrammarObject,
+                )
+                from sglang.srt.constrained.reasoner_grammar_backend import (
+                    ReasonerGrammarObject,
+                )
+
+                obj = ReasonerGrammarObject(NoOpGrammarObject(), think_end_id)
+                obj.maybe_init_reasoning(True)
+                req.grammar = obj
+
         if add_to_grammar_queue:
             self.grammar_queue.append(req)
 

@@ -57,6 +57,7 @@ from sglang.srt.mem_cache.evict_policy import (
     LRUStrategy,
     MRUStrategy,
     PriorityStrategy,
+    VolatileAwareStrategy,
 )
 from sglang.srt.mem_cache.hicache_storage import get_hash_str, hash_str_to_int64
 
@@ -121,6 +122,10 @@ class TreeNode:
         self.hash_value: Optional[List[str]] = None
         # priority for priority-aware eviction
         self.priority = priority
+        # volatile: API-driven flag for subagent KV (skip L2, evict first)
+        self.volatile: bool = False
+        # thinking: auto-detected reasoning tokens (skip L2, evict before normal)
+        self.thinking: bool = False
 
         self.id = TreeNode.counter if id is None else id
         TreeNode.counter += 1
@@ -307,6 +312,9 @@ class RadixCache(BasePrefixCache):
                 f"Unknown eviction policy: {self.eviction_policy}. Supported policies: 'lru', 'lfu', 'fifo', 'mru', 'filo', 'priority'."
             )
 
+        # Wrap with volatile/thinking tier awareness
+        self.eviction_strategy = VolatileAwareStrategy(self.eviction_strategy)
+
         self.evictable_leaves = set()
         self.reset()
 
@@ -438,7 +446,14 @@ class RadixCache(BasePrefixCache):
 
         key, value = self.maybe_bigram_convert(key, value)
 
-        prefix_len = self._insert_helper(self.root_node, key, value, priority)
+        prefix_len = self._insert_helper(
+            self.root_node,
+            key,
+            value,
+            priority,
+            volatile=params.volatile,
+            thinking_end_pos=params.thinking_end_pos,
+        )
         return InsertResult(prefix_len=prefix_len)
 
     def _page_align_keys(self, key: list) -> list:
@@ -475,8 +490,30 @@ class RadixCache(BasePrefixCache):
         # Radix Cache takes one ref in memory pool
         if is_insert:
             priority = getattr(req, "priority", 0) or 0
+            volatile = getattr(req, "volatile", False)
+
+            # Compute thinking boundary from grammar state
+            thinking_end_pos = -1
+            if req.grammar is not None and hasattr(
+                req.grammar, "tokens_after_think_end"
+            ):
+                tate = req.grammar.tokens_after_think_end
+                if tate == -1:
+                    # Thinking never ended -- all output tokens are thinking
+                    thinking_end_pos = len(token_ids)
+                elif tate >= 0:
+                    thinking_end_pos = len(req.origin_input_ids) + (
+                        len(req.output_ids) - tate
+                    )
+
             result = self.insert(
-                InsertParams(key=radix_key, value=values, priority=priority)
+                InsertParams(
+                    key=radix_key,
+                    value=values,
+                    priority=priority,
+                    volatile=volatile,
+                    thinking_end_pos=thinking_end_pos,
+                )
             )
             new_prefix_len = result.prefix_len
             # Free the duplicates that were already in the tree
@@ -517,6 +554,7 @@ class RadixCache(BasePrefixCache):
                 value=values,
                 chunked=chunked,
                 priority=getattr(req, "priority", 0) or 0,
+                volatile=getattr(req, "volatile", False),
             )
         )
         new_prefix_len = result.prefix_len
@@ -688,6 +726,8 @@ class RadixCache(BasePrefixCache):
         child.key = child.key[split_len:]
         child.value = child.value[split_len:].clone()
         new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        new_node.volatile = child.volatile
+        new_node.thinking = child.thinking
 
         # Split hash_value if it was already computed, otherwise leave as None
         new_node.hash_value, child.hash_value = split_node_hash_value(
@@ -696,7 +736,15 @@ class RadixCache(BasePrefixCache):
 
         return new_node
 
-    def _insert_helper(self, node: TreeNode, key: RadixKey, value, priority: int = 0):
+    def _insert_helper(
+        self,
+        node: TreeNode,
+        key: RadixKey,
+        value,
+        priority: int = 0,
+        volatile: bool = False,
+        thinking_end_pos: int = -1,
+    ):
         # Convert None priority to 0
         if priority is None:
             priority = 0
@@ -733,6 +781,12 @@ class RadixCache(BasePrefixCache):
             new_node.parent = node
             new_node.key = key
             new_node.value = value.clone()
+            new_node.volatile = volatile
+            # Tag thinking: only if node is entirely within thinking range
+            if thinking_end_pos > 0:
+                node_start = total_prefix_length
+                node_end = node_start + len(key)
+                new_node.thinking = node_end <= thinking_end_pos
             node.children[child_key] = new_node
             self.evictable_size_ += len(key)
             self._update_leaf_status(node)

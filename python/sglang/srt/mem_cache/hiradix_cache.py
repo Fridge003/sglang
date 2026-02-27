@@ -627,6 +627,9 @@ class HiRadixCache(RadixCache):
             return False
 
     def write_backup(self, node: TreeNode, write_back=False):
+        # Skip L2 backup for volatile/thinking tokens (unless pinned)
+        if (node.volatile or node.thinking) and not self._is_pinned(node):
+            return 0
         host_indices = self.cache_controller.write(
             device_indices=node.value,
             node_id=node.id,
@@ -668,7 +671,7 @@ class HiRadixCache(RadixCache):
             return
         node.hit_count += 1
 
-        if not node.backuped:
+        if not node.backuped and not node.volatile and not node.thinking:
             if node.hit_count >= self.write_through_threshold:
                 # write to host if the node is not backuped
                 self.write_backup(node)

@@ -203,6 +203,9 @@ class GenerateReqInput(BaseReq):
     # Priority for the request
     priority: Optional[int] = None
 
+    # Volatile: skip L2 backup and evict first (for subagent KV)
+    volatile: bool = False
+
     # Extra key for classifying the request (e.g. cache_salt)
     extra_key: Optional[Union[List[str], str]] = None
 
@@ -715,6 +718,9 @@ class TokenizedGenerateReqInput(BaseReq):
 
     # Priority for the request
     priority: Optional[int] = None
+
+    # Volatile: skip L2 backup and evict first (for subagent KV)
+    volatile: bool = False
 
     # Extra key for classifying the request (e.g. cache_salt)
     extra_key: Optional[str] = None

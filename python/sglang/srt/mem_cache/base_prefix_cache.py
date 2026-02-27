@@ -60,6 +60,8 @@ class InsertParams:
     # General
     chunked: bool = False
     priority: int = 0
+    volatile: bool = False
+    thinking_end_pos: int = -1  # -1 = no thinking; absolute token position where thinking ends
 
 
 @dataclasses.dataclass

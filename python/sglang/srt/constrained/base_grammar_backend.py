@@ -120,6 +120,53 @@ class BaseGrammarObject:
 INVALID_GRAMMAR_OBJ = BaseGrammarObject()
 
 
+class NoOpGrammarObject(BaseGrammarObject):
+    """Grammar that accepts all tokens without constraining output.
+
+    Used as the inner grammar for ReasonerGrammarObject when no structured
+    output constraint (json_schema, regex, ebnf) is requested. This enables
+    thinking-token boundary tracking via ReasonerGrammarObject for all
+    reasoning requests, not just constrained ones.
+    """
+
+    def accept_token(self, token: int) -> None:
+        pass
+
+    def rollback(self, k: int):
+        pass
+
+    def is_terminated(self):
+        return False
+
+    def allocate_vocab_mask(
+        self, vocab_size: int, batch_size: int, device
+    ) -> torch.Tensor:
+        return torch.zeros(batch_size, vocab_size, dtype=torch.bool, device=device)
+
+    def fill_vocab_mask(self, vocab_mask: torch.Tensor, idx: int) -> None:
+        pass
+
+    @staticmethod
+    def move_vocab_mask(vocab_mask: torch.Tensor, device) -> torch.Tensor:
+        return vocab_mask.to(device)
+
+    @staticmethod
+    def apply_vocab_mask(logits: torch.Tensor, vocab_mask: torch.Tensor) -> None:
+        pass
+
+    def copy(self) -> "BaseGrammarObject":
+        return NoOpGrammarObject()
+
+    def try_jump_forward(self, tokenizer):
+        return None
+
+    def jump_forward_str_state(self, helper):
+        return None
+
+    def jump_and_retokenize(self, old_output_ids, new_output_ids, next_state):
+        pass
+
+
 @dataclass
 class CacheEntry:
     value: BaseGrammarObject

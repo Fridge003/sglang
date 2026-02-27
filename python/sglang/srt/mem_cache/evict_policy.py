@@ -44,3 +44,24 @@ class PriorityStrategy(EvictionStrategy):
     def get_priority(self, node: "TreeNode") -> Tuple[int, float]:
         # Return (priority, last_access_time) so lower priority nodes are evicted first
         return (node.priority, node.last_access_time)
+
+
+class VolatileAwareStrategy(EvictionStrategy):
+    """Wraps any base strategy with volatile/thinking tier awareness.
+
+    Eviction order: volatile (-2) < thinking (-1) < normal (0).
+    Within each tier, the base strategy's ordering applies.
+    """
+
+    def __init__(self, base_strategy: EvictionStrategy):
+        self.base = base_strategy
+
+    def get_priority(self, node: "TreeNode") -> Tuple:
+        base_priority = self.base.get_priority(node)
+        if node.volatile:
+            tier = -2
+        elif node.thinking:
+            tier = -1
+        else:
+            tier = 0
+        return (tier, base_priority)

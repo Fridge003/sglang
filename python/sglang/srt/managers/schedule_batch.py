@@ -611,6 +611,7 @@ class Req(ReqDllmMixin):
         self.eos_token_ids = eos_token_ids
         self.vocab_size = vocab_size
         self.priority = priority
+        self.volatile = False
 
         # For incremental decoding
         # ----- | --------- read_ids -------|

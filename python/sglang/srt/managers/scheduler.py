@@ -486,13 +486,28 @@ class Scheduler(
                 )
 
         # Set reasoning_parser and think_end_id if --reasoning_parser is enabled
-        if self.server_args.reasoning_parser and self.tokenizer:
+        if self.server_args.reasoning_parser:
             reasoning_parser = ReasoningParser(
                 model_type=self.server_args.reasoning_parser, stream_reasoning=False
             )
-            self.tokenizer.think_end_id = self.tokenizer.encode(
-                reasoning_parser.detector.think_end_token, add_special_tokens=False
-            )[0]
+            if self.tokenizer:
+                self.tokenizer.think_end_id = self.tokenizer.encode(
+                    reasoning_parser.detector.think_end_token,
+                    add_special_tokens=False,
+                )[0]
+            else:
+                # skip_tokenizer_init: load transiently just to resolve think_end_id
+                tmp_tokenizer = get_tokenizer(
+                    server_args.tokenizer_path,
+                    tokenizer_mode=server_args.tokenizer_mode,
+                    trust_remote_code=server_args.trust_remote_code,
+                    revision=server_args.revision,
+                )
+                self.think_end_id = tmp_tokenizer.encode(
+                    reasoning_parser.detector.think_end_token,
+                    add_special_tokens=False,
+                )[0]
+                del tmp_tokenizer
 
     def init_mamba_backend(self) -> None:
         initialize_mamba_selective_state_update_backend(self.server_args)
@@ -1521,6 +1536,7 @@ class Scheduler(
                 time_stats=recv_req.time_stats,
             )
             req.tokenizer = self.tokenizer
+            req.volatile = getattr(recv_req, "volatile", False)
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode
