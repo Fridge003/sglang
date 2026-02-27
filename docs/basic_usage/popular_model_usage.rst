@@ -10,6 +10,7 @@ For more usage examples and recipes, visit the `SGLang Cookbook <https://cookboo
    deepseek_v32.md
    glm45.md
    glmv.md
+   glm5.md
    gpt_oss.md
    minimax_m2.md
    qwen3.md
