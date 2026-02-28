@@ -168,8 +168,10 @@ EOF
   docker exec ci_sglang pip install --cache-dir=/sgl-data/pip-cache pytest
 
   # Install tvm-ffi for JIT kernel support (QK-norm, etc.)
+  # Pin to the same commit as docker/rocm.Dockerfile to avoid breaking changes
+  # from upstream (e.g., tvm-ffi#480 broke isinstance checks for TVM objects).
   echo "Installing tvm-ffi for JIT kernel support..."
-  docker exec ci_sglang pip install --cache-dir=/sgl-data/pip-cache git+https://github.com/apache/tvm-ffi.git || echo "tvm-ffi installation failed, JIT kernels will use fallback"
+  docker exec ci_sglang pip install --cache-dir=/sgl-data/pip-cache "apache-tvm-ffi @ git+https://github.com/apache/tvm-ffi.git@37d0485b2058885bf4e7a486f7d7b2174a8ac1ce" || echo "tvm-ffi installation failed, JIT kernels will use fallback"
 
   # Install cache-dit for qwen_image_t2i_cache_dit_enabled test (added in PR 16204)
   docker exec ci_sglang pip install --cache-dir=/sgl-data/pip-cache cache-dit || echo "cache-dit installation failed"

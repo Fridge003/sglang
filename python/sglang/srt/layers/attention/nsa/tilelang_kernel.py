@@ -9,6 +9,22 @@ from sglang.srt.utils import is_gfx95_supported, is_hip
 
 tilelang.set_log_level("WARNING")
 
+# Workaround for tvm-ffi / tilelang type-system incompatibility where
+# isinstance(tir.Var, tir.Buffer) incorrectly returns True, causing
+# is_var() to crash with "AttributeError: 'Var' has no attribute 'scope'".
+# See: https://github.com/apache/tvm-ffi/pull/480
+try:
+    import tilelang.language.eager.builder as _tl_builder
+
+    _orig_is_var = _tl_builder.is_var
+
+    def _safe_is_var(v):
+        return hasattr(v, "scope") and _orig_is_var(v)
+
+    _tl_builder.is_var = _safe_is_var
+except (ImportError, AttributeError):
+    pass
+
 pass_configs = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
