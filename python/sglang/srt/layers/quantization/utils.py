@@ -42,6 +42,10 @@ def get_scalar_types():
 
 ScalarType, scalar_types = get_scalar_types()
 
+# Cache TRT-LLM FP4 permutation indices across layers during weight loading.
+# Keying is delegated to flashinfer helper functions (e.g., kind + shape).
+_TRTLLM_FP4_PERMUTE_CACHE: dict[tuple[str, torch.Size], torch.Tensor] = {}
+
 
 def is_layer_skipped(
     prefix: str,
@@ -633,7 +637,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     )
 
     """Prepare quantized weights for kernel (done offline with weights)."""
-    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+    _cache_permute_indices = _TRTLLM_FP4_PERMUTE_CACHE
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
 
     # Convert quantized weights to proper formats
