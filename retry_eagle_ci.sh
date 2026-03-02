@@ -11,66 +11,50 @@ TARGET_STAGE="${TARGET_STAGE:-stage-b-test-large-1-gpu}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-100}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 
-echo "========================================"
-echo "Eagle CI Retry — until crash"
-echo "  Repo:         $REPO"
-echo "  Branch:       $BRANCH"
-echo "  Workflow:     $WORKFLOW"
-echo "  Target stage: $TARGET_STAGE"
-echo "  Max iters:    $MAX_ITERATIONS"
-echo "========================================"
+echo "Eagle CI Retry | branch=$BRANCH stage=$TARGET_STAGE max=$MAX_ITERATIONS"
 
 for i in $(seq 1 "$MAX_ITERATIONS"); do
-    echo ""
-    echo "=== Iteration $i / $MAX_ITERATIONS  $(date '+%Y-%m-%d %H:%M:%S') ==="
-
-    # 1. Trigger workflow
-    echo "Triggering workflow..."
+    # 1. Trigger
     gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$BRANCH" \
-        -f target_stage="$TARGET_STAGE"
+        -f target_stage="$TARGET_STAGE" 2>/dev/null
 
-    # 2. Wait for the run to appear
+    # 2. Find run ID
     sleep 15
     RUN_ID=""
-    for attempt in $(seq 1 12); do
+    for _ in $(seq 1 12); do
         RUN_ID=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" \
-            --branch "$BRANCH" --limit 1 --json databaseId,status \
+            --branch "$BRANCH" --limit 1 --json databaseId \
             -q '.[0].databaseId' 2>/dev/null || true)
-        if [[ -n "$RUN_ID" ]]; then
-            break
-        fi
-        echo "  Waiting for run to appear (attempt $attempt)..."
+        [[ -n "$RUN_ID" ]] && break
         sleep 10
     done
-
-    if [[ -z "$RUN_ID" ]]; then
-        echo "ERROR: Could not find run after trigger. Retrying..."
-        sleep "$SLEEP_BETWEEN"
-        continue
-    fi
+    [[ -z "$RUN_ID" ]] && echo "#$i  ERROR: run not found" && sleep "$SLEEP_BETWEEN" && continue
 
     RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
-    echo "Run $RUN_ID: $RUN_URL"
 
-    # 3. Watch until completion
-    echo "Watching run..."
-    if gh run watch "$RUN_ID" --repo "$REPO" --exit-status 2>&1; then
-        echo "PASS on iteration $i. Sleeping ${SLEEP_BETWEEN}s before retry..."
-        sleep "$SLEEP_BETWEEN"
-    else
-        echo ""
-        echo "========================================"
-        echo "CRASH DETECTED on iteration $i!"
-        echo "  Run: $RUN_URL"
-        echo "  Time: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "========================================"
-        echo ""
-        echo "View logs:  gh run view $RUN_ID --repo $REPO --log"
-        echo "View jobs:  gh run view $RUN_ID --repo $REPO"
-        exit 0
-    fi
+    # 3. Poll until done (silent)
+    while true; do
+        STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion \
+            -q '[.status,.conclusion] | join(",")' 2>/dev/null || echo "unknown,")
+        case "$STATUS" in
+            completed,success)
+                echo "#$i  PASS  $RUN_URL  $(date '+%H:%M:%S')"
+                break
+                ;;
+            completed,*)
+                CONCLUSION="${STATUS#completed,}"
+                echo "#$i  FAIL($CONCLUSION)  $RUN_URL  $(date '+%H:%M:%S')"
+                echo "CRASH DETECTED on iteration $i — $(date '+%Y-%m-%d %H:%M:%S')"
+                exit 0
+                ;;
+            *)
+                sleep 60
+                ;;
+        esac
+    done
+
+    sleep "$SLEEP_BETWEEN"
 done
 
-echo ""
 echo "No crash after $MAX_ITERATIONS iterations."
 exit 1
