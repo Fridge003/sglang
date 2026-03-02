@@ -15,6 +15,7 @@ echo "Eagle CI Retry | branch=$BRANCH stage=$TARGET_STAGE max=$MAX_ITERATIONS"
 
 for i in $(seq 1 "$MAX_ITERATIONS"); do
     # 1. Trigger
+    echo "#$i  TRIGGER  $(date '+%H:%M:%S')"
     gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$BRANCH" \
         -f target_stage="$TARGET_STAGE" 2>/dev/null
 
@@ -28,17 +29,22 @@ for i in $(seq 1 "$MAX_ITERATIONS"); do
         [[ -n "$RUN_ID" ]] && break
         sleep 10
     done
-    [[ -z "$RUN_ID" ]] && echo "#$i  ERROR: run not found" && sleep "$SLEEP_BETWEEN" && continue
+    if [[ -z "$RUN_ID" ]]; then
+        echo "#$i  ERROR  run not found  $(date '+%H:%M:%S')"
+        sleep "$SLEEP_BETWEEN"
+        continue
+    fi
 
     RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
+    echo "#$i  START   $RUN_URL  $(date '+%H:%M:%S')"
 
-    # 3. Poll until done (silent)
+    # 3. Poll until done
     while true; do
         STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion \
             -q '[.status,.conclusion] | join(",")' 2>/dev/null || echo "unknown,")
         case "$STATUS" in
             completed,success)
-                echo "#$i  PASS  $RUN_URL  $(date '+%H:%M:%S')"
+                echo "#$i  PASS    $RUN_URL  $(date '+%H:%M:%S')"
                 break
                 ;;
             completed,*)
