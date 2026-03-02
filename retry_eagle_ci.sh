@@ -1,6 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
+export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
+cd "$(dirname "$0")"
+
 REPO="sgl-project/sglang"
 BRANCH="${BRANCH:-$(git branch --show-current)}"
 WORKFLOW="pr-test.yml"
