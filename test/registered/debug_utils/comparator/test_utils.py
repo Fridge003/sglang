@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -7,6 +8,7 @@ from sglang.srt.debug_utils.comparator.output_types import SummaryRecord
 from sglang.srt.debug_utils.comparator.utils import (
     Pair,
     argmax_coord,
+    auto_descend_dir,
     calc_per_token_rel_diff,
     calc_rel_diff,
     compute_exit_code,
@@ -407,6 +409,75 @@ class TestComputeExitCode:
             )
             == 1
         )
+
+    def test_errored_with_passed_exits_one(self):
+        """Has errored bundle even with passed → exit 1."""
+        summary = SummaryRecord(total=3, passed=2, failed=0, skipped=0, errored=1)
+        assert (
+            compute_exit_code(
+                summary,
+                allow_skipped_pattern=".*",
+                skipped_names=[],
+                allow_failed_pattern=None,
+                failed_names=[],
+                errored_names=["broken_tensor"],
+            )
+            == 1
+        )
+
+    def test_errored_only_exits_one(self):
+        """All errored → exit 1 (passed==0 already exits 1, but errored also independently triggers)."""
+        summary = SummaryRecord(total=1, passed=0, failed=0, skipped=0, errored=1)
+        assert (
+            compute_exit_code(
+                summary,
+                allow_skipped_pattern=".*",
+                skipped_names=[],
+                allow_failed_pattern=None,
+                failed_names=[],
+                errored_names=["broken_tensor"],
+            )
+            == 1
+        )
+
+
+def _make_pt(directory: Path) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    torch.save(torch.tensor([1.0]), directory / "dummy.pt")
+
+
+class TestAutoDescendDir:
+    def test_no_descend_when_pt_at_root(self, tmp_path: Path) -> None:
+        """Directory with .pt files directly is returned as-is."""
+        _make_pt(tmp_path)
+        _make_pt(tmp_path / "child_a")
+        assert auto_descend_dir(tmp_path, label="test") == tmp_path
+
+    def test_descend_into_single_child(self, tmp_path: Path) -> None:
+        """Single child with .pt triggers descend."""
+        child: Path = tmp_path / "engine_0"
+        _make_pt(child)
+        assert auto_descend_dir(tmp_path, label="test") == child
+
+    def test_descend_single_nonempty_child_among_empty(self, tmp_path: Path) -> None:
+        """Two subdirs but only one has .pt — descend into that one."""
+        nonempty: Path = tmp_path / "engine_0"
+        _make_pt(nonempty)
+        (tmp_path / "empty_child").mkdir()
+        assert auto_descend_dir(tmp_path, label="test") == nonempty
+
+    def test_error_with_multiple_nonempty_children(self, tmp_path: Path) -> None:
+        """Two children with .pt files — ambiguous, raises ValueError."""
+        _make_pt(tmp_path / "engine_0")
+        _make_pt(tmp_path / "engine_1")
+        with pytest.raises(ValueError, match="multiple subdirectories contain data"):
+            auto_descend_dir(tmp_path, label="test")
+
+    def test_error_when_no_data_found(self, tmp_path: Path) -> None:
+        """No .pt files anywhere — raises ValueError."""
+        (tmp_path / "empty_child").mkdir()
+        with pytest.raises(ValueError, match="no .pt files found"):
+            auto_descend_dir(tmp_path, label="test")
 
 
 if __name__ == "__main__":
