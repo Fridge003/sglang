@@ -1,12 +1,4 @@
 #!/bin/bash
-
-# pane 1
-# TARGET_STAGE=stage-b-test-large-1-gpu bash retry_eagle_ci.sh 2>&1 | tee retry_large.log
-
-# pane 2
-# TARGET_STAGE=stage-b-test-small-1-gpu bash retry_eagle_ci.sh 2>&1 | tee retry_small.log
-
-
 set -euo pipefail
 
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
@@ -15,57 +7,71 @@ cd "$(dirname "$0")"
 REPO="sgl-project/sglang"
 BRANCH="${BRANCH:-$(git branch --show-current)}"
 WORKFLOW="pr-test.yml"
-TARGET_STAGE="${TARGET_STAGE:-stage-b-test-large-1-gpu}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-100}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
+STAGES=("stage-b-test-large-1-gpu" "stage-b-test-small-1-gpu")
 
-echo "Eagle CI Retry | branch=$BRANCH stage=$TARGET_STAGE max=$MAX_ITERATIONS"
+echo "Eagle CI Retry | branch=$BRANCH stages=${STAGES[*]} max=$MAX_ITERATIONS"
 
 for i in $(seq 1 "$MAX_ITERATIONS"); do
-    # 1. Trigger
     echo "#$i  TRIGGER  $(date '+%H:%M:%S')"
-    gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$BRANCH" \
-        -f target_stage="$TARGET_STAGE" 2>/dev/null
 
-    # 2. Find run ID
+    # Trigger both stages
+    RUN_IDS=()
+    for stage in "${STAGES[@]}"; do
+        gh workflow run "$WORKFLOW" --repo "$REPO" --ref "$BRANCH" \
+            -f target_stage="$stage" 2>/dev/null
+        sleep 5
+    done
+
+    # Find run IDs
     sleep 15
-    RUN_ID=""
-    for _ in $(seq 1 12); do
-        RUN_ID=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" \
-            --branch "$BRANCH" --limit 1 --json databaseId \
-            -q '.[0].databaseId' 2>/dev/null || true)
-        [[ -n "$RUN_ID" ]] && break
+    RUN_IDS=()
+    for _ in "${STAGES[@]}"; do
+        RUN_IDS=()
+        RUNS=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" \
+            --branch "$BRANCH" --limit "${#STAGES[@]}" --json databaseId,status \
+            -q '.[].databaseId' 2>/dev/null || true)
+        while IFS= read -r rid; do
+            [[ -n "$rid" ]] && RUN_IDS+=("$rid")
+        done <<< "$RUNS"
+        [[ ${#RUN_IDS[@]} -ge ${#STAGES[@]} ]] && break
         sleep 10
     done
-    if [[ -z "$RUN_ID" ]]; then
-        echo "#$i  ERROR  run not found  $(date '+%H:%M:%S')"
-        sleep "$SLEEP_BETWEEN"
-        continue
-    fi
 
-    RUN_URL="https://github.com/$REPO/actions/runs/$RUN_ID"
-    echo "#$i  START   $RUN_URL  $(date '+%H:%M:%S')"
-
-    # 3. Poll until done
-    while true; do
-        STATUS=$(gh run view "$RUN_ID" --repo "$REPO" --json status,conclusion \
-            -q '[.status,.conclusion] | join(",")' 2>/dev/null || echo "unknown,")
-        case "$STATUS" in
-            completed,success)
-                echo "#$i  PASS    $RUN_URL  $(date '+%H:%M:%S')"
-                break
-                ;;
-            completed,*)
-                CONCLUSION="${STATUS#completed,}"
-                echo "#$i  FAIL($CONCLUSION)  $RUN_URL  $(date '+%H:%M:%S')"
-                echo "CRASH DETECTED on iteration $i — $(date '+%Y-%m-%d %H:%M:%S')"
-                exit 0
-                ;;
-            *)
-                sleep 60
-                ;;
-        esac
+    for idx in "${!RUN_IDS[@]}"; do
+        echo "#$i  START   [${STAGES[$idx]:-?}] https://github.com/$REPO/actions/runs/${RUN_IDS[$idx]}  $(date '+%H:%M:%S')"
     done
+
+    # Poll all runs until done
+    CRASHED=false
+    for rid in "${RUN_IDS[@]}"; do
+        RUN_URL="https://github.com/$REPO/actions/runs/$rid"
+        while true; do
+            STATUS=$(gh run view "$rid" --repo "$REPO" --json status,conclusion \
+                -q '[.status,.conclusion] | join(",")' 2>/dev/null || echo "unknown,")
+            case "$STATUS" in
+                completed,success)
+                    echo "#$i  PASS    $RUN_URL  $(date '+%H:%M:%S')"
+                    break
+                    ;;
+                completed,*)
+                    CONCLUSION="${STATUS#completed,}"
+                    echo "#$i  FAIL($CONCLUSION)  $RUN_URL  $(date '+%H:%M:%S')"
+                    CRASHED=true
+                    break
+                    ;;
+                *)
+                    sleep 60
+                    ;;
+            esac
+        done
+    done
+
+    if $CRASHED; then
+        echo "CRASH DETECTED on iteration $i — $(date '+%Y-%m-%d %H:%M:%S')"
+        exit 0
+    fi
 
     sleep "$SLEEP_BETWEEN"
 done
