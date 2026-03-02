@@ -50,20 +50,25 @@ run_ci() {
 
         sleep 15
         RUN_IDS=()
-        for _ in "${STAGES[@]}"; do
+        RUN_NAMES=()
+        for attempt in $(seq 1 5); do
             RUN_IDS=()
-            RUNS=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" \
-                --branch "$BRANCH" --limit "${#STAGES[@]}" --json databaseId,status \
-                -q '.[].databaseId' 2>/dev/null || true)
-            while IFS= read -r rid; do
-                [[ -n "$rid" ]] && RUN_IDS+=("$rid")
-            done <<< "$RUNS"
+            RUN_NAMES=()
+            LINES=$(gh run list --repo "$REPO" --workflow "$WORKFLOW" \
+                --branch "$BRANCH" --limit "${#STAGES[@]}" \
+                --json databaseId,displayTitle \
+                -q '.[] | "\(.databaseId) \(.displayTitle)"' 2>/dev/null || true)
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+                RUN_IDS+=("${line%% *}")
+                RUN_NAMES+=("${line#* }")
+            done <<< "$LINES"
             [[ ${#RUN_IDS[@]} -ge ${#STAGES[@]} ]] && break
             sleep 10
         done
 
         for idx in "${!RUN_IDS[@]}"; do
-            echo "#$i  START   [${STAGES[$idx]:-?}] https://github.com/$REPO/actions/runs/${RUN_IDS[$idx]}  $(date '+%H:%M:%S')"
+            echo "#$i  START   [${RUN_NAMES[$idx]:-?}] https://github.com/$REPO/actions/runs/${RUN_IDS[$idx]}  $(date '+%H:%M:%S')"
         done
 
         CRASHED=false

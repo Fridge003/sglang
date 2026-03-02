@@ -975,7 +975,7 @@ jobs:
         run: |
           source /etc/profile.d/sglang-ci.sh
           cd test/
-          python -m unittest registered.spec.eagle.test_eagle_infer_b.TestEAGLEServerBasic -v
+          python -m pytest registered/spec/eagle/test_eagle_infer_b.py::TestEAGLEServerBasic -x -v
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1022,12 +1022,15 @@ jobs:
         timeout-minutes: 20
         run: |
           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} bash scripts/ci/cuda/ci_install_dependency.sh
+          git clone https://github.com/merrymercy/human-eval.git
+          cd human-eval
+          pip install -e . --no-build-isolation
 
       - name: Run test
         timeout-minutes: 30
         run: |
           cd test/
-          python -m unittest registered.spec.eagle.test_eagle_infer_b -v
+          python -m pytest registered/spec/eagle/test_eagle_infer_b.py -x -v
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
