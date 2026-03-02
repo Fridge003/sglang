@@ -602,6 +602,17 @@ class EagleDraftWorker(BaseDraftWorker):
     def _draft_extend_for_decode(
         self, batch: ModelWorkerBatch, batch_result: GenerationBatchResult
     ):
+        # F1: target model hidden_states (input to draft extend)
+        torch._assert_async(
+            ~torch.isnan(batch_result.logits_output.hidden_states).any(),
+            "F1: target model hidden_states has NaN (input to draft extend)",
+        )
+        # F1b: target model logits
+        torch._assert_async(
+            ~torch.isnan(batch_result.logits_output.next_token_logits).any(),
+            "F1b: target model next_token_logits has NaN",
+        )
+
         # Batch 2: Draft extend
         draft_input = EagleDraftInput(
             hidden_states=batch_result.logits_output.hidden_states,
@@ -642,10 +653,20 @@ class EagleDraftWorker(BaseDraftWorker):
             draft_logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch
             )
+            # F3: raw logits from cuda graph path (before select_index)
+            torch._assert_async(
+                ~torch.isnan(draft_logits_output.next_token_logits).any(),
+                "F3: raw next_token_logits has NaN from cuda_graph draft_extend",
+            )
         else:
             draft_logits_output = self.draft_runner.forward(
                 forward_batch, skip_attn_backend_init=True
             ).logits_output
+            # F2: raw logits from eager path (before select_index)
+            torch._assert_async(
+                ~torch.isnan(draft_logits_output.next_token_logits).any(),
+                "F2: raw next_token_logits has NaN from eager draft_extend",
+            )
 
         # Reorganize the spec info for the next batch
         draft_logits_output.next_token_logits = draft_logits_output.next_token_logits[
@@ -654,7 +675,7 @@ class EagleDraftWorker(BaseDraftWorker):
         draft_logits_output.hidden_states = draft_logits_output.hidden_states[
             select_index
         ]
-        # E1: logits before softmax (decode path)
+        # E1: logits after select_index (decode path)
         torch._assert_async(
             ~torch.isnan(draft_logits_output.next_token_logits).any(),
             "E1: next_token_logits has NaN in _draft_extend_for_decode",
