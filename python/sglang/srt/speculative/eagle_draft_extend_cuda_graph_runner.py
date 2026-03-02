@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -222,6 +223,8 @@ class EAGLEDraftExtendCudaGraphRunner:
             )
 
     def can_run(self, forward_batch: ForwardBatch):
+        if os.environ.get("SGLANG_FORCE_EAGER_DRAFT_EXTEND", "0") == "1":
+            return False
         if self.require_mlp_tp_gather:
             cuda_graph_bs = (
                 max(forward_batch.global_num_tokens_cpu) // self.num_tokens_per_bs
