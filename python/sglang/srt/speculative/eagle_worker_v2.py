@@ -1,6 +1,5 @@
 import contextlib
 import logging
-import os
 import time
 from typing import List, Optional, Tuple
 
@@ -628,13 +627,14 @@ class EagleDraftWorker(BaseDraftWorker):
         )
 
         # Prepare for draft extend in a separate stream
+        # DEBUG: pass None to force attention backend init for eager path
         with self.plan_stream_ctx:
             forward_batch = draft_input.prepare_for_extend_to_fill_draft_kvcache(
                 batch,
                 batch_result.next_token_ids,
                 self.speculative_num_draft_tokens,
                 self.draft_runner,
-                self.cuda_graph_runner_for_draft_extend,
+                None,  # DEBUG: was self.cuda_graph_runner_for_draft_extend
             )
 
         if self.plan_stream:
@@ -646,14 +646,8 @@ class EagleDraftWorker(BaseDraftWorker):
             forward_batch.spec_info.accept_length = batch_result.accept_lens
 
         # Run draft extend batch in the main compute stream
-        _force_eager_draft_extend = (
-            os.environ.get("SGLANG_FORCE_EAGER_DRAFT_EXTEND", "0") == "1"
-        )
-        can_cuda_graph = (
-            not _force_eager_draft_extend
-            and self.cuda_graph_runner_for_draft_extend
-            and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
-        )
+        # DEBUG: force eager to test if NaN is cuda graph specific
+        can_cuda_graph = False
         if can_cuda_graph:
             draft_logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch

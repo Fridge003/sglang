@@ -1006,10 +1006,8 @@ class EAGLEWorker(TpModelWorker):
             forward_batch.seq_lens_sum = batch.seq_lens.sum().item()
 
         # Run
-        can_cuda_graph = (
-            self.cuda_graph_runner_for_draft_extend
-            and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
-        )
+        # DEBUG: force eager to test if NaN is cuda graph specific
+        can_cuda_graph = False
         if can_cuda_graph:
             logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch
