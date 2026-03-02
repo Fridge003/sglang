@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -246,6 +247,9 @@ class EagleDraftWorker(BaseDraftWorker):
         """Capture cuda graphs."""
         self.cuda_graph_runner = None
         self.cuda_graph_runner_for_draft_extend = None
+        self.disable_draft_extend_cuda_graph = (
+            os.environ.get("SGLANG_DISABLE_DRAFT_EXTEND_CUDA_GRAPH", "0") == "1"
+        )
 
         if self.server_args.disable_cuda_graph:
             return
@@ -275,7 +279,11 @@ class EagleDraftWorker(BaseDraftWorker):
         }
         # Capture extend
         # TODO: support draft extend cuda graph for more attention backends
-        if self.draft_extend_attn_backend and (
+        if self.disable_draft_extend_cuda_graph:
+            logger.info(
+                "Draft extend cuda graph disabled by SGLANG_DISABLE_DRAFT_EXTEND_CUDA_GRAPH"
+            )
+        elif self.draft_extend_attn_backend and (
             _is_npu
             or (
                 _is_cuda
@@ -627,14 +635,18 @@ class EagleDraftWorker(BaseDraftWorker):
         )
 
         # Prepare for draft extend in a separate stream
-        # DEBUG: pass None to force attention backend init for eager path
+        _draft_extend_graph_runner = (
+            None
+            if self.disable_draft_extend_cuda_graph
+            else self.cuda_graph_runner_for_draft_extend
+        )
         with self.plan_stream_ctx:
             forward_batch = draft_input.prepare_for_extend_to_fill_draft_kvcache(
                 batch,
                 batch_result.next_token_ids,
                 self.speculative_num_draft_tokens,
                 self.draft_runner,
-                None,  # DEBUG: was self.cuda_graph_runner_for_draft_extend
+                _draft_extend_graph_runner,
             )
 
         if self.plan_stream:
@@ -645,9 +657,21 @@ class EagleDraftWorker(BaseDraftWorker):
         if forward_batch.spec_info.accept_length is None:
             forward_batch.spec_info.accept_length = batch_result.accept_lens
 
+        # I1: check draft extend forward_batch inputs after prepare
+        torch._assert_async(
+            ~torch.isnan(forward_batch.spec_info.hidden_states).any(),
+            "I1: forward_batch hidden_states has NaN after prepare",
+        )
+        torch._assert_async(
+            ~torch.isinf(forward_batch.spec_info.hidden_states).any(),
+            "I1: forward_batch hidden_states has Inf after prepare",
+        )
+
         # Run draft extend batch in the main compute stream
-        # DEBUG: force eager to test if NaN is cuda graph specific
-        can_cuda_graph = False
+        can_cuda_graph = (
+            _draft_extend_graph_runner
+            and _draft_extend_graph_runner.can_run(forward_batch)
+        )
         if can_cuda_graph:
             draft_logits_output = self.cuda_graph_runner_for_draft_extend.replay(
                 forward_batch
