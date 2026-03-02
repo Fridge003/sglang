@@ -437,6 +437,8 @@ class EAGLEDraftExtendCudaGraphRunner:
             buffers.seq_lens.fill_(self.seq_len_fill_value)
             buffers.out_cache_loc.zero_()
             buffers.positions.zero_()
+            buffers.input_ids.zero_()
+            buffers.hidden_states.zero_()
             buffers.accept_length.fill_(self.num_tokens_per_bs)
             buffers.extend_seq_lens.fill_(self.num_tokens_per_bs)
 
@@ -530,15 +532,24 @@ class EAGLEDraftExtendCudaGraphRunner:
         self._replay(forward_batch)
         out = self.output_buffers[bs]
 
-        # G3: check raw graph output (full padded batch)
+        # H1: check valid portion of graph output
         torch._assert_async(
-            ~torch.isnan(out.next_token_logits).any(),
-            "G3: raw graph output next_token_logits has NaN (full padded batch)",
+            ~torch.isnan(out.next_token_logits[:num_tokens]).any(),
+            "H1: graph output next_token_logits has NaN in VALID slots",
         )
+        # H2: check padded portion of graph output
+        if bs * self.num_tokens_per_bs > num_tokens:
+            padded_logits = out.next_token_logits[num_tokens:]
+            has_nan_in_pad = torch.isnan(padded_logits).any()
+            torch._assert_async(
+                ~has_nan_in_pad,
+                "H2: graph output next_token_logits has NaN in PADDED slots only (benign)",
+            )
+        # H3: valid hidden_states
         if out.hidden_states is not None:
             torch._assert_async(
-                ~torch.isnan(out.hidden_states).any(),
-                "G3: raw graph output hidden_states has NaN (full padded batch)",
+                ~torch.isnan(out.hidden_states[:num_tokens]).any(),
+                "H3: graph output hidden_states has NaN in VALID slots",
             )
 
         if self.forward_mode == ForwardMode.DRAFT_EXTEND_V2:
