@@ -975,7 +975,7 @@ jobs:
         run: |
           source /etc/profile.d/sglang-ci.sh
           cd test/
-          python -m unittest registered.spec.eagle.test_eagle_infer_beta -v
+          python -m unittest registered.spec.eagle.test_eagle_infer_b -v
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
