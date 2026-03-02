@@ -576,9 +576,8 @@ class DiffusersPipeline(ComposedPipelineBase):
         # check if the pipeline has 'transformer' or 'unet' components which are
         # typically the most expensive parts to compile. 'transformer_2' for some
         # video pipelines, e.g, Wan 2.2 series, also check for that.
-        if not any(
-            hasattr(pipe, comp) for comp in ["transformer", "transformer_2", "unet"]
-        ):
+        compilable_components = ["transformer", "transformer_2", "unet"]
+        if not any(hasattr(pipe, comp) for comp in compilable_components):
             logger.warning(
                 "Pipeline does not have 'transformer' or 'unet' components. "
                 "torch.compile may not provide significant benefits and could increase latency."
@@ -596,7 +595,7 @@ class DiffusersPipeline(ComposedPipelineBase):
                     f"Failed to set torch_compile configs for cache-dit: {e}"
                 )
 
-        for comp in ["transformer", "transformer_2", "unet"]:
+        for comp in compilable_components:
             if hasattr(pipe, comp):
                 try:
                     component = getattr(pipe, comp)
