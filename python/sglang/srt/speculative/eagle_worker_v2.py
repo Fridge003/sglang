@@ -571,9 +571,30 @@ class EagleDraftWorker(BaseDraftWorker):
         logits_output = self.draft_runner.forward(forward_batch).logits_output
 
         # Update spec_info for the next draft step
+        # E1: logits before softmax (prefill path)
+        torch._assert_async(
+            ~torch.isnan(logits_output.next_token_logits).any(),
+            "E1: next_token_logits has NaN in _draft_extend_for_prefill",
+        )
+        torch._assert_async(
+            ~torch.isinf(logits_output.next_token_logits).any(),
+            "E1: next_token_logits has Inf in _draft_extend_for_prefill",
+        )
         probs = torch.softmax(logits_output.next_token_logits, dim=-1)
+        torch._assert_async(
+            ~torch.isnan(probs).any(),
+            "E2: probs has NaN in _draft_extend_for_prefill",
+        )
         next_draft_input.topk_p, next_draft_input.topk_index = fast_topk(
             probs, self.topk, dim=-1
+        )
+        torch._assert_async(
+            ~torch.isnan(next_draft_input.topk_p).any(),
+            "E3: topk_p has NaN after fast_topk in _draft_extend_for_prefill",
+        )
+        torch._assert_async(
+            ~torch.isnan(logits_output.hidden_states).any(),
+            "E4: hidden_states has NaN in _draft_extend_for_prefill",
         )
         next_draft_input.hidden_states = logits_output.hidden_states
         return next_draft_input
@@ -633,9 +654,30 @@ class EagleDraftWorker(BaseDraftWorker):
         draft_logits_output.hidden_states = draft_logits_output.hidden_states[
             select_index
         ]
+        # E1: logits before softmax (decode path)
+        torch._assert_async(
+            ~torch.isnan(draft_logits_output.next_token_logits).any(),
+            "E1: next_token_logits has NaN in _draft_extend_for_decode",
+        )
+        torch._assert_async(
+            ~torch.isinf(draft_logits_output.next_token_logits).any(),
+            "E1: next_token_logits has Inf in _draft_extend_for_decode",
+        )
         probs = torch.softmax(draft_logits_output.next_token_logits, dim=-1)
+        torch._assert_async(
+            ~torch.isnan(probs).any(),
+            "E2: probs has NaN in _draft_extend_for_decode",
+        )
         ret_topk_p, ret_topk_index = fast_topk(probs, self.topk, dim=-1)
+        torch._assert_async(
+            ~torch.isnan(ret_topk_p).any(),
+            "E3: topk_p has NaN after fast_topk in _draft_extend_for_decode",
+        )
         ret_hidden_states = draft_logits_output.hidden_states
+        torch._assert_async(
+            ~torch.isnan(ret_hidden_states).any(),
+            "E4: hidden_states has NaN in _draft_extend_for_decode",
+        )
 
         # Construct the return values
         next_draft_input = batch_result.next_draft_input

@@ -1019,6 +1019,15 @@ class EAGLEWorker(TpModelWorker):
                 logits_output.topk_index,
             )
             forward_batch.spec_info.hidden_states = logits_output.hidden_states
+            # E5: cuda graph path outputs
+            torch._assert_async(
+                ~torch.isnan(forward_batch.spec_info.topk_p).any(),
+                "E5: topk_p has NaN from cuda_graph draft_extend",
+            )
+            torch._assert_async(
+                ~torch.isnan(forward_batch.spec_info.hidden_states).any(),
+                "E5: hidden_states has NaN from cuda_graph draft_extend",
+            )
         else:
             forward_batch.can_run_dp_cuda_graph = False
             if not forward_batch.forward_mode.is_idle():
@@ -1047,8 +1056,32 @@ class EAGLEWorker(TpModelWorker):
     def capture_for_decode(
         self, logits_output: LogitsProcessorOutput, draft_input: EagleDraftInput
     ):
+        # E1: logits from draft extend before softmax
+        torch._assert_async(
+            ~torch.isnan(logits_output.next_token_logits).any(),
+            "E1: next_token_logits has NaN in capture_for_decode",
+        )
+        torch._assert_async(
+            ~torch.isinf(logits_output.next_token_logits).any(),
+            "E1: next_token_logits has Inf in capture_for_decode",
+        )
         probs = torch.softmax(logits_output.next_token_logits, dim=-1)
+        # E2: probs after softmax
+        torch._assert_async(
+            ~torch.isnan(probs).any(),
+            "E2: probs has NaN in capture_for_decode",
+        )
         draft_input.topk_p, draft_input.topk_index = fast_topk(probs, self.topk, dim=-1)
+        # E3: topk_p from fast_topk
+        torch._assert_async(
+            ~torch.isnan(draft_input.topk_p).any(),
+            "E3: topk_p has NaN after fast_topk in capture_for_decode",
+        )
+        # E4: hidden_states from draft extend
+        torch._assert_async(
+            ~torch.isnan(logits_output.hidden_states).any(),
+            "E4: hidden_states has NaN in capture_for_decode",
+        )
         draft_input.hidden_states = logits_output.hidden_states
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
