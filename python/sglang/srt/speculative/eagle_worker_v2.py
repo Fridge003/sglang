@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import os
 import time
 from typing import List, Optional, Tuple
 
@@ -645,8 +646,12 @@ class EagleDraftWorker(BaseDraftWorker):
             forward_batch.spec_info.accept_length = batch_result.accept_lens
 
         # Run draft extend batch in the main compute stream
+        _force_eager_draft_extend = (
+            os.environ.get("SGLANG_FORCE_EAGER_DRAFT_EXTEND", "0") == "1"
+        )
         can_cuda_graph = (
-            self.cuda_graph_runner_for_draft_extend
+            not _force_eager_draft_extend
+            and self.cuda_graph_runner_for_draft_extend
             and self.cuda_graph_runner_for_draft_extend.can_run(forward_batch)
         )
         if can_cuda_graph:
