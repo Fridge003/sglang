@@ -573,13 +573,6 @@ class DiffusersPipeline(ComposedPipelineBase):
         if not server_args.enable_torch_compile:
             return pipe
 
-        if not hasattr(torch, "compile"):
-            logger.warning(
-                "torch.compile is not available in this PyTorch version. "
-                "Please upgrade to PyTorch 2.0+ to use torch.compile."
-            )
-            return pipe
-
         # check if the pipeline has 'transformer' or 'unet' components which are
         # typically the most expensive parts to compile. 'transformer_2' for some
         # video pipelines, e.g, Wan 2.2 series, also check for that.
