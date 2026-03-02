@@ -253,12 +253,12 @@ class Req:
             else None
         )
 
-    def set_as_warmup(self):
+    def set_as_warmup(self, server_args: Optional[ServerArgs] = None):
         self.is_warmup = True
         self.save_output = False
         self.suppress_logs = True
         self.extra["cache_dit_num_inference_steps"] = self.num_inference_steps
-        self.num_inference_steps = 1
+        self.num_inference_steps = server_args.warmup_steps if server_args else 1
 
     def validate(self):
         """Initialize dependent fields after dataclass initialization."""
@@ -272,8 +272,12 @@ class Req:
 
         self.metrics = RequestMetrics(request_id=self.request_id)
 
-        if self.is_warmup:
-            self.set_as_warmup()
+        # NOTE(DefTruth): DON'T call set_as_warmup here, as it will override
+        # num_inference_steps and other parameters that might be set for warmup
+        # in server_args. Instead, the caller should explicitly call set_as_warmup()
+        # after creating the Req object if it's a warmup request.
+        # if self.is_warmup:
+        #     self.set_as_warmup()
 
     def adjust_size(self, server_args: ServerArgs):
         pass

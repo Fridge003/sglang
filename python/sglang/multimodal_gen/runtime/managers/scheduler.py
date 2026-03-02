@@ -233,7 +233,7 @@ class Scheduler:
                         height=height,
                         prompt="",
                     )
-                req.set_as_warmup()
+                req.set_as_warmup(server_args=self.server_args)
                 self.waiting_queue.append((None, req))
             # if server is warmed-up, set this flag to avoid req-based warmup
             self.warmed_up = True
@@ -254,7 +254,7 @@ class Scheduler:
         identity, req = recv_reqs[0]
         if isinstance(req, Req):
             warmup_req = deepcopy(req)
-            warmup_req.set_as_warmup()
+            warmup_req.set_as_warmup(server_args=self.server_args)
             recv_reqs.insert(0, (identity, warmup_req))
             self._warmup_total = 1
             self._warmup_processed = 0
