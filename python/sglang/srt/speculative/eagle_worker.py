@@ -673,8 +673,32 @@ class EAGLEWorker(TpModelWorker):
             if self.server_args.enable_nan_detection:
                 detect_nan(logits_output)
             probs = torch.softmax(logits_output.next_token_logits, dim=-1)
+            # C4: probs no NaN
+            torch._assert_async(
+                ~torch.isnan(probs).any(),
+                "C4: probs has NaN after softmax in draft_forward",
+            )
             topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
+            # C1: fast_topk index in valid range
+            torch._assert_async(
+                (topk_index < probs.shape[-1]).all(),
+                "C1: fast_topk returned index >= vocab_size",
+            )
+            torch._assert_async(
+                (topk_index >= 0).all(),
+                "C1b: fast_topk returned negative index",
+            )
+            # C2: fast_topk values no NaN
+            torch._assert_async(
+                ~torch.isnan(topk_p).any(),
+                "C2: fast_topk returned NaN probability",
+            )
             if self.hot_token_id is not None:
+                # C3: hot_token_id indexing bounds
+                torch._assert_async(
+                    (topk_index < self.hot_token_id.shape[0]).all(),
+                    "C3: topk_index OOB for hot_token_id lookup",
+                )
                 topk_index = self.hot_token_id[topk_index]
             hidden_states = logits_output.hidden_states
 

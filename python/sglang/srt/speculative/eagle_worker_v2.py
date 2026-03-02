@@ -430,8 +430,32 @@ class EagleDraftWorker(BaseDraftWorker):
             if self.server_args.enable_nan_detection:
                 detect_nan(logits_output)
             probs = torch.softmax(logits_output.next_token_logits, dim=-1)
+            # C4: probs no NaN
+            torch._assert_async(
+                ~torch.isnan(probs).any(),
+                "C4: probs has NaN after softmax in draft_forward",
+            )
             topk_p, topk_index = fast_topk(probs, self.topk, dim=-1)
+            # C1: fast_topk index in valid range
+            torch._assert_async(
+                (topk_index < probs.shape[-1]).all(),
+                "C1: fast_topk returned index >= vocab_size",
+            )
+            torch._assert_async(
+                (topk_index >= 0).all(),
+                "C1b: fast_topk returned negative index",
+            )
+            # C2: fast_topk values no NaN
+            torch._assert_async(
+                ~torch.isnan(topk_p).any(),
+                "C2: fast_topk returned NaN probability",
+            )
             if self.hot_token_id is not None:
+                # C3: hot_token_id indexing bounds
+                torch._assert_async(
+                    (topk_index < self.hot_token_id.shape[0]).all(),
+                    "C3: topk_index OOB for hot_token_id lookup",
+                )
                 topk_index = self.hot_token_id[topk_index]
             hidden_states = logits_output.hidden_states
 
@@ -442,11 +466,26 @@ class EagleDraftWorker(BaseDraftWorker):
         ss_token_list = torch.cat(
             token_list, dim=1
         )  # b, (self.topk + (num_steps-1) * self.topk)
+        # C10: shape consistency
+        assert score_list.shape[1] == ss_token_list.shape[1], (
+            f"C10: shape mismatch: score_list.shape={score_list.shape}, "
+            f"ss_token_list.shape={ss_token_list.shape}"
+        )
         top_scores = torch.topk(
             score_list, self.speculative_num_draft_tokens - 1, dim=-1
         )
         top_scores_index = top_scores.indices
         top_scores_index = torch.sort(top_scores_index).values
+        # C11: top_scores_index upper bound for gather-B
+        torch._assert_async(
+            (top_scores_index < ss_token_list.shape[1]).all(),
+            "C11: top_scores_index OOB for gather-B",
+        )
+        # C12: top_scores_index non-negative
+        torch._assert_async(
+            (top_scores_index >= 0).all(),
+            "C12: top_scores_index has negative values",
+        )
         draft_tokens = torch.gather(ss_token_list, index=top_scores_index, dim=1)
 
         if len(parents_list) > 1:
