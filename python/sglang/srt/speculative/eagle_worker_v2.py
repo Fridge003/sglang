@@ -658,6 +658,12 @@ class EagleDraftWorker(BaseDraftWorker):
                 ~torch.isnan(draft_logits_output.next_token_logits).any(),
                 "F3: raw next_token_logits has NaN from cuda_graph draft_extend",
             )
+            # G4: graph output hidden_states
+            if draft_logits_output.hidden_states is not None:
+                torch._assert_async(
+                    ~torch.isnan(draft_logits_output.hidden_states).any(),
+                    "G4: hidden_states has NaN from cuda_graph draft_extend",
+                )
         else:
             draft_logits_output = self.draft_runner.forward(
                 forward_batch, skip_attn_backend_init=True

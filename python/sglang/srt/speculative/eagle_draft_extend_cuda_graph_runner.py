@@ -449,12 +449,31 @@ class EAGLEDraftExtendCudaGraphRunner:
             buffers.extend_seq_lens[:raw_bs].fill_(self.num_tokens_per_bs)
         buffers.out_cache_loc[:num_tokens].copy_(forward_batch.out_cache_loc)
         buffers.positions[:num_tokens].copy_(forward_batch.positions)
+        # G1: check hidden_states input before copy
+        torch._assert_async(
+            ~torch.isnan(forward_batch.spec_info.hidden_states).any(),
+            "G1: spec_info.hidden_states has NaN before copy into cuda graph buffer",
+        )
         if (
             forward_batch.spec_info.hidden_states.shape[1]
             == buffers.hidden_states.shape[1]
         ):
             buffers.hidden_states[:num_tokens].copy_(
                 forward_batch.spec_info.hidden_states
+            )
+            # G2: verify copy succeeded
+            torch._assert_async(
+                ~torch.isnan(buffers.hidden_states[:num_tokens]).any(),
+                "G2: buffers.hidden_states has NaN after copy",
+            )
+        else:
+            # G2b: hidden_states shape mismatch — copy skipped!
+            import logging
+
+            logging.warning(
+                f"G2b: hidden_states shape mismatch! "
+                f"spec_info={forward_batch.spec_info.hidden_states.shape}, "
+                f"buffer={buffers.hidden_states.shape}. Copy SKIPPED."
             )
         if forward_batch.spec_info.accept_length is not None:
             buffers.accept_length[:raw_bs].copy_(forward_batch.spec_info.accept_length)
@@ -510,6 +529,17 @@ class EAGLEDraftExtendCudaGraphRunner:
         self.bs = bs
         self._replay(forward_batch)
         out = self.output_buffers[bs]
+
+        # G3: check raw graph output (full padded batch)
+        torch._assert_async(
+            ~torch.isnan(out.next_token_logits).any(),
+            "G3: raw graph output next_token_logits has NaN (full padded batch)",
+        )
+        if out.hidden_states is not None:
+            torch._assert_async(
+                ~torch.isnan(out.hidden_states).any(),
+                "G3: raw graph output hidden_states has NaN (full padded batch)",
+            )
 
         if self.forward_mode == ForwardMode.DRAFT_EXTEND_V2:
             # DRAFT_EXTEND_V2: all tokens calculations whether accepted or not.
