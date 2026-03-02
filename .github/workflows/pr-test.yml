@@ -975,7 +975,7 @@ jobs:
         run: |
           source /etc/profile.d/sglang-ci.sh
           cd test/
-          python -m pytest registered/spec/eagle/test_eagle_infer_beta.py -x --timeout=1800 -v
+          python -m pytest registered/spec/eagle/test_eagle_infer_beta.py -x -v
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1027,7 +1027,7 @@ jobs:
         timeout-minutes: 30
         run: |
           cd test/
-          python -m pytest registered/spec/eagle/test_eagle_infer_b.py -x --timeout=1800 -v
+          python -m pytest registered/spec/eagle/test_eagle_infer_b.py -x -v
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
