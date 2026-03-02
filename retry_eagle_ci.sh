@@ -1,4 +1,12 @@
 #!/bin/bash
+
+# pane 1
+# TARGET_STAGE=stage-b-test-large-1-gpu bash retry_eagle_ci.sh 2>&1 | tee retry_large.log
+
+# pane 2
+# TARGET_STAGE=stage-b-test-small-1-gpu bash retry_eagle_ci.sh 2>&1 | tee retry_small.log
+
+
 set -euo pipefail
 
 export PATH="/usr/local/bin:/opt/homebrew/bin:$PATH"
