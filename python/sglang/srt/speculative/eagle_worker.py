@@ -622,6 +622,15 @@ class EAGLEWorker(TpModelWorker):
             spec_info.topk_index,
             spec_info.hidden_states,
         )
+        # D1: initial inputs from target model verify
+        torch._assert_async(
+            ~torch.isnan(topk_p).any(),
+            "D1: initial topk_p from spec_info has NaN",
+        )
+        torch._assert_async(
+            ~torch.isnan(hidden_states).any(),
+            "D1: initial hidden_states from spec_info has NaN",
+        )
         if self.hot_token_id is not None:
             topk_index = self.hot_token_id[topk_index]
         # TODO: We only need self.speculative_num_steps - 1 cache loc
@@ -666,12 +675,29 @@ class EAGLEWorker(TpModelWorker):
             forward_batch.attn_backend = self.draft_attn_backend.attn_backends[i]
             spec_info.hidden_states = hidden_states
 
+            # D2: hidden_states input to draft model
+            torch._assert_async(
+                ~torch.isnan(hidden_states).any(),
+                "D2: hidden_states input to draft model has NaN",
+            )
+
             # Run forward
             logits_output = self.draft_model_runner.forward(
                 forward_batch, skip_attn_backend_init=True
             ).logits_output
             if self.server_args.enable_nan_detection:
                 detect_nan(logits_output)
+
+            # D3: logits before softmax
+            torch._assert_async(
+                ~torch.isnan(logits_output.next_token_logits).any(),
+                "D3: next_token_logits has NaN before softmax",
+            )
+            torch._assert_async(
+                ~torch.isinf(logits_output.next_token_logits).any(),
+                "D3: next_token_logits has Inf before softmax",
+            )
+
             probs = torch.softmax(logits_output.next_token_logits, dim=-1)
             # C4: probs no NaN
             torch._assert_async(
@@ -701,6 +727,11 @@ class EAGLEWorker(TpModelWorker):
                 )
                 topk_index = self.hot_token_id[topk_index]
             hidden_states = logits_output.hidden_states
+            # D4: hidden_states output from draft model
+            torch._assert_async(
+                ~torch.isnan(hidden_states).any(),
+                "D4: hidden_states output from draft model has NaN",
+            )
 
         parent_list, top_scores_index, draft_tokens = organize_draft_results(
             score_list, token_list, parents_list, self.speculative_num_draft_tokens
