@@ -167,6 +167,10 @@ class SchedulerRuntimeCheckerMixin:
         memory_leak = (available_size + evictable_size) != (
             self.max_total_num_tokens - protected_size - session_held
         )
+        token_msg = (
+            f"{available_size=}, {evictable_size=}, "
+            f"{self.max_total_num_tokens=}, {protected_size=}, {session_held=}\n"
+        )
 
         return memory_leak, token_msg
 
