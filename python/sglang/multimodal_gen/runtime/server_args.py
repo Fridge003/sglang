@@ -448,7 +448,7 @@ class ServerArgs:
 
         if self.warmup:
             logger.info(
-                "Warmup enabled the launch time is expected to be longer than usual"
+                "Warmup enabled, the launch time is expected to be longer than usual"
             )
 
     def _adjust_network_ports(self):
