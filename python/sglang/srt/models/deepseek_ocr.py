@@ -125,8 +125,9 @@ def isin_list(
     elements: torch.Tensor,
     test_elements_list: list[int],
 ) -> torch.Tensor:
-    test_elements = torch.tensor(test_elements_list, pin_memory=True).to(
-        device=elements.device, non_blocking=True
+    use_pin = torch.cuda.is_available() and not getattr(torch.version, "hip", None)
+    test_elements = torch.tensor(test_elements_list, pin_memory=use_pin).to(
+        device=elements.device, non_blocking=use_pin
     )
 
     return torch.isin(elements, test_elements)
