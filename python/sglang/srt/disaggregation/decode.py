@@ -53,6 +53,8 @@ from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
 from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.radix_cache import RadixKey
+from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
 from sglang.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -364,6 +366,41 @@ class DecodePreallocQueue:
                 return
             self._create_receiver_and_enqueue(req, prefill_dp_rank)
 
+    def _match_prefix_and_lock(self, req: Req) -> Tuple[torch.Tensor, int]:
+        """
+        When decode side radix cache is enabled, we need to
+        1. match prefix using radix tree
+        2. lock those nodes to prevent eviction until req lifecycle ends
+        3. return the length/information of the prefix
+        """
+        if self.scheduler.server_args.disable_radix_cache:
+            raise ValueError("You shouldn't ever hit this lol")
+        
+        (
+            prefix_indices,
+            last_device_node,
+            last_host_node,
+            host_hit_length,
+            mamba_branching_seqlen,
+        ) = self.tree_cache.match_prefix(
+            MatchPrefixParams(
+                key=RadixKey(req.origin_input_ids),
+                req=req,
+                cow_mamba=self.tree_cache.supports_mamba(),
+            )
+        )
+        # TODO: hicache support
+        if len(prefix_indices) > 0:
+            print(f"prefix_indices: {prefix_indices}")
+            self.tree_cache.inc_lock_ref(last_device_node)
+
+        # we do this to ensure that whenever dec_loc_ref is called
+        # on the Req object, we are not dereferencing a `None`. In the
+        # agg case, the scheduler does this already
+        req.last_node = last_device_node
+
+        return prefix_indices, len(prefix_indices)
+
     def _resolve_prefill_dp_rank(self, req: Req) -> Optional[int]:
         if req.disagg_prefill_dp_rank is not None:
             return req.disagg_prefill_dp_rank
@@ -591,17 +628,26 @@ class DecodePreallocQueue:
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
                 break
 
+            # Match prefix against decode's radix cache
+            if not self.scheduler.server_args.disable_radix_cache:
+                prefix_indices, prefix_len = self._match_prefix_and_lock(
+                    decode_req.req
+                )
+            else:
+                prefix_indices, prefix_len = None, 0
+
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
             origin_input_len = len(decode_req.req.origin_input_ids)
             required_tokens_for_request = (
-                origin_input_len + self.num_reserved_decode_tokens
+                origin_input_len - prefix_len + self.num_reserved_decode_tokens
             )
 
             if (
                 max(
                     required_tokens_for_request,
                     origin_input_len
+                    - prefix_len
                     + min(
                         decode_req.req.sampling_params.max_new_tokens,
                         CLIP_MAX_NEW_TOKEN,
@@ -610,16 +656,21 @@ class DecodePreallocQueue:
                 )
                 > allocatable_tokens
             ):
+                if prefix_len > 0:
+                    self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
             if required_tokens_for_request > allocatable_tokens:
+                if prefix_len > 0:
+                    self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
             allocatable_tokens -= required_tokens_for_request
-            self._pre_alloc(decode_req.req)
+            self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
 
+            # Only send delta indices (beyond prefix) to prefill
             kv_indices = (
                 self.req_to_token_pool.req_to_token[decode_req.req.req_pool_idx][
-                    : len(decode_req.req.origin_input_ids)
+                    prefix_len : len(decode_req.req.origin_input_ids)
                 ]
                 .cpu()
                 .numpy()
@@ -671,7 +722,8 @@ class DecodePreallocQueue:
             assert decode_req.metadata_buffer_index is not None
             page_indices = kv_to_page_indices(kv_indices, page_size)
             decode_req.kv_receiver.init(
-                page_indices, decode_req.metadata_buffer_index, state_indices
+                page_indices, decode_req.metadata_buffer_index, state_indices,
+                decode_prefix_len=prefix_len,
             )
             preallocated_reqs.append(decode_req)
             indices_to_remove.add(i)
@@ -739,40 +791,55 @@ class DecodePreallocQueue:
             )
         return allocatable_tokens
 
-    def _pre_alloc(self, req: Req) -> torch.Tensor:
+    def _pre_alloc(self, req: Req, prefix_indices: Optional[torch.Tensor] = None, prefix_len: Optional[int] = None) -> torch.Tensor:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
+        if prefix_len is None:
+            prefix_len = 0
+
         req_pool_indices = self.req_to_token_pool.alloc([req])
 
         assert (
             req_pool_indices is not None
         ), "req_pool_indices is full! There is a bug in memory estimation."
 
-        # Alloc all tokens for the prebuilt req (except for the reserved input token for decoding)
         fill_len = len(req.origin_input_ids) + max(len(req.output_ids) - 1, 0)
         req.kv_allocated_len = fill_len
         req.kv_committed_len = fill_len
+
+        if prefix_len > 0:
+            self.req_to_token_pool.write(
+                (req.req_pool_idx, slice(0, prefix_len)), prefix_indices
+            )
+
+        delta_len = fill_len - prefix_len
         if self.token_to_kv_pool_allocator.page_size == 1:
-            kv_loc = self.token_to_kv_pool_allocator.alloc(fill_len)
+            kv_loc = self.token_to_kv_pool_allocator.alloc(delta_len)
         else:
             device = self.token_to_kv_pool_allocator.device
+            last_loc = (
+                prefix_indices[-1:].to(dtype=torch.int64, device=device)
+                if prefix_len > 0
+                else torch.tensor([-1], dtype=torch.int64, device=device)
+            )
             kv_loc = self.token_to_kv_pool_allocator.alloc_extend(
-                prefix_lens=torch.tensor([0], dtype=torch.int64, device=device),
-                prefix_lens_cpu=torch.tensor([0], dtype=torch.int64),
+                prefix_lens=torch.tensor([prefix_len], dtype=torch.int64, device=device),
+                prefix_lens_cpu=torch.tensor([prefix_len], dtype=torch.int64),
                 seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
                 seq_lens_cpu=torch.tensor([fill_len], dtype=torch.int64),
-                last_loc=torch.tensor([-1], dtype=torch.int64, device=device),
-                extend_num_tokens=fill_len,
+                last_loc=last_loc,
+                extend_num_tokens=delta_len,
             )
 
         assert (
             kv_loc is not None
         ), "KV cache is full! There is a bug in memory estimation."
 
-        self.req_to_token_pool.write((req.req_pool_idx, slice(0, len(kv_loc))), kv_loc)
+        self.req_to_token_pool.write(
+            (req.req_pool_idx, slice(prefix_len, prefix_len + len(kv_loc))), kv_loc
+        )
 
-        # populate metadata
         req.fill_ids = req.origin_input_ids + req.output_ids
-        req.set_extend_input_len(len(req.fill_ids))
+        req.set_extend_input_len(len(req.fill_ids) - prefix_len)
 
         return kv_loc
 
@@ -1121,7 +1188,9 @@ class SchedulerDisaggregationDecodeMixin:
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt()
+        self.token_to_kv_pool_allocator.free_group_begin()
         new_batch.process_prebuilt(self.server_args, self.future_map)
+        self.token_to_kv_pool_allocator.free_group_end()
 
         return new_batch
 

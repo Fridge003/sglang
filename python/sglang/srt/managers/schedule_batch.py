@@ -512,6 +512,7 @@ class Req(ReqDllmMixin):
         disagg_mode: Optional[DisaggregationMode] = None,
         routed_dp_rank: Optional[int] = None,
         disagg_prefill_dp_rank: Optional[int] = None,
+        decode_prefix_len: Optional[int] = None, # for decode radix cache
         vocab_size: Optional[int] = None,
         priority: Optional[int] = None,
         metrics_collector: Optional[SchedulerMetricsCollector] = None,
@@ -774,6 +775,11 @@ class Req(ReqDllmMixin):
 
         self.routed_dp_rank: Optional[int] = routed_dp_rank
         self.disagg_prefill_dp_rank: Optional[int] = disagg_prefill_dp_rank
+
+        # for experimental decode radix cache
+        # tells prefill how many tokens are already cached which allows
+        # prefill to skip sending over the entire prefix over and over
+        self.decode_prefix_len: Optional[int] = decode_prefix_len
 
         # the start index of the sent kv cache
         # We want to send it chunk by chunk for chunked prefill.

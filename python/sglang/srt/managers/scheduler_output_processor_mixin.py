@@ -82,6 +82,7 @@ class SchedulerOutputProcessorMixin:
 
     def process_batch_result_prebuilt(self: Scheduler, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
+        self.token_to_kv_pool_allocator.free_group_begin()
         for req in batch.reqs:
             req.time_stats.set_decode_prebuilt_finish_time()
             req.check_finished()
@@ -91,6 +92,7 @@ class SchedulerOutputProcessorMixin:
 
         # Note: Logprobs should be handled on the prefill engine.
         self.stream_output(batch.reqs, batch.return_logprob)
+        self.token_to_kv_pool_allocator.free_group_end()
 
     def maybe_collect_routed_experts(self: Scheduler, req: Req):
         """Collect routed experts for a finished request."""

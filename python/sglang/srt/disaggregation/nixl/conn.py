@@ -41,6 +41,7 @@ class TransferInfo:
     dst_aux_index: int
     required_dst_info_num: int
     dst_state_indices: List[int]
+    decode_prefix_len: Optional[int] = None # for decode radix cache
 
     def is_dummy(self):
         return self.dst_kv_indices.size == 0
@@ -62,6 +63,7 @@ class TransferInfo:
             dst_aux_index=int(msg[5].decode("ascii")),
             required_dst_info_num=int(msg[6].decode("ascii")),
             dst_state_indices=dst_state_indices,
+            decode_prefix_len=int(msg[8].decode("ascii")) if len(msg) > 8 and msg[8] != b"" else None, # hacky just add it into the message that will be sent
         )
 
 
@@ -958,6 +960,7 @@ class NixlKVReceiver(CommonKVReceiver):
         kv_indices: npt.NDArray[np.int32],
         aux_index: Optional[int] = None,
         state_indices: Optional[List[int]] = None,
+        decode_prefix_len: Optional[int] = None
     ):
         if self.bootstrap_infos is None:
             logger.error(
@@ -991,6 +994,7 @@ class NixlKVReceiver(CommonKVReceiver):
                             if not is_dummy and state_indices is not None
                             else b""
                         ),
+                        str(decode_prefix_len or 0).encode("ascii")
                     ]
                 )
 

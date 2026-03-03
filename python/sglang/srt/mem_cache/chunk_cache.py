@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 
 
 class ChunkCache(BasePrefixCache):
+    """
+    ChunkCache is used as the KVCache backend when 
+    1.  RadixCache is disabled
+    2.  Chunked prefill is enabled
+
+    It is also used for decode server in P/D disagg
+    """
+
     def __init__(self, params: CacheInitParams):
         self.req_to_token_pool = params.req_to_token_pool
         self.token_to_kv_pool_allocator = params.token_to_kv_pool_allocator
