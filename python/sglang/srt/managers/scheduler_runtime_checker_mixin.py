@@ -167,7 +167,7 @@ class SchedulerRuntimeCheckerMixin:
         memory_leak = (available_size + evictable_size) != (
             self.max_total_num_tokens - protected_size - session_held
         )
-        token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, {session_held=}\n"
+
         return memory_leak, token_msg
 
     def _get_batch_uncached_size(self: Scheduler, batch: ScheduleBatch) -> int:
@@ -338,6 +338,8 @@ class SchedulerRuntimeCheckerMixin:
             if len(self.disagg_prefill_inflight_queue) > 0:
                 return
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            if len(self.running_batch.reqs) > 0:
+                return
             queue_size = (
                 len(self.waiting_queue)
                 + len(self.disagg_decode_transfer_queue.queue)

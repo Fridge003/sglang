@@ -390,7 +390,6 @@ class DecodePreallocQueue:
         )
         # TODO: hicache support
         if len(prefix_indices) > 0:
-            print(f"prefix_indices: {prefix_indices}")
             self.tree_cache.inc_lock_ref(last_device_node)
 
         # we do this to ensure that whenever dec_loc_ref is called
@@ -665,6 +664,7 @@ class DecodePreallocQueue:
 
             allocatable_tokens -= required_tokens_for_request
             self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
+            decode_req.req.cache_protected_len = prefix_len
 
             # Only send delta indices (beyond prefix) to prefill
             kv_indices = (
@@ -1152,7 +1152,16 @@ class SchedulerDisaggregationDecodeMixin:
             # we can only add at least `num_not_used_batch` new batch to the running queue
             if i < num_not_used_batch:
                 can_run_list.append(req)
-                req.init_next_round_input(self.tree_cache)
+                # Decode-radix path: do NOT re-match prefix here.
+                # `pop_preallocated` already took a tree snapshot and used it
+                # to (1) pre-allocate KV, (2) choose delta pages for transfer,
+                # and (3) set cache_protected_len/last_node for correct frees.
+                # Re-matching now can observe a newer tree (other reqs may have
+                # inserted the same prefix) and overwrite cache_protected_len,
+                # making `cache_unfinished_req` free the wrong range (leak).
+                # Non-radix decode keeps the original behavior.
+                tree_cache = None if not self.server_args.disable_radix_cache else self.tree_cache
+                req.init_next_round_input(tree_cache)
             else:
                 waiting_queue.append(req)
 
@@ -1175,9 +1184,7 @@ class SchedulerDisaggregationDecodeMixin:
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt()
-        self.token_to_kv_pool_allocator.free_group_begin()
         new_batch.process_prebuilt(self.server_args, self.future_map)
-        self.token_to_kv_pool_allocator.free_group_end()
 
         return new_batch
 

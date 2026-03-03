@@ -487,10 +487,9 @@ class RadixCache(BasePrefixCache):
             result = self.insert(
                 InsertParams(key=radix_key, value=values, priority=priority)
             )
-            new_prefix_len = result.prefix_len
             # Free the duplicates that were already in the tree
             self.token_to_kv_pool_allocator.free(
-                kv_indices[req.cache_protected_len : new_prefix_len]
+                kv_indices[req.cache_protected_len : result.prefix_len]
             )
         else:
             self.token_to_kv_pool_allocator.free(
