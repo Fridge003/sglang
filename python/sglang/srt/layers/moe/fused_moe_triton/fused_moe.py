@@ -469,7 +469,8 @@ def fused_experts_impl(
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
         use_fused_moe_sum_all_reduce = (
-            get_global_server_args().enable_fused_moe_sum_all_reduce
+            _is_cuda
+            and get_global_server_args().enable_fused_moe_sum_all_reduce
             and (not no_combine)
             and (curr_topk_ids.shape[1] > 2)
             and (not use_int8_w8a16)
