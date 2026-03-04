@@ -388,9 +388,8 @@ class DecodePreallocQueue:
                 cow_mamba=self.tree_cache.supports_mamba(),
             )
         )
-        # TODO: hicache support
-        if len(prefix_indices) > 0:
-            self.tree_cache.inc_lock_ref(last_device_node)
+        # Always lock to match aggregated scheduling behavior
+        self.tree_cache.inc_lock_ref(last_device_node)
 
         # we do this to ensure that whenever dec_loc_ref is called
         # on the Req object, we are not dereferencing a `None`. In the
@@ -838,6 +837,11 @@ class DecodePreallocQueue:
         )
 
         req.fill_ids = req.origin_input_ids + req.output_ids
+        # Set prefix_indices so downstream consumers (init_next_round_input,
+        # prepare_for_extend) see the correct prefix length. In the agg path
+        # this is done inside init_next_round_input, but decode-disagg needs
+        # allocation info before batch assembly so we set it here.
+        req.prefix_indices = prefix_indices if prefix_len > 0 else torch.empty((0,), dtype=torch.int64)
         req.set_extend_input_len(len(req.fill_ids) - prefix_len)
 
         return kv_loc
