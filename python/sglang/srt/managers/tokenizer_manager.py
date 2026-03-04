@@ -324,8 +324,12 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
         if self.server_args.tokenizer_worker_num == 1:
+            self.send_to_scheduler_context = zmq.Context(1)
             self.send_to_scheduler = get_zmq_socket(
-                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                self.send_to_scheduler_context,
+                zmq.PUSH,
+                port_args.scheduler_input_ipc_name,
+                True,
             )
         else:
             from sglang.srt.managers.multi_tokenizer_mixin import SenderWrapper
@@ -1327,7 +1331,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         async with self.is_pause_cond:
             self.is_pause = True
             if obj.mode != "abort":
-                await self.send_to_scheduler.send_pyobj(obj)
+                self.send_to_scheduler.send_pyobj(obj)
             else:
                 # we are using the model_update_lock to check if there is still on-going requests.
                 while True:
@@ -1341,7 +1345,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
     async def continue_generation(self, obj: ContinueGenerationReqInput):
         async with self.is_pause_cond:
             self.is_pause = False
-            await self.send_to_scheduler.send_pyobj(obj)
+            self.send_to_scheduler.send_pyobj(obj)
             self.is_pause_cond.notify_all()
 
     async def update_weights_from_disk(

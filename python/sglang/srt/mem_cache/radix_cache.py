@@ -495,7 +495,17 @@ class RadixCache(BasePrefixCache):
         if self.disable:
             return
 
-        token_ids = req.fill_ids
+        # Limit to kv_committed_len to avoid including tokens (e.g., the just-generated
+        # token in disagg prefill) that don't have computed KV yet. If fill_ids is longer
+        # than kv_committed_len, the extra tokens would produce stale values (0 from
+        # req_to_token_pool initialization), leading to spurious tree nodes and memory
+        # leak when page-aligned token counts happen to cross a page boundary.
+        kv_committed_len = req.kv_committed_len
+        token_ids = (
+            req.fill_ids[:kv_committed_len]
+            if kv_committed_len < len(req.fill_ids)
+            else req.fill_ids
+        )
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
         ]
@@ -619,9 +629,8 @@ class RadixCache(BasePrefixCache):
             node.lock_ref -= 1
             self._update_leaf_status(node)
             if node.parent is None:
-                assert (
-                    node is self.root_node
-                ), f"This request holds the node from another tree"
+                # Node belongs to a stale (flushed) tree — stop traversal gracefully.
+                break
             node = node.parent
         return delta
 

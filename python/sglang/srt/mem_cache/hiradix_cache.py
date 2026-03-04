@@ -76,6 +76,7 @@ class HiRadixCache(RadixCache):
                 allocator_type=server_args.hicache_storage_backend,
             )
         elif isinstance(self.kv_cache, NSATokenToKVPool):
+            # Check NSA before MLA since NSATokenToKVPool is a subclass of MLATokenToKVPool
             self.token_to_kv_pool_host = NSATokenToKVPoolHost(
                 self.kv_cache,
                 server_args.hicache_ratio,
@@ -94,7 +95,7 @@ class HiRadixCache(RadixCache):
                 allocator_type=server_args.hicache_storage_backend,
             )
         else:
-            raise ValueError(f"HiRadixCache only supports MHA and MLA yet")
+            raise ValueError(f"HiRadixCache only supports MHA and MLA and NSA yet")
 
         self.tp_group = params.tp_cache_group
         self.tp_world_size = torch.distributed.get_world_size(group=self.tp_group)
@@ -750,9 +751,8 @@ class HiRadixCache(RadixCache):
             self._update_leaf_status(node)
             self._update_host_leaf_status(node)
             if node.parent is None:
-                assert (
-                    node is self.root_node
-                ), f"This request holds the node from another tree"
+                # Node belongs to a stale (flushed) tree — stop traversal gracefully.
+                break
             node = node.parent
         return delta
 

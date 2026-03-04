@@ -132,11 +132,12 @@ class DeepEPMoE(FusedMoE):
             and not _is_npu
             and not (
                 get_moe_runner_backend().is_flashinfer_cutedsl()
+                and self.quant_config is not None
                 and self.quant_config.get_name() == "modelopt_fp4"
             )
+            and (self.use_fp8_w8a8 or self.use_w4afp8)
         ):
-            # NPU supports low_latency deepep without deepgemm
-            # FP4 quantization with flashinfer_cutedsl also supports low_latency deepep without deepgemm
+            # BF16 models don't need deep_gemm; they use per-expert torch.mm
             assert (
                 deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
             ), f"DeepEP {self.deepep_mode} mode requires deep_gemm"
@@ -153,6 +154,10 @@ class DeepEPMoE(FusedMoE):
             )
             # the last one is invalid rank_id
             self.expert_mask[:-1] = 1
+
+        # Set bf16_weights flag on dispatcher so dispatch skips FP8 quantization
+        if not self.use_fp8_w8a8 and not self.use_w4afp8:
+            self.dispatcher.set_quant_config({"bf16_weights": True})
 
     def forward(
         self,
@@ -228,6 +233,8 @@ class DeepEPMoE(FusedMoE):
         elif DispatchOutputChecker.format_is_deepep_normal(dispatch_output):
             if self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8(dispatch_output)
+            elif not self.use_fp8_w8a8:
+                output = self.forward_bf16_normal(dispatch_output)
             else:
                 assert False, "forward_deepgemm_contiguous is deprecated"
         elif DispatchOutputChecker.format_is_deepep_ll(dispatch_output):
@@ -238,6 +245,8 @@ class DeepEPMoE(FusedMoE):
                 output = self.forward_flashinfer_cutedsl(dispatch_output)
             elif self.use_w4afp8:
                 output = self.forward_cutlass_w4afp8_masked(dispatch_output)
+            elif not self.use_fp8_w8a8:
+                output = self.forward_bf16_ll(dispatch_output)
             else:
                 assert False, "forward_deepgemm_masked is deprecated"
 
@@ -340,6 +349,71 @@ class DeepEPMoE(FusedMoE):
             layer=self,
             dispatch_output=dispatch_output,
         )
+
+    def forward_bf16_normal(
+        self,
+        dispatch_output: DeepEPNormalDispatchOutput,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+
+        hidden_states = dispatch_output.hidden_states
+        topk_ids = dispatch_output.topk_ids
+        topk_weights = dispatch_output.topk_weights
+
+        if hidden_states.shape[0] == 0:
+            return hidden_states
+
+        # topk_ids uses local expert IDs (0..num_local_experts-1), -1 for remote.
+        # fused_experts handles -1 via moe_align_block_size filtering.
+        return fused_experts(
+            hidden_states=hidden_states,
+            w1=self.w13_weight,
+            w2=self.w2_weight,
+            topk_output=(topk_weights, topk_ids, None),
+            moe_runner_config=self.moe_runner_config,
+        )
+
+    def forward_bf16_ll(
+        self,
+        dispatch_output: DeepEPLLDispatchOutput,
+    ) -> torch.Tensor:
+        from sglang.srt.layers.moe.ep_moe.deepep_bf16_kernels import (
+            fused_act_mul_masked_inplace,
+        )
+
+        hidden_states = dispatch_output.hidden_states
+        masked_m = dispatch_output.masked_m
+        expected_m = dispatch_output.expected_m
+
+        _, max_tokens, _ = hidden_states.shape
+        if masked_m.numel() == 0 or max_tokens == 0:
+            return hidden_states
+
+        expected_m = min(expected_m, max_tokens)
+        if expected_m <= 0:
+            return hidden_states
+
+        tokens = hidden_states[:, :expected_m, :]
+
+        # 1. Gate+Up GEMM (cuBLAS batched GEMM)
+        gate_up = torch.bmm(tokens, self.w13_weight.transpose(1, 2))
+
+        # 2. Fused SiLU(gate)*up + masking in-place (1 Triton kernel replaces 6 ops)
+        fused_act_mul_masked_inplace(
+            gate_up,
+            self.intermediate_size_per_partition,
+            masked_m,
+            use_gelu=(self.moe_runner_config.activation == "gelu"),
+        )
+
+        # 3. Down GEMM into hidden_states (cuBLAS, non-contiguous input is OK)
+        torch.bmm(
+            gate_up[:, :, : self.intermediate_size_per_partition],
+            self.w2_weight.transpose(1, 2),
+            out=hidden_states[:, :expected_m, :],
+        )
+
+        return hidden_states
 
     def forward_npu(
         self,

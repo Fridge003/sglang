@@ -260,6 +260,19 @@ class MooncakeKVManager(CommonKVManager):
                 self.kv_args.state_data_ptrs, self.kv_args.state_data_lens
             )
 
+    def deregister_buffer_to_engine(self):
+        # Batch deregister KV data buffers
+        if self.kv_args.kv_data_ptrs:
+            self.engine.batch_deregister(self.kv_args.kv_data_ptrs)
+
+        # Batch deregister auxiliary data buffers
+        if self.kv_args.aux_data_ptrs:
+            self.engine.batch_deregister(self.kv_args.aux_data_ptrs)
+
+        # Batch deregister state/extra pool data buffers
+        if self.kv_args.state_data_ptrs:
+            self.engine.batch_deregister(self.kv_args.state_data_ptrs)
+
     def _transfer_data(self, mooncake_session_id, transfer_blocks):
         if not transfer_blocks:
             return 0
@@ -643,13 +656,13 @@ class MooncakeKVManager(CommonKVManager):
                 raise RuntimeError(
                     f"PD Disaggregation does NOT support PD different TP sizes for non-MLA {state_type.upper()} hybrid models yet."
                 )
-            if len(prefill_state_indices) < len(req.dst_state_indices):
-                logger.warning(
-                    f"len(prefill_state_indices) = {len(prefill_state_indices)}, len(dst_state_indices) = {len(req.dst_state_indices)}"
+            if len(prefill_state_indices) != len(req.dst_state_indices):
+                logger.error(
+                    "PD extra-state index mismatch, reject transfer to avoid corrupted outputs: "
+                    f"len(prefill_state_indices)={len(prefill_state_indices)}, "
+                    f"len(dst_state_indices)={len(req.dst_state_indices)}"
                 )
-                prefill_state_indices = prefill_state_indices[
-                    : len(req.dst_state_indices)
-                ]
+                return -1
             # Reuse _send_kvcache_generic interface to send extra pool data
             prefill_state_indices = np.array(prefill_state_indices, dtype=np.int32)
             dst_state_indices = np.array(req.dst_state_indices, dtype=np.int32)
@@ -880,13 +893,43 @@ class MooncakeKVManager(CommonKVManager):
 
                         if kv_chunk.is_last:
                             if kv_chunk.state_indices is not None:
-                                self.maybe_send_extra(
+                                ret = self.maybe_send_extra(
                                     req,
                                     kv_chunk.state_indices,
                                     target_rank_registration_info.dst_state_data_ptrs,
                                     executor,
                                     target_rank_registration_info,
                                 )
+                                if ret != 0:
+                                    with self.session_lock:
+                                        self.session_failures[
+                                            req.mooncake_session_id
+                                        ] += 1
+                                        if (
+                                            self.session_failures[
+                                                req.mooncake_session_id
+                                            ]
+                                            >= 1
+                                        ):
+                                            self.failed_sessions.add(
+                                                req.mooncake_session_id
+                                            )
+                                            logger.error(
+                                                f"Session {req.mooncake_session_id} failed."
+                                            )
+                                    self.record_failure(
+                                        kv_chunk.room,
+                                        f"Failed to send extra state chunk of {kv_chunk.room} to {req.endpoint}:{req.dst_port}",
+                                    )
+                                    self.update_status(kv_chunk.room, KVPoll.Failed)
+                                    self.sync_status_to_decode_endpoint(
+                                        req.endpoint,
+                                        req.dst_port,
+                                        req.room,
+                                        KVPoll.Failed,
+                                        local_rank,
+                                    )
+                                    break
 
                             # Only the last chunk we need to send the aux data
                             ret = self.send_aux(
@@ -895,6 +938,21 @@ class MooncakeKVManager(CommonKVManager):
                                 target_rank_registration_info.dst_aux_ptrs,
                             )
                             polls.append(True if ret == 0 else False)
+                            if ret != 0:
+                                # Mark session as failed to avoid hanging
+                                # on subsequent batch_transfer_sync calls
+                                with self.session_lock:
+                                    self.session_failures[req.mooncake_session_id] += 1
+                                    if (
+                                        self.session_failures[req.mooncake_session_id]
+                                        >= 1
+                                    ):
+                                        self.failed_sessions.add(
+                                            req.mooncake_session_id
+                                        )
+                                        logger.error(
+                                            f"Session {req.mooncake_session_id} failed (send_aux)."
+                                        )
                             dst_ranks_infos.append(
                                 (req.endpoint, req.dst_port, req.room)
                             )
@@ -977,15 +1035,20 @@ class MooncakeKVManager(CommonKVManager):
 
                 if status == KVPoll.Success:
                     if bootstrap_room in self.request_status:
-                        self.prefill_response_tracker[bootstrap_room].add(prefill_rank)
+                        # Guard against TOCTOU race: clear() may remove the entry
+                        # between the request_status check and dict access here.
                         expected_response_num = (
-                            self.required_prefill_response_num_table[bootstrap_room]
+                            self.required_prefill_response_num_table.get(bootstrap_room)
                         )
-                        arrived_response_num = len(
-                            self.prefill_response_tracker[bootstrap_room]
-                        )
-                        if arrived_response_num == expected_response_num:
-                            self.update_status(bootstrap_room, KVPoll.Success)
+                        if expected_response_num is not None:
+                            self.prefill_response_tracker[bootstrap_room].add(
+                                prefill_rank
+                            )
+                            arrived_response_num = len(
+                                self.prefill_response_tracker[bootstrap_room]
+                            )
+                            if arrived_response_num == expected_response_num:
+                                self.update_status(bootstrap_room, KVPoll.Success)
                 elif status == KVPoll.Failed:
                     self.record_failure(
                         bootstrap_room,

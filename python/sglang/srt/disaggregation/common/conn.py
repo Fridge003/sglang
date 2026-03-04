@@ -116,10 +116,18 @@ class CommonKVManager(BaseKVManager):
 
         bootstrap_server_url = f"{host}:{self.bootstrap_port}"
         url = f"http://{bootstrap_server_url}/route"
+        route_attn_tp_rank = self.attn_tp_rank
+        # In prefill CP mode, attention TP rank is flattened to 0, but requests are
+        # still routed by engine rank; register by engine rank to preserve all routes.
+        if (
+            self.disaggregation_mode == DisaggregationMode.PREFILL
+            and self.attn_tp_size == 1
+        ):
+            route_attn_tp_rank = self.kv_args.engine_rank
         payload = {
             "role": "Prefill",
             "attn_tp_size": self.attn_tp_size,
-            "attn_tp_rank": self.attn_tp_rank,
+            "attn_tp_rank": route_attn_tp_rank,
             "attn_dp_size": self.attn_dp_size,
             "attn_dp_rank": self.attn_dp_rank,
             "pp_size": self.pp_size,
@@ -333,6 +341,10 @@ class CommonKVReceiver(BaseKVReceiver):
             self.required_dst_info_num = (
                 self.kv_mgr.attn_tp_size // self.prefill_attn_tp_size
             )
+            # With attention DP, one request is routed to one decode rank.
+            # Waiting for all TP shards to pre-allocate the same bootstrap room would stall forever.
+            if self.kv_mgr.attn_dp_size > 1:
+                self.required_dst_info_num = 1
             self.required_prefill_response_num = 1 * (
                 self.prefill_pp_size // self.kv_mgr.pp_size
             )
@@ -357,6 +369,11 @@ class CommonKVReceiver(BaseKVReceiver):
             # multiple connections in the connection pool and have to send dummy requests to other prefill ranks,
             # or the KVPoll will never be set correctly
             self.target_tp_rank = self.target_tp_ranks[0]
+            # For prefill CP mode (decode attention TP=1, prefill attention TP>1),
+            # route bootstrap to all prefill ranks as non-dummy so the serving rank
+            # always receives decode-side metadata.
+            if self.kv_mgr.attn_tp_size == 1 and self.prefill_attn_tp_size > 1:
+                self.target_tp_rank = None
             self.required_dst_info_num = 1
             if self.kv_mgr.is_mla_backend:
                 self.required_prefill_response_num = (
@@ -610,8 +627,12 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             and int(target_dp_group) == -1
             and int(target_pp_rank) == -1
         ):
+            inferred_attn_tp_size = max(
+                (len(v) for v in self.prefill_port_table.values()),
+                default=self.attn_tp_size,
+            )
             prefill_parallel_info = {
-                "prefill_attn_tp_size": self.attn_tp_size,
+                "prefill_attn_tp_size": inferred_attn_tp_size,
                 "prefill_dp_size": self.dp_size,
                 "prefill_pp_size": self.pp_size,
                 "prefill_page_size": self.page_size,

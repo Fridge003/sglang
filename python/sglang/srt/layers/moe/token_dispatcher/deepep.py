@@ -388,6 +388,7 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
             and not get_moe_runner_backend().is_cutlass()
             and not envs.SGLANG_DEEPEP_BF16_DISPATCH.get()
+            and not self.quant_config.get("bf16_weights", False)
         ):
             # TODO hard code 128 block quant,use fp8 communication
             hidden_states = sglang_per_token_group_quant_fp8(
@@ -466,7 +467,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
             previous_event=previous_event,
             async_finish=self.async_finish,
             allocate_on_comm_stream=(previous_event is not None) and self.async_finish,
-            expert_alignment=128 if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM else 1,
+            expert_alignment=(
+                128
+                if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+                and not self.quant_config.get("bf16_weights", False)
+                else 1
+            ),
             config=DeepEPConfig.get_instance().normal_dispatch_config,
         )
         get_global_expert_distribution_recorder().on_deepep_dispatch_normal(
@@ -491,7 +497,12 @@ class _DeepEPDispatcherImplNormal(_DeepEPDispatcherImplBase):
         topk_weights: torch.Tensor,
     ):
 
-        if deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM or _use_aiter or _is_npu:
+        if (
+            deep_gemm_wrapper.ENABLE_JIT_DEEPGEMM
+            or _use_aiter
+            or _is_npu
+            or self.quant_config.get("bf16_weights", False)
+        ):
             output = hidden_states
         else:
             raise NotImplementedError()  # triton runner was supported but it's temporarily disabled
@@ -551,10 +562,12 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         topk_weights, topk_ids = topk_output.topk_weights, topk_output.topk_ids
         topk_ids = topk_ids.to(torch.int64)
-        expected_m = (
-            hidden_states.shape[0] * buffer.group_size * topk_ids.shape[1]
-            + self.num_experts
-        ) // self.num_experts
+        # Use a correctness-preserving upper bound for per-expert token count.
+        # In the worst case, every rank routes all local tokens to the same expert.
+        expected_m = min(
+            hidden_states.shape[0] * buffer.group_size,
+            self.num_max_dispatch_tokens_per_rank * buffer.group_size,
+        )
         hidden_states, masked_m, event, hook = self._dispatch_core(
             hidden_states,
             topk_ids,
@@ -609,7 +622,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         input_global_scale = self.quant_config.get("input_global_scale", None)
         if input_global_scale is not None:
             use_nvfp4 = True
-        elif not envs.SGLANG_DEEPEP_BF16_DISPATCH.get():
+        elif not envs.SGLANG_DEEPEP_BF16_DISPATCH.get() and not self.quant_config.get(
+            "bf16_weights", False
+        ):
             use_fp8 = True
 
         buffer = self._get_buffer()

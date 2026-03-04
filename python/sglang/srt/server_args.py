@@ -580,6 +580,7 @@ class ServerArgs:
     cuda_graph_max_bs: Optional[int] = None
     cuda_graph_bs: Optional[List[int]] = None
     disable_cuda_graph: bool = False
+    disable_draft_cuda_graph: bool = False
     disable_cuda_graph_padding: bool = False
     enable_profile_cuda_graph: bool = False
     enable_cudagraph_gc: bool = False
@@ -2089,7 +2090,16 @@ class ServerArgs:
             assert (
                 self.tp_size % (self.dp_size * self.attn_cp_size) == 0
             ), "tp_size must be divisible by dp_size * attn_cp_size"
-            assert self.pp_size == 1, "PP is not supported with context parallelism"
+            if self.pp_size > 1:
+                assert (
+                    self.disaggregation_mode == "prefill"
+                    and self.enable_nsa_prefill_context_parallel
+                    and self.nsa_prefill_cp_mode == "round-robin-split"
+                ), (
+                    "PP with context parallelism is only supported for PD prefill "
+                    "with --enable-nsa-prefill-context-parallel and "
+                    "--nsa-prefill-cp-mode round-robin-split."
+                )
 
         if self.moe_dp_size > 1:
             # The tp_size is the world size, not the real tensor parallel size
@@ -4492,6 +4502,11 @@ class ServerArgs:
             help="Disable cuda graph.",
         )
         parser.add_argument(
+            "--disable-draft-cuda-graph",
+            action="store_true",
+            help="Disable cuda graph for draft model in speculative decoding.",
+        )
+        parser.add_argument(
             "--disable-cuda-graph-padding",
             action="store_true",
             help="Disable cuda graph when padding is needed. Still uses cuda graph when padding is not needed.",
@@ -5636,6 +5651,54 @@ class PortArgs:
             )
 
         if not server_args.enable_dp_attention:
+            # In multi-node prefill PD with PP/CP, use TCP transport for tokenizer<->scheduler
+            # IPC occasionally stalls in this topology.
+            if (
+                server_args.nnodes > 1
+                and server_args.disaggregation_mode == "prefill"
+                and server_args.dist_init_addr is not None
+            ):
+                if server_args.dist_init_addr.startswith("["):  # ipv6 address
+                    port_num, host = configure_ipv6(server_args.dist_init_addr)
+                    dist_init_addr = (host, str(port_num))
+                else:
+                    dist_init_addr = server_args.dist_init_addr.split(":")
+
+                assert (
+                    len(dist_init_addr) == 2
+                ), "please provide --dist-init-addr as host:port of head node"
+
+                dist_init_host, dist_init_port = dist_init_addr
+                dist_init_port = int(dist_init_port)
+                port_base = dist_init_port + ZMQ_TCP_PORT_DELTA
+                detokenizer_port = port_base + 1
+                rpc_port = port_base + 2
+                metrics_port = port_base + 3
+                scheduler_input_port = port_base + 4
+
+                try:
+                    wait_port_available(dist_init_port, "dist_init_port")
+                    wait_port_available(port_base, "port_base")
+                    wait_port_available(detokenizer_port, "detokenizer_port")
+                    wait_port_available(nccl_port, "nccl_port")
+                    wait_port_available(rpc_port, "rpc_port")
+                    wait_port_available(metrics_port, "metrics_port")
+                    wait_port_available(scheduler_input_port, "scheduler_input_port")
+                except ValueError:
+                    logger.exception(
+                        f"Port is already in use. {dist_init_port=} {port_base=} {detokenizer_port=} {nccl_port=} {scheduler_input_port=}"
+                    )
+                    raise
+
+                return PortArgs(
+                    tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
+                    scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
+                    detokenizer_ipc_name=f"tcp://{dist_init_host}:{detokenizer_port}",
+                    nccl_port=nccl_port,
+                    rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
+                    metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_port}",
+                    tokenizer_worker_ipc_name=tokenizer_worker_ipc_name,
+                )
             # Normal case, use IPC within a single node
             return PortArgs(
                 tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",

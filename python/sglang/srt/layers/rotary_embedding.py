@@ -305,9 +305,6 @@ class RotaryEmbedding(MultiPlatformOp):
         fused_set_kv_buffer_arg: Optional[FusedSetKVBufferArg] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """A PyTorch-npu implementation of forward()."""
-        assert (
-            fused_set_kv_buffer_arg is None
-        ), "fused_set_kv_buffer_arg is not supported for npu implementation"
         if query.dtype == torch.bfloat16 and self.cos_sin_cache.dtype == torch.float:
             return self.forward_native(positions, query, key, offsets)
         if self.is_neox_style:
@@ -1778,6 +1775,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         key: torch.Tensor,
         fused_set_kv_buffer_arg: Optional[FusedSetKVBufferArg] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert (
+            fused_set_kv_buffer_arg is None
+        ), "fused_set_kv_buffer_arg is not supported for npu implementation"
         # TODO: remove this when npu_mrope supports QNumHeads * QHeadSize > 4096
         assert (
             fused_set_kv_buffer_arg is None

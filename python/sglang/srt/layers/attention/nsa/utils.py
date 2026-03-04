@@ -54,7 +54,12 @@ def can_nsa_prefill_cp_round_robin_split(forward_batch: "ForwardBatch"):
         return False
     cp_size = get_attention_cp_size()
     seq_len = sum(forward_batch.extend_seq_lens_cpu)
-    return is_nsa_prefill_cp_round_robin_split() and seq_len > 0 and cp_size > 1
+    return (
+        is_nsa_prefill_cp_round_robin_split()
+        and seq_len >= cp_size
+        and seq_len % cp_size == 0
+        and cp_size > 1
+    )
 
 
 def nsa_cp_round_robin_split_data(input_: Union[torch.Tensor, List]):
@@ -91,20 +96,29 @@ def nsa_cp_round_robin_split_data(input_: Union[torch.Tensor, List]):
 def cal_padded_tokens(forward_batch: "ForwardBatch"):
     # Consistent with the padding calculation logic in ForwardBatch.prepare_mlp_sync_batch,
     # calculate the actual token length after padding when attn_tp_size > 1 or in the MAX_LEN padding mode.
-    global_num_tokens = forward_batch.global_num_tokens_cpu.copy()
+    if forward_batch.global_num_tokens_cpu is None:
+        # PD prefill CP+PP path can bypass MLP-sync metadata. Reconstruct a single-rank
+        # global token view from the local token count for NSA padding logic.
+        local_tokens = forward_batch.num_token_non_padded_cpu
+        if local_tokens is None:
+            local_tokens = len(forward_batch.input_ids)
+        global_num_tokens = [local_tokens * get_attention_cp_size()]
+    else:
+        global_num_tokens = forward_batch.global_num_tokens_cpu.copy()
     sync_group_size = len(global_num_tokens)
     attn_cp_size = get_attention_cp_size()
     for i in range(sync_group_size):
         global_num_tokens[i] = ceil_align(global_num_tokens[i], attn_cp_size)
-    dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
-        forward_batch.is_extend_in_batch, global_num_tokens
-    )
-    if dp_padding_mode.is_max_len():
-        tokens = max(global_num_tokens)
-    elif len(global_num_tokens) > 1:
-        tokens = global_num_tokens[get_attention_dp_rank()]
-    else:
+    if len(global_num_tokens) == 1:
         tokens = global_num_tokens[0]
+    else:
+        dp_padding_mode = DpPaddingMode.get_dp_padding_mode(
+            forward_batch.is_extend_in_batch, global_num_tokens
+        )
+        if dp_padding_mode.is_max_len():
+            tokens = max(global_num_tokens)
+        else:
+            tokens = global_num_tokens[get_attention_dp_rank()]
     if can_nsa_prefill_cp_round_robin_split(forward_batch):
         tokens = ceil_div(tokens, attn_cp_size)
     return tokens
@@ -152,10 +166,9 @@ class NSAContextParallelMetadata:
 
 def can_cp_split(seq_len: int, cp_size: int, use_nsa: bool, forward_batch):
     if is_nsa_prefill_cp_round_robin_split():
+        if seq_len < cp_size or seq_len % cp_size != 0:
+            return False
         cur_cp_seq_len = seq_len // cp_size
-        assert (
-            seq_len % cp_size == 0
-        ), f"seq_len {seq_len} is not divisible by cp_size {cp_size} when nsa_prefill_cp_mode is round-robin-split"
     else:
         # TODO current just support prefill batch=1 and len(input_ids) > self.cp_size * 2
         # Note: (self.cp_size * 2) To achieve load balancing for seq computation,
@@ -175,10 +188,6 @@ def can_cp_split(seq_len: int, cp_size: int, use_nsa: bool, forward_batch):
 
 def cp_split_and_rebuild_data(forward_batch, input_: torch.Tensor):
     if is_nsa_prefill_cp_round_robin_split():
-        cp_size = get_attention_cp_size()
-        assert (
-            input_.shape[0] % cp_size == 0
-        ), f"Expect input shape 0 can divided by cp size, but got input shape {input_.shape}, cp size {cp_size}"
         return nsa_cp_round_robin_split_data(input_)
 
     input_list = list(
@@ -192,11 +201,6 @@ def cp_split_and_rebuild_data(forward_batch, input_: torch.Tensor):
 
 def cp_split_and_rebuild_position(forward_batch, positions: torch.Tensor):
     if is_nsa_prefill_cp_round_robin_split():
-        cp_size = get_attention_cp_size()
-        assert positions.shape[0] % cp_size == 0, (
-            f"Expect positions shape 0 can divided by cp size, but got positions shape {positions.shape}, "
-            f"cp size {cp_size}"
-        )
         return nsa_cp_round_robin_split_data(positions)
 
     position_id_list = list(

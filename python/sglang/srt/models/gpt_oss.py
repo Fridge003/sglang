@@ -17,6 +17,7 @@
 
 import logging
 import math
+import re
 from collections.abc import Iterable
 from functools import partial
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -1065,6 +1066,12 @@ class GptOssForCausalLM(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                # Try per-expert format: experts.{id}.{gate_proj|up_proj|down_proj}.{weight|bias}
+                per_expert_match = _PER_EXPERT_RE.match(name)
+                if per_expert_match:
+                    _load_per_expert_param(per_expert_match, loaded_weight, params_dict)
+                    continue
+
                 for mapping in expert_params_mapping:
                     param_name, weight_name, shard_id = mapping
                     if weight_name not in name:
@@ -1141,6 +1148,88 @@ class GptOssForCausalLM(nn.Module):
 
     def get_attention_sliding_window_size(self):
         return get_attention_sliding_window_size(self.config)
+
+
+# Regex for per-expert weight names: model.layers.X.mlp.experts.E.{proj}.{weight|bias}
+_PER_EXPERT_RE = re.compile(
+    r"(.+\.mlp\.experts\.)(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|bias)"
+)
+
+
+def _load_per_expert_param(match, loaded_weight, params_dict):
+    """Load a per-expert weight/bias tensor into the fused FusedMoE parameter.
+
+    Handles the mapping from per-expert names (e.g., experts.0.gate_proj.weight)
+    to fused parameters (e.g., experts.w13_weight).
+    """
+    prefix, eid_str, proj, ptype = match.groups()
+    eid = int(eid_str)
+
+    # Determine target fused parameter name
+    if proj in ("gate_proj", "up_proj"):
+        key = prefix + ("w13_weight" if ptype == "weight" else "w13_weight_bias")
+    else:  # down_proj
+        key = prefix + ("w2_weight" if ptype == "weight" else "w2_weight_bias")
+
+    if key not in params_dict:
+        return
+
+    param = params_dict[key]
+    expert_slice = param.data[eid]  # slice for this expert
+
+    # Detect triton transposed layout from shape:
+    # w13: transposed=(E, hidden, 2*inter), non-transposed=(E, 2*inter, hidden)
+    # For w13, the larger dim is 2*intermediate; if it's dim -1, layout is transposed.
+    is_transposed = getattr(param, "is_transposed", False)
+    if not is_transposed and ptype == "weight" and "w13" in key:
+        # Infer from shape: transposed has shape[-1] > shape[-2]
+        is_transposed = param.data.shape[-1] > param.data.shape[-2]
+
+    if ptype == "weight":
+        if proj in ("gate_proj", "up_proj"):
+            # w13_weight: gate in first half, up in second half
+            if is_transposed:
+                # Triton layout: (E, hidden, 2*intermediate)
+                half = expert_slice.shape[1] // 2
+                dst = (
+                    expert_slice[:, :half]
+                    if proj == "gate_proj"
+                    else expert_slice[:, half:]
+                )
+            else:
+                # Standard layout: (E, 2*intermediate, hidden)
+                half = expert_slice.shape[0] // 2
+                dst = (
+                    expert_slice[:half] if proj == "gate_proj" else expert_slice[half:]
+                )
+            # loaded_weight shape: (intermediate, hidden)
+            if is_transposed:
+                dst.copy_(loaded_weight.t())
+            else:
+                dst.copy_(loaded_weight)
+        else:
+            # w2_weight: loaded_weight shape (hidden, intermediate)
+            # Detect transposition for w2 as well
+            w2_transposed = is_transposed
+            if not w2_transposed:
+                w2_transposed = param.data.shape[-1] > param.data.shape[-2]
+            if w2_transposed:
+                expert_slice.copy_(loaded_weight.t())
+            else:
+                expert_slice.copy_(loaded_weight)
+    else:
+        # Bias handling
+        if proj in ("gate_proj", "up_proj"):
+            # w13_weight_bias: (E, 2*intermediate)
+            half = expert_slice.shape[0] // 2
+            dst = expert_slice[:half] if proj == "gate_proj" else expert_slice[half:]
+            dst.copy_(loaded_weight)
+        else:
+            # w2_weight_bias: (E, hidden) - only rank 0 loads, others zero
+            if get_moe_tensor_parallel_rank() == 0:
+                expert_slice.copy_(loaded_weight)
+            else:
+                expert_slice.zero_()
 
 
 def _canonicalize_weights(config, weights_in: Iterable[Tuple[str, torch.Tensor]]):

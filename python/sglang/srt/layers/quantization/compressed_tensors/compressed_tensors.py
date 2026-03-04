@@ -499,7 +499,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         is_static = not weight_quant.dynamic
 
-        return is_channel_group and input_quant_none and is_symmetric and is_static
+        return is_channel_group and input_quant_none and is_static
 
     def _is_mxint4a16(self, weight_quant: BaseModel, input_quant: BaseModel) -> bool:
         input_quant_none = input_quant is None
@@ -967,6 +967,9 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.scheme.process_weights_after_loading(layer)
+
+    def restore_weights_before_loading(self, layer: torch.nn.Module) -> None:
+        layer.scheme.restore_weights_before_loading(layer)
 
     def create_weights(
         self,

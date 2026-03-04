@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -207,7 +208,11 @@ class Indexer(MultiPlatformOp):
             max_position=max_position_embeddings,
             base=rope_theta,  # type: ignore
             rope_scaling=rope_scaling,
-            is_neox_style=is_neox_style,
+            is_neox_style=(
+                os.environ.get("INDEXER_ROPE_NEOX_STYLE", "1") == "1"
+                if os.environ.get("INDEXER_ROPE_NEOX_STYLE", None)
+                else is_neox_style
+            ),
             device=get_global_server_args().device,
         )
         self.block_size = block_size
@@ -244,6 +249,11 @@ class Indexer(MultiPlatformOp):
             x = x.to(self.weights_proj.weight.dtype)
         weights, _ = self.weights_proj(x)
         weights = weights.float()
+        if weights.shape[1] < q_scale.shape[1]:
+            assert q_scale.shape[1] % weights.shape[1] == 0
+            weights = weights.repeat_interleave(
+                q_scale.shape[1] // weights.shape[1], dim=1
+            )
         weights = weights * self.n_heads**-0.5
         weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         return weights
@@ -982,15 +992,26 @@ class Indexer(MultiPlatformOp):
             query, key = self._get_q_k_bf16(
                 q_lora, x, positions, enable_dual_stream, forward_batch=forward_batch
             )
+            if query.shape[1] < 32:
+                assert 32 % query.shape[1] == 0
+                query = query.repeat_interleave(32 // query.shape[1], dim=1)
             q_fp8, q_scale = act_quant(query, self.block_size, self.scale_fmt)
             with torch.cuda.stream(self.alt_stream):
                 k_fp8, k_scale = act_quant(key, self.block_size, self.scale_fmt)
             current_stream.wait_stream(self.alt_stream)
+            if weights.shape[1] < q_scale.shape[1]:
+                assert q_scale.shape[1] % weights.shape[1] == 0
+                weights = weights.repeat_interleave(
+                    q_scale.shape[1] // weights.shape[1], dim=1
+                )
             weights = weights.unsqueeze(-1) * q_scale * self.softmax_scale
         else:
             query, key = self._get_q_k_bf16(
                 q_lora, x, positions, enable_dual_stream, forward_batch=forward_batch
             )
+            if query.shape[1] < 32:
+                assert 32 % query.shape[1] == 0
+                query = query.repeat_interleave(32 // query.shape[1], dim=1)
 
             if enable_dual_stream:
                 current_stream = torch.cuda.current_stream()

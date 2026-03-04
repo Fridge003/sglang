@@ -395,7 +395,12 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.forward_stream = torch.get_device_module(self.device).Stream()
 
         # CPU offload
-        set_offloader(create_offloader_from_server_args(server_args, dp_rank=dp_rank))
+        # For draft worker (e.g., MTP), do not set offloader to avoid overriding
+        # the main model's offloader. Draft worker uses NoopOffloader instead.
+        if not is_draft_worker:
+            set_offloader(
+                create_offloader_from_server_args(server_args, dp_rank=dp_rank)
+            )
 
         self._weight_checker = WeightChecker(model_runner=self)
 
@@ -600,7 +605,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
         # Init routed experts capturer
-        self.init_routed_experts_capturer()
+        if not self.is_draft_worker:
+            self.init_routed_experts_capturer()
 
         if self.device == "cuda" or self.device == "musa":
             self.init_cublas()
@@ -2429,11 +2435,19 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         output.expert_distribution_metrics = recorder_outputs.get("metrics")
 
         # Copy cached routing experts' buffers back to CPU cache
-        get_global_experts_capturer().on_forward_end(
-            forward_batch=forward_batch,
-            can_run_graph=output.can_run_graph,
-            cuda_graph_batch=getattr(self.graph_runner, "bs", None),
-        )
+        if not self.is_draft_worker:
+            # In speculative decoding, num_tokens_per_bs > 1, so we need to pass
+            # the actual number of tokens per dp rank in cuda graph, not batch size.
+            cuda_graph_num_tokens = None
+            if getattr(self.graph_runner, "bs", None):
+                cuda_graph_num_tokens = (
+                    self.graph_runner.bs * self.graph_runner.num_tokens_per_bs
+                )
+            get_global_experts_capturer().on_forward_end(
+                forward_batch=forward_batch,
+                can_run_graph=output.can_run_graph,
+                cuda_graph_batch=cuda_graph_num_tokens,
+            )
 
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end()
@@ -2663,6 +2677,42 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                     dtype=torch.uint8,
                     device=self.device,
                 )
+
+    def post_process_weights(self, recv_req):
+        """
+        Execute post-processing logic for model weights, such as Marlin quantization format conversion.
+        """
+        from sglang.srt.model_loader.loader import device_loading_context
+
+        target_device = torch.device("cuda", torch.cuda.current_device())
+
+        if recv_req.restore_weights_before_load:
+            for _, module in self.model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+
+                # Check if the module supports restoring weights
+                if quant_method is not None and hasattr(
+                    quant_method, "restore_weights_before_loading"
+                ):
+
+                    with device_loading_context(module, target_device):
+                        quant_method.restore_weights_before_loading(module)
+
+        if recv_req.post_process_quantization:
+            # Iterate through all modules to apply specific post-loading processing
+            for _, module in self.model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+
+                # Check if the module supports quantization post-processing
+                if quant_method is not None and hasattr(
+                    quant_method, "process_weights_after_loading"
+                ):
+
+                    # Apply the post-processing (e.g., repacking weights for Marlin kernel)
+                    with device_loading_context(module, target_device):
+                        quant_method.process_weights_after_loading(module)
+
+        return True, "Success"
 
 
 def _model_load_weights_direct(model, named_tensors: List[Tuple[str, torch.Tensor]]):

@@ -34,7 +34,6 @@ from sglang.srt.layers.communicator import (
 from sglang.srt.layers.dp_attention import (
     attn_cp_all_gather_into_tensor,
     attn_cp_reduce_scatter_tensor,
-    get_local_dp_buffer,
 )
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
@@ -153,9 +152,23 @@ class NSACPCommunicateWithAllReduceAndLayerNormFn(
         # for decode: attn tp full -> full
         if nsa_use_prefill_cp(forward_batch):
             assert context.attn_dp_size == 1
-            hidden_states, local_hidden_states = (
-                get_local_dp_buffer(),
-                hidden_states,
+            local_hidden_states = hidden_states
+            total_tokens = (
+                sum(forward_batch.extend_seq_lens_cpu)
+                if forward_batch.extend_seq_lens_cpu is not None
+                else local_hidden_states.shape[0] * context.attn_cp_size
+            )
+            max_len = (total_tokens + context.attn_cp_size - 1) // context.attn_cp_size
+            if local_hidden_states.shape[0] < max_len:
+                pad = local_hidden_states.new_zeros(
+                    (
+                        max_len - local_hidden_states.shape[0],
+                        local_hidden_states.shape[1],
+                    )
+                )
+                local_hidden_states = torch.cat([local_hidden_states, pad], dim=0)
+            hidden_states = local_hidden_states.new_empty(
+                (max_len * context.attn_cp_size, local_hidden_states.shape[1])
             )
             attn_cp_all_gather_into_tensor(
                 hidden_states,
