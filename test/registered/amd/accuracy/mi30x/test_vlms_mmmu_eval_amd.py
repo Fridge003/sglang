@@ -95,19 +95,6 @@ AMD_VLM_MODELS = [
         "accuracy_threshold": 0.28,
         "extra_args": ["--trust-remote-code"],
     },
-    {
-        "model_path": "deepseek-ai/DeepSeek-OCR-2",
-        "tp_size": 1,
-        "accuracy_threshold": 0.25,
-        "extra_args": [
-            "--trust-remote-code",
-            "--disable-cuda-graph",
-            "--mem-fraction-static",
-            "0.70",
-            "--max-total-tokens",
-            "16384",
-        ],
-    },
     # Kimi VL - MoE
     {
         "model_path": "moonshotai/Kimi-VL-A3B-Instruct",
@@ -128,6 +115,20 @@ AMD_VLM_MODELS = [
         "tp_size": 1,
         "accuracy_threshold": 0.27,
         "extra_args": ["--trust-remote-code"],
+    },
+    # DeepSeek-OCR-2 - last to avoid memory pressure on subsequent models
+    {
+        "model_path": "deepseek-ai/DeepSeek-OCR-2",
+        "tp_size": 1,
+        "accuracy_threshold": 0.25,
+        "extra_args": [
+            "--trust-remote-code",
+            "--disable-cuda-graph",
+            "--mem-fraction-static",
+            "0.70",
+            "--max-total-tokens",
+            "16384",
+        ],
     },
 ]
 
