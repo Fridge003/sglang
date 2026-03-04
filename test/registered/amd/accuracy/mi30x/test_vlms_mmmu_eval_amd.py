@@ -132,8 +132,10 @@ AMD_VLM_MODELS = [
     },
 ]
 
-# Models that need triton attention on AMD (aiter JIT compilation OOMs)
+# Models that need triton attention on AMD (aiter pa_ragged JIT compilation OOMs)
 TRITON_ATTENTION_MODELS = {
+    "deepseek-ai/deepseek-vl2-small",
+    "moonshotai/Kimi-VL-A3B-Instruct",
     "deepseek-ai/DeepSeek-OCR-2",
 }
 
