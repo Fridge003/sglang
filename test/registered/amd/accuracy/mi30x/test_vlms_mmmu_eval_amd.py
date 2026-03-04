@@ -103,7 +103,9 @@ AMD_VLM_MODELS = [
             "--trust-remote-code",
             "--disable-cuda-graph",
             "--mem-fraction-static",
-            "0.80",
+            "0.70",
+            "--max-total-tokens",
+            "16384",
         ],
     },
     # Kimi VL - MoE
