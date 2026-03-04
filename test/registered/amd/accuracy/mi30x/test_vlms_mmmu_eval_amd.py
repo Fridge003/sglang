@@ -99,7 +99,12 @@ AMD_VLM_MODELS = [
         "model_path": "deepseek-ai/DeepSeek-OCR-2",
         "tp_size": 1,
         "accuracy_threshold": 0.25,
-        "extra_args": ["--trust-remote-code"],
+        "extra_args": [
+            "--trust-remote-code",
+            "--disable-cuda-graph",
+            "--mem-fraction-static",
+            "0.80",
+        ],
     },
     # Kimi VL - MoE
     {
