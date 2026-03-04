@@ -131,11 +131,9 @@ AMD_VLM_MODELS = [
     },
 ]
 
-# Models that need special handling on AMD (MoE models)
+# Models that need triton attention on AMD (aiter JIT compilation OOMs)
 TRITON_ATTENTION_MODELS = {
-    # "deepseek-ai/deepseek-vl2-small",
-    # "Qwen/Qwen3-VL-30B-A3B-Instruct",
-    # "moonshotai/Kimi-VL-A3B-Instruct",
+    "deepseek-ai/DeepSeek-OCR-2",
 }
 
 # Models known to fail on AMD - exclude from testing
