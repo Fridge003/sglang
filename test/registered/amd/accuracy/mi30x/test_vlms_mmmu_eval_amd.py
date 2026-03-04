@@ -140,6 +140,9 @@ TRITON_ATTENTION_MODELS = {
 AMD_FAILING_VLM_MODELS = {
     # GLM-4.1V processor not registered yet (Glm4vForConditionalGeneration)
     "zai-org/GLM-4.1V-9B-Thinking",
+    # DeepSeek-OCR-2: multimodal token count mismatch in MMMU eval
+    # (num_mm_tokens_in_input_ids != num_mm_tokens_in_embedding)
+    "deepseek-ai/DeepSeek-OCR-2",
 }
 
 
