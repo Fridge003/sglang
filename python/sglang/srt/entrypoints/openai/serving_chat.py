@@ -251,6 +251,12 @@ class OpenAIServingChat(OpenAIServingBase):
             request.reasoning_effort = reasoning_effort
 
         """Convert OpenAI chat completion request to internal format"""
+        if request.return_prompt_token_ids and request.stream:
+            raise ValueError(
+                "return_prompt_token_ids is not supported with streaming. "
+                "Please set stream=false when using return_prompt_token_ids=true."
+            )
+
         is_multimodal = self.tokenizer_manager.model_config.is_multimodal
 
         # Process messages and apply chat template
@@ -309,6 +315,7 @@ class OpenAIServingChat(OpenAIServingBase):
             image_max_dynamic_patch=img_max_dynamic_patch,
             video_max_dynamic_patch=vid_max_dynamic_patch,
             max_dynamic_patch=getattr(request, "max_dynamic_patch", None),
+            return_prompt_token_ids=request.return_prompt_token_ids,
         )
 
         return adapted_request, request
@@ -961,6 +968,13 @@ class OpenAIServingChat(OpenAIServingBase):
                     history_tool_calls_cnt,
                 )
 
+            # Extract prompt_token_ids if requested
+            choice_prompt_token_ids = (
+                ret_item.get("prompt_token_ids")
+                if request.return_prompt_token_ids
+                else None
+            )
+
             choice_data = ChatCompletionResponseChoice(
                 index=idx,
                 message=ChatMessage(
@@ -977,6 +991,7 @@ class OpenAIServingChat(OpenAIServingBase):
                     else None
                 ),
                 hidden_states=hidden_states,
+                prompt_token_ids=choice_prompt_token_ids,
             )
             choices.append(choice_data)
 
@@ -1008,8 +1023,8 @@ class OpenAIServingChat(OpenAIServingBase):
         """
         token_logprobs = []
 
-        for token_idx, (token, logprob) in enumerate(
-            zip(logprobs.tokens, logprobs.token_logprobs)
+        for token_idx, (token, token_id, logprob) in enumerate(
+            zip(logprobs.tokens, logprobs.token_ids, logprobs.token_logprobs)
         ):
             token_bytes = list(token.encode("utf-8"))
             top_logprobs = []
@@ -1031,6 +1046,7 @@ class OpenAIServingChat(OpenAIServingBase):
             token_logprobs.append(
                 ChatCompletionTokenLogprob(
                     token=token,
+                    token_id=token_id,
                     bytes=token_bytes,
                     logprob=logprob,
                     top_logprobs=top_logprobs,
