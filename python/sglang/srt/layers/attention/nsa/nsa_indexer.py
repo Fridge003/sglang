@@ -313,6 +313,13 @@ class Indexer(MultiPlatformOp):
 
         q_rope, k_rope = self.rotary_emb(positions, q_rope, k_rope)
 
+        # On ROCm, CUDA graph capture rejects in-place writes to aliased
+        # tensors (q_rope / k_rope are torch.split views of query / key).
+        # Cloning breaks the alias so the write-back succeeds.
+        if _is_hip:
+            q_rope = q_rope.clone()
+            k_rope = k_rope.clone()
+
         query[..., : self.rope_head_dim] = q_rope
         key[..., : self.rope_head_dim] = k_rope
 
@@ -352,6 +359,8 @@ class Indexer(MultiPlatformOp):
         )
 
         _, k_rope = self.rotary_emb(positions, k_rope, k_rope)
+        if _is_hip:
+            k_rope = k_rope.clone()
         key[..., : self.rope_head_dim] = k_rope
         key = rotate_activation(key)
 
