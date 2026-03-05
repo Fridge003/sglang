@@ -122,10 +122,10 @@ def parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_in
 
 
 def register_memory_region(model, transfer_engine):
-    if importlib.util.find_spec("torch") is None:
-        return register_memory_region_v1(model, transfer_engine)
-    else:
-        return register_memory_region_v2(model, transfer_engine)
+    # Always use v1 (per-param registration) for correctness.
+    # v2's block-merging approach has issues with small tensors
+    # that are sub-allocated within CUDA blocks.
+    return register_memory_region_v1(model, transfer_engine)
 
 
 def register_memory_region_v1(model, transfer_engine):
@@ -156,17 +156,50 @@ def register_memory_region_v2(model, transfer_engine):
 
     weight_mr_dict = {}
     weight_addr_set = set()
+    weight_ranges = []
     for name, weight in model.named_parameters():
-        weight_mr_dict[name] = (
-            weight.data_ptr(),
-            weight.numel(),
-            weight.element_size(),
-        )
-        weight_addr_set.add(weight.data_ptr())
+        ptr = weight.data_ptr()
+        nbytes = weight.numel() * weight.element_size()
+        weight_mr_dict[name] = (ptr, weight.numel(), weight.element_size())
+        weight_addr_set.add(ptr)
+        weight_ranges.append((ptr, ptr + nbytes))
 
     import torch
 
     memory_snapshot = torch.cuda.memory.memory_snapshot()
+
+    # Collect all active_allocated blocks with their addresses
+    all_blocks = []
+    for segment in memory_snapshot:
+        for block in segment.get("blocks", []):
+            address = block.get("address", -1)
+            size = block.get("size", -1)
+            state = block.get("state", "")
+            if address >= 0 and size > 0 and state == "active_allocated":
+                all_blocks.append((address, size))
+
+    # Build set of block addresses that contain at least one weight.
+    # First try exact match (fast), then check range containment.
+    blocks_with_weights = set()
+    for addr, sz in all_blocks:
+        if addr in weight_addr_set:
+            blocks_with_weights.add(addr)
+
+    # For weights whose data_ptr doesn't match any block start,
+    # find the enclosing block via range check.
+    unmatched = [
+        (w_start, w_end) for w_start, w_end in weight_ranges
+        if w_start not in weight_addr_set or w_start not in blocks_with_weights
+    ]
+    if unmatched:
+        # Also check all weights that matched addr_set but might not be in blocks
+        # (shouldn't happen, but be safe)
+        for w_start, w_end in weight_ranges:
+            for b_addr, b_sz in all_blocks:
+                if b_addr <= w_start < b_addr + b_sz:
+                    blocks_with_weights.add(b_addr)
+                    break
+
     weight_blocks_for_reg_mr = []
     # Blocks in each segment have continuous physical addresses,
     # so they can be merged for memory registration.
@@ -179,23 +212,40 @@ def register_memory_region_v2(model, transfer_engine):
             state = block.get("state", "")
             if address < 0 or size < 0 or state == "":
                 continue
-            # Only register active allocated memory blocks that hold weights.
-            if state == "active_allocated":
-                if address in weight_addr_set:
-                    if current_weight_block is None:
-                        current_weight_block = (address, size)
-                    elif current_weight_block[0] + current_weight_block[1] == address:
-                        current_weight_block = (
-                            current_weight_block[0],
-                            current_weight_block[1] + size,
-                        )
-                    else:
-                        weight_blocks_for_reg_mr.append(current_weight_block)
-                        current_weight_block = (address, size)
+            if state == "active_allocated" and address in blocks_with_weights:
+                if current_weight_block is None:
+                    current_weight_block = (address, size)
+                elif current_weight_block[0] + current_weight_block[1] == address:
+                    current_weight_block = (
+                        current_weight_block[0],
+                        current_weight_block[1] + size,
+                    )
+                else:
+                    weight_blocks_for_reg_mr.append(current_weight_block)
+                    current_weight_block = (address, size)
         if current_weight_block is not None:
             weight_blocks_for_reg_mr.append(current_weight_block)
 
+    # Verify all weights are covered by a registered block
+    uncovered = []
+    for name, (ptr, numel, elem_size) in weight_mr_dict.items():
+        nbytes = numel * elem_size
+        covered = False
+        for b_addr, b_sz in weight_blocks_for_reg_mr:
+            if b_addr <= ptr and ptr + nbytes <= b_addr + b_sz:
+                covered = True
+                break
+        if not covered:
+            uncovered.append((name, ptr, nbytes))
+    if uncovered:
+        logger.warning(
+            "register_memory_region_v2: %d weights NOT covered by any block: %s",
+            len(uncovered),
+            [(n, hex(a), s) for n, a, s in uncovered[:5]],
+        )
+
     # Register merged memory blocks that hold weights.
+    total_reg_bytes = 0
     for weight_block in weight_blocks_for_reg_mr:
         address, size = weight_block
         ret = transfer_engine.register_memory(address, size)
@@ -203,7 +253,16 @@ def register_memory_region_v2(model, transfer_engine):
             raise RuntimeError(
                 f"register memory failed for weight block at address {address} with size {size}, error: {ret}"
             )
+        total_reg_bytes += size
 
     end_tic = time.time()
-    logger.debug(f"Register memory region v2 time: {(end_tic - start_tic):.4f}s")
+    logger.info(
+        "register_memory_region_v2: registered %d blocks (%d MB), "
+        "%d weights, %d uncovered, took %.2fs",
+        len(weight_blocks_for_reg_mr),
+        total_reg_bytes // (1024 * 1024),
+        len(weight_mr_dict),
+        len(uncovered),
+        end_tic - start_tic,
+    )
     return weight_mr_dict

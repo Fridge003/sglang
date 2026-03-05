@@ -677,6 +677,16 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             f"{local_ip}:{self.remote_instance_transfer_engine.get_rpc_port()}"
         )
 
+    @staticmethod
+    def _is_column_parallel(module):
+        from sglang.srt.layers.linear import ColumnParallelLinear
+        return isinstance(module, ColumnParallelLinear)
+
+    @staticmethod
+    def _is_row_parallel(module):
+        from sglang.srt.layers.linear import RowParallelLinear
+        return isinstance(module, RowParallelLinear)
+
     def _publish_model_express_metadata(self):
         """Publish TransferEngine metadata to ModelExpress server (seed mode)."""
         from modelexpress.client import MxClient
@@ -697,14 +707,89 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             )
             return
 
-        # Build tensor descriptors from weight_info dict
+        # Build param-to-module map for shard metadata extraction
+        param_to_module = {}
+        for module_name, module in self.model.named_modules():
+            for param_name, _ in module.named_parameters(recurse=False):
+                full_name = f"{module_name}.{param_name}" if module_name else param_name
+                param_to_module[full_name] = module
+
+        # Build name-to-param map for attribute lookup
+        named_params = dict(self.model.named_parameters())
+
+        # Build tensor descriptors with shard metadata for mixed-TP support
         tensors = []
         for name, (addr, numel, element_size) in weight_info.items():
+            # Determine shard_dim from parameter attributes
+            # set_weight_attrs() in linear.py attaches output_dim/input_dim to the param
+            param = named_params.get(name)
+            output_dim = getattr(param, "output_dim", None) if param is not None else None
+            input_dim = getattr(param, "input_dim", None) if param is not None else None
+
+            # Infer shard_dim from param attrs first, then fall back to module type.
+            # FP8 quant creates weights without output_dim/input_dim attrs.
+            # For column-parallel modules: .weight and .weight_scale are both
+            # sharded on dim 0 (per-channel scales follow output dim).
+            # For row-parallel modules: .weight is sharded on dim 1,
+            # but .weight_scale is replicated (full output dim).
+            module = param_to_module.get(name)
+            if output_dim is not None:
+                shard_dim = output_dim
+            elif input_dim is not None:
+                shard_dim = input_dim
+            elif module is not None and self._is_column_parallel(module) and (
+                name.endswith(".weight") or name.endswith(".weight_scale")
+            ):
+                shard_dim = 0
+            elif name.endswith(".weight") and module is not None and self._is_row_parallel(module):
+                shard_dim = 1
+            else:
+                shard_dim = -1  # replicated
+
+            # Get effective TP from parent module
+            effective_tp = 1
+            shard_index = 0
+            if shard_dim >= 0 and module is not None:
+                effective_tp = getattr(module, "tp_size", 1)
+                shard_index = getattr(module, "tp_rank", self.tp_rank)
+
+            # Compute full unsharded shape based on contiguous storage layout.
+            # FP8 process_weights_after_loading applies .t() which creates a
+            # non-contiguous view. RDMA reads from the underlying contiguous
+            # storage, so full_shape must reflect the storage layout.
+            full_shape = []
+            local_shape = []
+            if param is not None:
+                if param.is_contiguous():
+                    local_shape = list(param.shape)
+                else:
+                    # Non-contiguous (e.g., .t() view): use the contiguous
+                    # storage shape (reversed dims for a simple transpose)
+                    local_shape = list(param.shape)[::-1]
+                full_shape = list(local_shape)
+                if shard_dim >= 0 and shard_dim < len(full_shape):
+                    full_shape[shard_dim] *= effective_tp
+
+            # Debug: log first layer tensors with their shard info
+            if "layers.0." in name:
+                mod_type = type(module).__name__ if module else "None"
+                p_contig = param.is_contiguous() if param is not None else True
+                logger.info(
+                    "MX shard debug: %s -> shard_dim=%d, full=%s, storage=%s, "
+                    "contig=%s, module=%s",
+                    name, shard_dim, full_shape, local_shape,
+                    p_contig, mod_type,
+                )
+
             tensors.append(p2p_pb2.TensorDescriptor(
                 name=name,
                 addr=addr,
                 size=numel * element_size,
                 device_id=self.gpu_id,
+                full_shape=full_shape,
+                shard_dim=shard_dim,
+                effective_tp_size=effective_tp,
+                shard_index=shard_index,
             ))
 
         worker = p2p_pb2.WorkerMetadata(
