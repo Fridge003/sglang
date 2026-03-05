@@ -726,22 +726,25 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             output_dim = getattr(param, "output_dim", None) if param is not None else None
             input_dim = getattr(param, "input_dim", None) if param is not None else None
 
-            # Infer shard_dim from param attrs first, then fall back to module type.
-            # FP8 quant creates weights without output_dim/input_dim attrs.
-            # For column-parallel modules: .weight and .weight_scale are both
-            # sharded on dim 0 (per-channel scales follow output dim).
-            # For row-parallel modules: .weight is sharded on dim 1,
-            # but .weight_scale is replicated (full output dim).
+            # Infer shard_dim: must respect the module type because FP8 quant
+            # sets both output_dim=0 and input_dim=1 on ALL weight params
+            # (column-parallel and row-parallel alike). For RowParallelLinear
+            # the actual shard dim is input_dim, not output_dim.
             module = param_to_module.get(name)
-            if output_dim is not None:
+            is_row_par = module is not None and self._is_row_parallel(module)
+            is_col_par = module is not None and self._is_column_parallel(module)
+
+            if is_row_par and input_dim is not None and name.endswith(".weight"):
+                shard_dim = input_dim
+            elif output_dim is not None:
                 shard_dim = output_dim
             elif input_dim is not None:
                 shard_dim = input_dim
-            elif module is not None and self._is_column_parallel(module) and (
+            elif is_col_par and (
                 name.endswith(".weight") or name.endswith(".weight_scale")
             ):
                 shard_dim = 0
-            elif name.endswith(".weight") and module is not None and self._is_row_parallel(module):
+            elif name.endswith(".weight") and is_row_par:
                 shard_dim = 1
             else:
                 shard_dim = -1  # replicated

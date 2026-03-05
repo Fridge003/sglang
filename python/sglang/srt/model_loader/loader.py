@@ -2427,7 +2427,10 @@ def _compute_transfer_plan(model, source_index, tp_rank, tp_size):
         src_eff_tp = td0.effective_tp_size
 
         # Case 2: Replicated tensor (norms, biases, scales, etc.)
-        if shard_dim == -1 or src_eff_tp <= 1:
+        # Note: src_eff_tp <= 1 alone does NOT mean replicated. Source TP=1
+        # has unsharded weights, but if target TP > 1 and shard_dim >= 0,
+        # we still need the overlap algorithm to extract the correct slice.
+        if shard_dim == -1:
             src_rank = min(src_tensors.keys())
             src_td = src_tensors[src_rank]
             if src_td.size != local_size:
