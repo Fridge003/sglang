@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class RemoteInstanceWeightLoaderBackend(str, enum.Enum):
     NCCL = "nccl"
     TRANSFER_ENGINE = "transfer_engine"
+    MODEL_EXPRESS = "model_express"
 
 
 def trigger_init_weights_send_group_for_remote_instance_request(
