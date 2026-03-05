@@ -685,6 +685,7 @@ class ServerArgs:
     language_only: bool = False
     encoder_transfer_backend: str = ENCODER_TRANSFER_BACKEND_CHOICES[0]
     encoder_urls: List[str] = dataclasses.field(default_factory=list)
+    enable_adaptive_dispatch_to_encoder: bool = False
 
     # For model weight update and weight loading
     custom_weight_loader: Optional[List[str]] = None
@@ -3067,11 +3068,27 @@ class ServerArgs:
                 "Overlap schedule is disabled because of using diffusion LLM inference"
             )
             self.disable_overlap_schedule = True
+
         if not self.disable_radix_cache:
-            logger.warning(
-                "Radix cache is disabled because of using diffusion LLM inference"
-            )
-            self.disable_radix_cache = True
+            from sglang.srt.dllm.config import DllmConfig
+
+            config = DllmConfig.from_server_args(self)
+            if self.page_size % config.block_size != 0:
+                logger.warning(
+                    f"Setting page size to {config.block_size} for diffusion LLM inference"
+                )
+                self.page_size = config.block_size
+            if self.enable_hierarchical_cache:
+                logger.warning(
+                    "Hierarchical cache is disabled because of using diffusion LLM inference"
+                )
+                self.enable_hierarchical_cache = False
+            if self.enable_lmcache:
+                logger.warning(
+                    "LMCache is disabled because of using diffusion LLM inference"
+                )
+                self.enable_lmcache = False
+
         if not self.pp_size > 1:
             logger.warning(
                 "Pipeline parallelism is disabled because of using diffusion LLM inference"
@@ -5266,6 +5283,12 @@ class ServerArgs:
             type=str,
             default=[],
             help="List of encoder server urls.",
+        )
+        parser.add_argument(
+            "--enable-adaptive-dispatch-to-encoder",
+            default=ServerArgs.enable_adaptive_dispatch_to_encoder,
+            action="store_true",
+            help="When enabled, adaptively dispatch: multi-image requests go to encoder in language_only epd mode, single-image requests are processed locally.",
         )
 
         # Custom weight loader
