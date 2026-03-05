@@ -333,6 +333,8 @@ class ServerArgs:
     prefill_max_requests: Optional[int] = None
     schedule_policy: str = "fcfs"
     enable_priority_scheduling: bool = False
+    disable_priority_preemption: bool = False
+    default_priority_value: Optional[int] = None
     abort_on_priority_when_disabled: bool = False
     schedule_low_priority_values_first: bool = False
     priority_scheduling_preemption_threshold: int = 10
@@ -646,6 +648,7 @@ class ServerArgs:
     nsa_prefill_cp_mode: str = "round-robin-split"
     enable_fused_qk_norm_rope: bool = False
     enable_precise_embedding_interpolation: bool = False
+    enable_fused_moe_sum_all_reduce: bool = False
 
     # Dynamic batch tokenizer
     enable_dynamic_batch_tokenizer: bool = False
@@ -1301,9 +1304,8 @@ class ServerArgs:
                             self.moe_dense_tp_size = 1
                             self.moe_a2a_backend = "deepep"
                             self.ep_size = self.tp_size
-                            self.kv_cache_dtype = "bf16"
                             logger.warning(
-                                "For in-seq split mode, we have the following restrictions: moe_dense_tp_size == 1, moe_a2a_backend == deepep, ep_size == tp_size, kv_cache_dtype == bf16, batch_size == 1"
+                                "For in-seq split mode, we have the following restrictions: moe_dense_tp_size == 1, moe_a2a_backend == deepep, ep_size == tp_size, batch_size == 1"
                             )
                         else:
                             self.enable_dp_attention = True
@@ -1430,6 +1432,15 @@ class ServerArgs:
                         logger.info(
                             "Use deep_gemm moe runner and deepep a2a backend for bf16 nextn layer in deepseek fp4 checkpoint."
                         )
+                        # Validate usage of ep
+                        if self.ep_size == 1:
+                            raise ValueError(
+                                "Invalid configuration: 'deep_gemm' speculative MoE runner backend with "
+                                "'deepep' a2a backend requires expert parallelism (ep_size > 1). "
+                                f"Current ep_size is {self.ep_size}. "
+                                "Please set --ep-size > 1 (e.g., --ep-size 8) to use this configuration, "
+                                "or change --speculative-moe-a2a-backend to 'none' if expert parallelism is not available."
+                            )
                     else:
                         self.speculative_moe_runner_backend = "triton"
                         self.speculative_moe_a2a_backend = "none"
@@ -1896,10 +1907,11 @@ class ServerArgs:
                     self.disable_radix_cache = True
                     self.disable_overlap_schedule = False
             else:
-                logger.warning(
-                    f"Disabling radix cache since speculative decoding for {model_arch} is not supported with radix cache yet."
-                )
-                self.disable_radix_cache = True
+                if not self.disable_radix_cache:
+                    raise ValueError(
+                        f"Speculative decoding for {model_arch} is not compatible with radix cache when using --mamba-scheduler-strategy no_buffer."
+                        "To use radix cache with speculative decoding, please use --mamba-scheduler-strategy extra_buffer and set SGLANG_ENABLE_SPEC_V2=1."
+                    )
 
     def _handle_sampling_backend(self):
         if self.sampling_backend is None:
@@ -3384,6 +3396,18 @@ class ServerArgs:
             action="store_true",
             default=ServerArgs.enable_priority_scheduling,
             help="Enable priority scheduling. Requests with higher priority integer values will be scheduled first by default.",
+        )
+        parser.add_argument(
+            "--disable-priority-preemption",
+            action="store_true",
+            default=ServerArgs.disable_priority_preemption,
+            help="Disable priority scheduling preemption.",
+        )
+        parser.add_argument(
+            "--default-priority-value",
+            type=int,
+            default=ServerArgs.default_priority_value,
+            help="Default priority for requests without explicit priority.",
         )
         parser.add_argument(
             "--abort-on-priority-when-disabled",
@@ -5031,6 +5055,11 @@ class ServerArgs:
             "--enable-precise-embedding-interpolation",
             action="store_true",
             help="Enable corner alignment for resize of embeddings grid to ensure more accurate(but slower) evaluation of interpolated embedding values.",
+        )
+        parser.add_argument(
+            "--enable-fused-moe-sum-all-reduce",
+            action="store_true",
+            help="Enable fused moe triton and sum all reduce.",
         )
 
         # Dynamic batch tokenizer
