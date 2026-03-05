@@ -516,7 +516,6 @@ ONE_GPU_CASES_B: list[DiffusionTestCase] = [
         ),
         DiffusionSamplingParams(
             prompt=T2V_PROMPT,
-            num_frames=5,
             enable_frame_interpolation=True,
             frame_interpolation_exp=1,
         ),
@@ -789,6 +788,15 @@ TWO_GPU_CASES_B = [
             tp_size=2,
         ),
         T2I_sampling_params,
+    ),
+    DiffusionTestCase(
+        "flux_2_klein_ti2i_2_gpus",
+        DiffusionServerArgs(
+            model_path="black-forest-labs/FLUX.2-klein-4B",
+            modality="image",
+            num_gpus=2,
+        ),
+        TI2I_sampling_params,
     ),
 ]
 
