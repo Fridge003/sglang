@@ -580,9 +580,11 @@ async def async_request_sglang_generate(
         payload = {
             ("text" if isinstance(prompt, str) else "input_ids"): prompt,
             "sampling_params": {
-                "temperature": 0.0,
+                "temperature": 0.8,
+                # "temperature": 0.0,
                 "max_new_tokens": request_func_input.output_len,
                 "ignore_eos": not args.disable_ignore_eos,
+                "top_k": 20,
             },
             "stream": not args.disable_stream,
             "lora_path": request_func_input.lora_name,

@@ -4,7 +4,7 @@ import torch
 
 from sglang.srt.layers.attention.fla.fused_gdn_gating import fused_gdn_gating
 from sglang.srt.layers.attention.hybrid_linear_attn_backend import MambaAttnBackendBase
-from sglang.srt.layers.attention.linear.kernels.gdn_triton import TritonGDNKernel
+from sglang.srt.layers.attention.linear.kernels.gdn_triton import TritonGDNKernel, chunk_gated_delta_rule
 from sglang.srt.layers.attention.linear.utils import (
     LinearAttnKernelBackend,
     get_linear_attn_decode_backend,
@@ -267,7 +267,7 @@ class GDNAttnBackend(MambaAttnBackendBase):
         ssm_states = mamba_cache_params.temporal
         if is_target_verify:
             assert isinstance(mamba_cache_params, MambaPool.SpeculativeState)
-            intermediate_state_cache = mamba_cache_params.intermediate_ssm
+            # intermediate_state_cache = mamba_cache_params.intermediate_ssm
             intermediate_conv_window_cache = (
                 mamba_cache_params.intermediate_conv_window[0]
             )
@@ -279,6 +279,11 @@ class GDNAttnBackend(MambaAttnBackendBase):
             intermediate_state_indices = torch.arange(
                 cache_indices.shape[0], dtype=torch.int32, device=cache_indices.device
             )
+            intermediate_k_state_cache = mamba_cache_params.intermediate_k_state_cache
+            intermediate_v_state_cache = mamba_cache_params.intermediate_v_state_cache
+            intermediate_w_state_cache = mamba_cache_params.intermediate_w_state_cache
+            intermediate_u_state_cache = mamba_cache_params.intermediate_u_state_cache
+            intermediate_g_state_cache = mamba_cache_params.intermediate_g_state_cache
         else:
             has_initial_states = forward_batch.extend_prefix_lens > 0
 
@@ -341,22 +346,44 @@ class GDNAttnBackend(MambaAttnBackendBase):
         g, beta = fused_gdn_gating(layer.A_log, a, b, layer.dt_bias)
 
         if is_target_verify:
-            core_attn_out = self.kernel_dispatcher.target_verify(
+            # core_attn_out = self.kernel_dispatcher.target_verify(
+            #     q=query,
+            #     k=key,
+            #     v=value,
+            #     g=g,
+            #     beta=beta,
+            #     ssm_states=ssm_states,
+            #     cache_indices=cache_indices,
+            #     query_start_loc=query_start_loc,
+            #     intermediate_states_buffer=intermediate_state_cache,
+            #     intermediate_state_indices=intermediate_state_indices,
+            #     cache_steps=forward_batch.spec_info.draft_token_num,
+            #     retrieve_parent_token=retrieve_parent_token,
+            # )
+            # print(f"{cache_indices.shape=} {query_start_loc.shape=} {batch_size=}")
+            core_attn_out, _, _, w, u, g, k = chunk_gated_delta_rule(
                 q=query,
                 k=key,
                 v=value,
                 g=g,
                 beta=beta,
-                ssm_states=ssm_states,
-                cache_indices=cache_indices,
-                query_start_loc=query_start_loc,
-                intermediate_states_buffer=intermediate_state_cache,
-                intermediate_state_indices=intermediate_state_indices,
-                cache_steps=forward_batch.spec_info.draft_token_num,
-                retrieve_parent_token=retrieve_parent_token,
+                initial_state=ssm_states,
+                initial_state_indices=cache_indices[:batch_size],
+                cu_seqlens=query_start_loc,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True,
+                inplace_update=False,
+                forward_metadata=self.forward_metadata,
             )
-        else:
-            core_attn_out, last_recurrent_state, h = self.kernel_dispatcher.extend(
+            intermediate_state_indices_len = len(intermediate_state_indices)
+            # [bs, draft seq len, dim]
+            intermediate_k_state_cache[:intermediate_state_indices_len] = k.view(intermediate_state_indices_len, *intermediate_k_state_cache.shape[1:])
+            intermediate_v_state_cache[:intermediate_state_indices_len] = value.view(intermediate_state_indices_len, *intermediate_v_state_cache.shape[1:])
+            intermediate_g_state_cache[:intermediate_state_indices_len] = g.view(intermediate_state_indices_len, *intermediate_g_state_cache.shape[1:])
+            intermediate_w_state_cache[:intermediate_state_indices_len] = w.view(intermediate_state_indices_len, *intermediate_w_state_cache.shape[1:])
+            intermediate_u_state_cache[:intermediate_state_indices_len] = u.view(intermediate_state_indices_len, *intermediate_u_state_cache.shape[1:])
+        else:    
+            core_attn_out, last_recurrent_state, h, w, u, g, k = self.kernel_dispatcher.extend(
                 q=query,
                 k=key,
                 v=value,

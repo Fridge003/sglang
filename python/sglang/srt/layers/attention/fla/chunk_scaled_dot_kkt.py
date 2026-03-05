@@ -44,12 +44,16 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if i_n < 0 or i_t < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
+    if T <= 0:
+        return
     o_t = tl.arange(0, BT)
 
     p_beta = tl.make_block_ptr(
@@ -93,6 +97,7 @@ def chunk_scaled_dot_kkt_fwd(
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
     output_dtype: torch.dtype = torch.float32,
+    forward_metadata=None,
 ) -> torch.Tensor:
     r"""
     Compute beta * K * K^T.
@@ -121,9 +126,12 @@ def chunk_scaled_dot_kkt_fwd(
 
     H = beta.shape[-1]
     BT = chunk_size
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    if forward_metadata and forward_metadata.chunk_indices_with_64 is not None:
+        chunk_indices = forward_metadata.chunk_indices_with_64
+    else:
+        chunk_indices = (
+            prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](

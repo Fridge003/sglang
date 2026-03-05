@@ -37,6 +37,8 @@ def solve_tril_16x16_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if i_n < 0 or i_t < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int32)
@@ -44,6 +46,8 @@ def solve_tril_16x16_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    if T <= 0:
+        return
     A = A + (bos * H + i_h) * BT
     Ad = Ad + (bos * H + i_h) * 16
 
@@ -95,13 +99,16 @@ def merge_16x16_to_32x32_inverse_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if i_n < 0 or i_t < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int32)
         T = eos - bos
     else:
         bos, eos = i_b * T, i_b * T + T
-
+    if T <= 0:
+        return
     A += (bos * H + i_h) * 32
     Ad += (bos * H + i_h) * 16
     Ai += (bos * H + i_h) * 32
@@ -174,6 +181,8 @@ def merge_16x16_to_64x64_inverse_kernel(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if i_n < 0 or i_t < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int32)
@@ -181,6 +190,8 @@ def merge_16x16_to_64x64_inverse_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
 
+    if T <= 0:
+        return
     A += (bos * H + i_h) * 64
     Ad += (bos * H + i_h) * 16
     Ai += (bos * H + i_h) * 64
@@ -395,6 +406,7 @@ def solve_tril(
     A: torch.Tensor,
     cu_seqlens: Optional[torch.Tensor] = None,
     output_dtype: torch.dtype = torch.float,
+    forward_metadata=None,
 ) -> torch.Tensor:
     """
     Compute the inverse of the lower triangular matrix
@@ -418,10 +430,12 @@ def solve_tril(
     Ad = torch.empty(
         B, T, H, 16, device=A.device, dtype=torch.float if BT != 16 else output_dtype
     )
-
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
-    )
+    if forward_metadata and forward_metadata.chunk_indices_with_16 is not None:
+        chunk_indices = forward_metadata.chunk_indices_with_16
+    else:
+        chunk_indices = (
+            prepare_chunk_indices(cu_seqlens, 16) if cu_seqlens is not None else None
+        )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, 16)
     solve_tril_16x16_kernel[NT, B * H](
         A=A,
@@ -444,9 +458,12 @@ def solve_tril(
         if BT == 32
         else merge_16x16_to_64x64_inverse_kernel
     )
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    if forward_metadata and forward_metadata.chunk_indices_with_64 is not None:
+        chunk_indices = forward_metadata.chunk_indices_with_64
+    else:
+        chunk_indices = (
+            prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        )
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
     merge_fn[NT, B * H](
         A=A,

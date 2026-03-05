@@ -56,6 +56,8 @@ def chunk_fwd_kernel_o(
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
         ).to(tl.int32)
+        if i_n < 0 or i_t < 0:
+            return
         bos, eos = tl.load(cu_seqlens + i_n).to(tl.int32), tl.load(
             cu_seqlens + i_n + 1
         ).to(tl.int32)
@@ -65,6 +67,8 @@ def chunk_fwd_kernel_o(
         NT = tl.cdiv(T, BT)
         i_tg = i_b * NT + i_t
         bos, eos = i_b * T, i_b * T + T
+    if T <= 0:
+        return
 
     # offset calculation
     q += (bos * Hg + i_h // (H // Hg)) * K
@@ -132,13 +136,17 @@ def chunk_fwd_o(
     scale: Optional[float] = None,
     cu_seqlens: Optional[torch.LongTensor] = None,
     chunk_size: int = 64,
+    forward_metadata=None,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    if forward_metadata and forward_metadata.chunk_indices_with_o is not None:
+        chunk_indices = forward_metadata.chunk_indices_with_o
+    else:
+        chunk_indices = (
+            prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
         scale = k.shape[-1] ** -0.5

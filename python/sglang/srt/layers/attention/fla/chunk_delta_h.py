@@ -65,11 +65,15 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
         T = eos - bos
         NT = tl.cdiv(T, BT)
         boh = tl.load(chunk_offsets + i_n).to(tl.int32)
+        if boh < 0:
+            return
     else:
         bos, eos = i_n * T, i_n * T + T
         NT = tl.cdiv(T, BT)
         boh = i_n * NT
 
+    if T <= 0:
+        return
     # [BK, BV]
     b_h1 = tl.zeros([64, BV], dtype=tl.float32)
     if K > 64:
@@ -96,7 +100,6 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht = initial_state + index * stride_h
     if USE_INITIAL_STATE:
         h0 = h0 + i_h * K * V
-    if INPLACE_UPDATE:
         ht = ht + i_h * K * V
 
     # load initial state
@@ -281,19 +284,30 @@ def chunk_gated_delta_rule_fwd_h(
     initial_state_indices: Optional[torch.Tensor] = None,
     save_new_value: bool = True,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    inplace_update: bool = True,
+    forward_metadata=None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     B, T, Hg, K, V = *k.shape, u.shape[-1]
     H = u.shape[-2]
     BT = CHUNK_SIZE
 
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
-        if cu_seqlens is not None
-        else None
-    )
+    if forward_metadata and forward_metadata.chunk_indices_with_64 is not None:
+        chunk_indices = forward_metadata.chunk_indices_with_64
+    else:
+        chunk_indices = (
+            prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
+            if cu_seqlens is not None
+            else None
+        )
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
         N, NT, chunk_offsets = B, triton.cdiv(T, BT), None
+    elif forward_metadata and forward_metadata.chunk_offsets_with_64 is not None:
+        N, NT, chunk_offsets = (
+            len(cu_seqlens) - 1,
+            len(chunk_indices),
+            forward_metadata.chunk_offsets_with_64,
+        )
     else:
         N, NT, chunk_offsets = (
             len(cu_seqlens) - 1,
@@ -331,7 +345,7 @@ def chunk_gated_delta_rule_fwd_h(
         USE_G=g is not None,
         USE_GK=gk is not None,
         USE_INITIAL_STATE=initial_state is not None,
-        INPLACE_UPDATE=True,
+        INPLACE_UPDATE=inplace_update,
         SAVE_NEW_VALUE=v_new is not None,
         IS_VARLEN=cu_seqlens is not None,
         num_warps=4,
