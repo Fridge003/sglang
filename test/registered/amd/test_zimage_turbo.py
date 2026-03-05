@@ -1,7 +1,6 @@
 """AMD nightly test for Z-Image-Turbo diffusion model (text-to-image)."""
 
 import io
-import logging
 import os
 
 import pytest
@@ -20,8 +19,6 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
     DiffusionTestCase,
 )
 from sglang.test.ci.ci_register import register_amd_ci
-
-logger = logging.getLogger(__name__)
 
 register_amd_ci(est_time=1800, suite="nightly-amd-1-gpu-zimage-turbo", nightly=True)
 
@@ -53,16 +50,14 @@ def _save_image_and_write_summary(
     img_path = os.path.join(ARTIFACT_DIR, f"{case_id}.{ext}")
     with open(img_path, "wb") as f:
         f.write(image_bytes)
-    logger.info("Saved image artifact: %s (%d bytes)", img_path, len(image_bytes))
-
-    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_file:
-        return
+    print(f"[ZImage] Saved image artifact: {img_path} ({len(image_bytes)} bytes)")
 
     clip_line = ""
     if clip_score is not None:
         status = "PASS" if clip_score >= CLIP_SCORE_THRESHOLD else "FAIL"
         clip_line = f"| CLIP Score | {clip_score:.4f} ({status}, threshold: {CLIP_SCORE_THRESHOLD}) |\n"
+    else:
+        clip_line = "| CLIP Score | N/A (computation skipped or failed) |\n"
 
     md = (
         f"### Z-Image-Turbo — `{case_id}`\n\n"
@@ -72,6 +67,13 @@ def _save_image_and_write_summary(
         f"{clip_line}"
         f"| Artifact | `{case_id}.{ext}` (download from Artifacts section above) |\n\n"
     )
+
+    print(f"[ZImage] Summary for {case_id}:")
+    print(md)
+
+    summary_file = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_file:
+        return
 
     with open(summary_file, "a") as f:
         f.write(md)
@@ -96,10 +98,10 @@ def _compute_clip_score(image_bytes: bytes, prompt: str) -> float | None:
             outputs = model(**inputs)
             score = outputs.logits_per_image.item() / 100.0
 
-        logger.info("CLIP score for '%s': %.4f", prompt, score)
+        print(f"[ZImage] CLIP score for '{prompt}': {score:.4f}")
         return score
     except Exception as e:
-        logger.warning("CLIP score computation failed: %s", e)
+        print(f"[ZImage] CLIP score computation failed: {e}")
         return None
 
 
@@ -139,8 +141,9 @@ class TestZImageTurboAMD(DiffusionServerBase):
         clip_score = _compute_clip_score(content, prompt)
 
         if clip_score is not None:
-            logger.info(
-                "CLIP score: %.4f (threshold: %.2f)", clip_score, CLIP_SCORE_THRESHOLD
+            print(
+                f"[ZImage] CLIP score: {clip_score:.4f} "
+                f"(threshold: {CLIP_SCORE_THRESHOLD:.2f})"
             )
             assert clip_score >= CLIP_SCORE_THRESHOLD, (
                 f"CLIP score {clip_score:.4f} below threshold {CLIP_SCORE_THRESHOLD} "
