@@ -687,9 +687,7 @@ class ServerArgs:
     remote_instance_weight_loader_send_weights_group_ports: Optional[List[int]] = None
     remote_instance_weight_loader_backend: Literal["transfer_engine", "nccl", "model_express"] = "nccl"
     remote_instance_weight_loader_start_seed_via_transfer_engine: bool = False
-    model_express_url: Optional[str] = None
-    model_express_model_name: Optional[str] = None
-    model_express_source: bool = False
+    model_express_config: Optional[str] = None
 
     # For PD-Multiplexing
     enable_pdmux: bool = False
@@ -2720,10 +2718,10 @@ class ServerArgs:
 
         if self.load_format == "remote_instance":
             if self.remote_instance_weight_loader_backend == "model_express":
-                # ModelExpress backend: requires --model-express-url, not seed IP/port
+                # ModelExpress backend: requires url in --model-express-config
                 if self.model_express_url is None:
                     logger.warning(
-                        "Fallback load_format to 'auto' due to missing --model-express-url."
+                        "Fallback load_format to 'auto' due to missing 'url' in --model-express-config."
                     )
                     self.load_format = "auto"
                 elif not self.validate_transfer_engine():
@@ -5239,21 +5237,10 @@ class ServerArgs:
             help="Start seed server via transfer engine backend for remote instance weight loader.",
         )
         parser.add_argument(
-            "--model-express-url",
+            "--model-express-config",
             type=str,
-            default=ServerArgs.model_express_url,
-            help="The URL of the ModelExpress gRPC server (host:port).",
-        )
-        parser.add_argument(
-            "--model-express-model-name",
-            type=str,
-            default=ServerArgs.model_express_model_name,
-            help="The model name to use for ModelExpress metadata coordination.",
-        )
-        parser.add_argument(
-            "--model-express-source",
-            action="store_true",
-            help="Run as a ModelExpress seed source: publish transfer metadata to the ModelExpress server after loading weights.",
+            default=ServerArgs.model_express_config,
+            help='JSON config for ModelExpress P2P weight loading. Keys: "url" (required, gRPC host:port), "model_name" (optional, defaults to --model-path), "source" (optional bool, true for seed mode). Example: \'{"url": "localhost:8001", "model_name": "my-model", "source": true}\'',
         )
 
         # For PD-Multiplexing
@@ -5818,6 +5805,32 @@ class ServerArgs:
             return False
         else:
             return True
+
+    @property
+    def _parsed_model_express_config(self) -> dict:
+        cache = getattr(self, "_mx_config_cache", None)
+        if cache is not None:
+            return cache
+        if self.model_express_config is None:
+            result = {}
+        elif isinstance(self.model_express_config, str):
+            result = json.loads(self.model_express_config)
+        else:
+            result = self.model_express_config
+        object.__setattr__(self, "_mx_config_cache", result)
+        return result
+
+    @property
+    def model_express_url(self) -> Optional[str]:
+        return self._parsed_model_express_config.get("url")
+
+    @property
+    def model_express_model_name(self) -> Optional[str]:
+        return self._parsed_model_express_config.get("model_name")
+
+    @property
+    def model_express_source(self) -> bool:
+        return self._parsed_model_express_config.get("source", False)
 
     def remote_instance_weight_loader_use_transfer_engine(self):
         # Use TransferEngine as seed backend.
