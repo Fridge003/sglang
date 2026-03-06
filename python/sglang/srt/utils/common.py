@@ -2837,6 +2837,15 @@ def has_hf_quant_config(model_path: str) -> bool:
     """
     if os.path.exists(os.path.join(model_path, "hf_quant_config.json")):
         return True
+    # Check the local HF cache (works in offline mode)
+    try:
+        from huggingface_hub import try_to_load_from_cache
+
+        cached = try_to_load_from_cache(model_path, "hf_quant_config.json")
+        if cached is not None and isinstance(cached, str):
+            return True
+    except Exception:
+        pass
     try:
         from huggingface_hub import HfApi
 
