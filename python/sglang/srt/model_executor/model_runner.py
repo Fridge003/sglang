@@ -698,8 +698,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             return
 
         # Build tensor descriptors from weight_info dict
-        # Use actual per-tensor element_size to derive dtype (FP8 models have mixed dtypes)
-        element_size_to_dtype = {1: "float8_e4m3fn", 2: "bfloat16", 4: "float32", 8: "float64"}
         tensors = []
         for name, (addr, numel, element_size) in weight_info.items():
             tensors.append(p2p_pb2.TensorDescriptor(
@@ -707,7 +705,6 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 addr=addr,
                 size=numel * element_size,
                 device_id=self.gpu_id,
-                dtype=element_size_to_dtype.get(element_size, "unknown"),
             ))
 
         worker = p2p_pb2.WorkerMetadata(
@@ -717,40 +714,25 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         )
 
         mx_client = MxClient(server_url=mx_url)
-        logger.info(
-            "ModelExpress source: publishing metadata for model=%s, "
-            "tp_rank=%d, session=%s, %d tensors",
-            model_name, self.tp_rank, session_id, len(tensors),
-        )
-        mx_client.publish_metadata(model_name, [worker])
-        mx_client.publish_ready(
-            model_name,
-            worker_id=self.tp_rank,
-            session_id=mx_client.session_id,
-            metadata_hash="",
-        )
-        logger.info(
-            "ModelExpress source: published ready for model=%s, tp_rank=%d",
-            model_name, self.tp_rank,
-        )
-        mx_client.close()
-
-    def _get_model_dtype_str(self) -> str:
-        """Return the model dtype as a string for tensor descriptors."""
-        import torch
-        dtype_map = {
-            torch.float16: "float16",
-            torch.bfloat16: "bfloat16",
-            torch.float32: "float32",
-            torch.float64: "float64",
-            torch.int8: "int8",
-            torch.uint8: "uint8",
-        }
-        if hasattr(torch, "float8_e4m3fn"):
-            dtype_map[torch.float8_e4m3fn] = "float8_e4m3fn"
-        if hasattr(torch, "float8_e5m2"):
-            dtype_map[torch.float8_e5m2] = "float8_e5m2"
-        return dtype_map.get(self.model_config.dtype, str(self.model_config.dtype))
+        try:
+            logger.info(
+                "ModelExpress source: publishing metadata for model=%s, "
+                "tp_rank=%d, session=%s, %d tensors",
+                model_name, self.tp_rank, session_id, len(tensors),
+            )
+            mx_client.publish_metadata(model_name, [worker])
+            mx_client.publish_ready(
+                model_name,
+                worker_id=self.tp_rank,
+                session_id=mx_client.session_id,
+                metadata_hash="",
+            )
+            logger.info(
+                "ModelExpress source: published ready for model=%s, tp_rank=%d",
+                model_name, self.tp_rank,
+            )
+        finally:
+            mx_client.close()
 
     def model_specific_adjustment(self):
         server_args = self.server_args

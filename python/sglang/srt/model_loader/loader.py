@@ -2291,57 +2291,58 @@ class RemoteInstanceModelLoader(BaseModelLoader):
 
         # Wait for seed to be ready via ModelExpress
         mx_client = MxClient(server_url=load_config.model_express_url)
-        logger.info(
-            "ModelExpress: waiting for seed ready (model=%s, worker=%d)...",
-            model_name, tp_rank,
-        )
-        ready, session_id, metadata_hash = mx_client.wait_for_ready(
-            model_name, worker_id=tp_rank,
-        )
-        if not ready:
-            raise RuntimeError(
-                f"ModelExpress: timed out waiting for seed ready "
-                f"(model={model_name}, worker={tp_rank})"
+        try:
+            logger.info(
+                "ModelExpress: waiting for seed ready (model=%s)...",
+                model_name,
             )
-
-        # Get source metadata from ModelExpress
-        response = mx_client.get_metadata(model_name)
-        if not response.found:
-            raise RuntimeError(
-                f"ModelExpress: no metadata found for model={model_name}"
+            ready, session_id, metadata_hash = mx_client.wait_for_ready(
+                model_name, worker_id=tp_rank,
             )
+            if not ready:
+                raise RuntimeError(
+                    f"ModelExpress: timed out waiting for seed ready "
+                    f"(model={model_name}, worker={tp_rank})"
+                )
 
-        # Find the worker matching our tp_rank
-        source_worker = None
-        for w in response.workers:
-            if w.worker_rank == tp_rank:
-                source_worker = w
-                break
-        if source_worker is None:
-            raise RuntimeError(
-                f"ModelExpress: no worker metadata for rank={tp_rank}"
+            response = mx_client.get_metadata(model_name)
+            if not response.found:
+                raise RuntimeError(
+                    f"ModelExpress: no metadata found for model={model_name}"
+                )
+
+            # Find the worker matching our tp_rank
+            source_worker = None
+            for w in response.workers:
+                if w.worker_rank == tp_rank:
+                    source_worker = w
+                    break
+            if source_worker is None:
+                raise RuntimeError(
+                    f"ModelExpress: no worker metadata for rank={tp_rank}"
+                )
+
+            # Extract session_id from oneof backend_metadata
+            backend_field = source_worker.WhichOneof("backend_metadata")
+            if backend_field == "transfer_engine_session_id":
+                seed_session_id = source_worker.transfer_engine_session_id
+            else:
+                raise RuntimeError(
+                    f"ModelExpress: expected transfer_engine_session_id, "
+                    f"got backend_metadata={backend_field}"
+                )
+
+            # Build {name: (addr, size_bytes)} from seed tensor descriptors
+            seed_weight_info = {}
+            for td in source_worker.tensors:
+                seed_weight_info[td.name] = (td.addr, td.size)
+
+            logger.info(
+                "ModelExpress: got %d tensor descriptors from seed (session=%s)",
+                len(seed_weight_info), seed_session_id,
             )
-
-        # Extract session_id from oneof backend_metadata
-        backend_field = source_worker.WhichOneof("backend_metadata")
-        if backend_field == "transfer_engine_session_id":
-            seed_session_id = source_worker.transfer_engine_session_id
-        else:
-            raise RuntimeError(
-                f"ModelExpress: expected transfer_engine_session_id, "
-                f"got backend_metadata={backend_field}"
-            )
-
-        # Convert tensor descriptors to {name: (addr, size_bytes)} format
-        # Use raw byte sizes -- RDMA is a memcpy, dtype matching is not required
-        seed_weight_info = {}
-        for td in source_worker.tensors:
-            seed_weight_info[td.name] = (td.addr, td.size)
-
-        logger.info(
-            "ModelExpress: got %d tensor descriptors from seed (session=%s)",
-            len(seed_weight_info), seed_session_id,
-        )
+        finally:
+            mx_client.close()
 
         # Transfer weights via TransferEngine RDMA
         seed_ptr_list = []
@@ -2384,7 +2385,6 @@ class RemoteInstanceModelLoader(BaseModelLoader):
             model.post_load_weights()
 
         logger.info("ModelExpress: weight transfer complete for tp_rank=%d", tp_rank)
-        mx_client.close()
 
 
 class RemoteModelLoader(BaseModelLoader):
