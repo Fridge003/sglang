@@ -750,37 +750,42 @@ class NixlKVManager(CommonKVManager):
             assert len(chunked_dst_kv_indice) == len(kv_indices)
             assert req.agent_name in self.decode_kv_args_table
 
-            notif = f"{req.room}_kv_{chunk_id}_{int(is_last)}_{self.kv_args.pp_rank}"
             decode_tp_size = self.decode_kv_args_table[req.agent_name].decode_tp_size
 
-            if self.is_mla_backend or (decode_tp_size == self.attn_tp_size):
-                kv_xfer_handle = self.send_kvcache(
-                    req.agent_name,
-                    kv_indices,
-                    self.decode_kv_args_table[req.agent_name].dst_kv_ptrs,
-                    chunked_dst_kv_indice,
-                    self.decode_kv_args_table[req.agent_name].gpu_id,
-                    notif,
-                )
-            else:
-                kv_xfer_handle = self.send_kvcache_slice(
-                    req.agent_name,
-                    kv_indices,
-                    self.decode_kv_args_table[req.agent_name].dst_kv_ptrs,
-                    chunked_dst_kv_indice,
-                    self.decode_kv_args_table[req.agent_name].gpu_id,
-                    notif,
-                    prefill_tp_size=self.attn_tp_size,
-                    decode_tp_size=decode_tp_size,
-                    decode_tp_rank=self.decode_kv_args_table[
-                        req.agent_name
-                    ].decode_tp_rank,
-                    dst_kv_item_len=self.decode_kv_args_table[
-                        req.agent_name
-                    ].dst_kv_item_len,
-                )
+            # Skip KV RDMA transfer when there are no pages to send
+            # (e.g., decode-side radix cache matched the entire prefix).
+            # Aux data is still sent below when is_last=True.
+            if len(kv_indices) > 0:
+                notif = f"{req.room}_kv_{chunk_id}_{int(is_last)}_{self.kv_args.pp_rank}"
 
-            handles.append(kv_xfer_handle)
+                if self.is_mla_backend or (decode_tp_size == self.attn_tp_size):
+                    kv_xfer_handle = self.send_kvcache(
+                        req.agent_name,
+                        kv_indices,
+                        self.decode_kv_args_table[req.agent_name].dst_kv_ptrs,
+                        chunked_dst_kv_indice,
+                        self.decode_kv_args_table[req.agent_name].gpu_id,
+                        notif,
+                    )
+                else:
+                    kv_xfer_handle = self.send_kvcache_slice(
+                        req.agent_name,
+                        kv_indices,
+                        self.decode_kv_args_table[req.agent_name].dst_kv_ptrs,
+                        chunked_dst_kv_indice,
+                        self.decode_kv_args_table[req.agent_name].gpu_id,
+                        notif,
+                        prefill_tp_size=self.attn_tp_size,
+                        decode_tp_size=decode_tp_size,
+                        decode_tp_rank=self.decode_kv_args_table[
+                            req.agent_name
+                        ].decode_tp_rank,
+                        dst_kv_item_len=self.decode_kv_args_table[
+                            req.agent_name
+                        ].dst_kv_item_len,
+                    )
+
+                handles.append(kv_xfer_handle)
             # Only the last chunk we need to send the aux data.
             if is_last:
                 if state_indices is not None:
@@ -798,12 +803,19 @@ class NixlKVManager(CommonKVManager):
                         handles.append(state_xfer_handle)
 
                 assert aux_index is not None
+                # When no KV pages were sent (decode-side cache hit),
+                # encode pp_rank in aux notif so receiver can mark
+                # expected_kvs_per_pp[pp_rank] = 0.
+                if len(kv_indices) == 0:
+                    aux_notif = f"{req.room}_aux_nokv_{self.kv_args.pp_rank}"
+                else:
+                    aux_notif = f"{req.room}_aux"
                 aux_xfer_handle = self.send_aux(
                     req.agent_name,
                     aux_index,
                     self.decode_kv_args_table[req.agent_name].dst_aux_ptrs,
                     req.dst_aux_index,
-                    f"{req.room}_aux",
+                    aux_notif,
                 )
                 handles.append(aux_xfer_handle)
         if is_last:
@@ -840,6 +852,19 @@ class NixlKVManager(CommonKVManager):
                             )
                 elif components[1] == "aux":
                     self.transfer_statuses[room].received_aux = True
+                    # Handle "nokv" marker: no KV pages were sent for
+                    # this pp_rank (decode-side radix cache hit).
+                    if len(components) > 3 and components[2] == "nokv":
+                        pp_rank = int(components[3])
+                        self.transfer_statuses[room].expected_kvs_per_pp[
+                            pp_rank
+                        ] = 0
+                    if self.transfer_statuses[room].num_pp_ranks_expected is None:
+                        self.transfer_statuses[room].num_pp_ranks_expected = (
+                            self.required_prefill_response_num_table.get(
+                                room, 1
+                            )
+                        )
                 elif components[1] == "state":
                     pp_rank = int(components[2]) if len(components) > 2 else 0
                     self.transfer_statuses[room].received_state_per_pp.add(pp_rank)
