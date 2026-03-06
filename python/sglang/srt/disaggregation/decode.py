@@ -52,6 +52,7 @@ from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
+from sglang.srt.mem_cache.base_prefix_cache import EvictParams
 from sglang.srt.mem_cache.common import release_kv_cache
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
@@ -752,6 +753,10 @@ class DecodePreallocQueue:
             else 0
         )
         available_size = self.token_to_kv_pool_allocator.available_size()
+        # Include evictable cache entries in the budget — they can be
+        # freed on demand before allocation.
+        if not self.scheduler.server_args.disable_radix_cache:
+            available_size += self.tree_cache.evictable_size()
         allocatable_tokens = available_size - max(
             # preserve some space for future decode
             self.num_reserved_decode_tokens
@@ -806,6 +811,15 @@ class DecodePreallocQueue:
             )
 
         delta_len = fill_len - prefix_len
+
+        # Evict cached entries if the pool doesn't have enough free pages.
+        if (
+            not self.scheduler.server_args.disable_radix_cache
+            and self.token_to_kv_pool_allocator.available_size() < delta_len
+        ):
+            num_to_evict = delta_len - self.token_to_kv_pool_allocator.available_size()
+            self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+
         if self.token_to_kv_pool_allocator.page_size == 1:
             kv_loc = self.token_to_kv_pool_allocator.alloc(delta_len)
         else:
