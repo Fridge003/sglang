@@ -627,6 +627,13 @@ class DecodePreallocQueue:
                 prefix_indices, prefix_len = self._match_prefix_and_lock(
                     decode_req.req
                 )
+                # Align prefix_len down to page boundary so both prefill and
+                # decode agree on the page-aligned split point for KV transfer.
+                page_size = self.token_to_kv_pool_allocator.page_size
+                if page_size > 1 and prefix_len % page_size != 0:
+                    aligned_len = (prefix_len // page_size) * page_size
+                    prefix_indices = prefix_indices[:aligned_len]
+                    prefix_len = aligned_len
             else:
                 prefix_indices, prefix_len = None, 0
 
