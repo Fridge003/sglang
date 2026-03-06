@@ -665,7 +665,10 @@ class DecodePreallocQueue:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
-            allocatable_tokens -= required_tokens_for_request
+            # Subtract both the delta allocation and the locked prefix from
+            # the budget.  Locking the prefix makes those tokens non-evictable,
+            # so the effective cost is the full origin_input_len + reserved.
+            allocatable_tokens -= required_tokens_for_request + prefix_len
             self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
             decode_req.req.cache_protected_len = prefix_len
 
