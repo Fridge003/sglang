@@ -161,9 +161,9 @@ def get_model_config(
 def get_rocm_configs_compute_bound() -> List[Dict[str, int]]:
     configs: List[BenchmarkConfig] = []
     waves_per_eu_range = 0
-    for num_stages in [2]:
-        for block_m in [32, 64, 128, 256]:
-            for block_k in [32, 64, 128, 256]:
+    for num_stages in [1, 2]:
+        for block_m in [16, 32, 64, 128, 256]:
+            for block_k in [16, 32, 64, 128, 256]:
                 for block_n in [16, 32, 64, 128, 256]:
                     for num_warps in [1, 2, 4, 8]:
                         for group_size in [1, 4, 8, 16, 32]:
@@ -242,6 +242,7 @@ def get_config_filename(
     use_int4_w4a16: bool,
     per_channel_quant: bool,
     block_shape: List[int],
+    down_moe: bool = False,
 ) -> str:
     dtype_str = get_config_dtype_str(
         dtype,
@@ -254,8 +255,6 @@ def get_config_filename(
     # NOTE(woosuk): The current naming convention uses w2.shape[2], which
     # is the intermediate size after silu_and_mul.
     N = shard_intermediate_size // 2
-    if use_int4_w4a16:
-        N = N // 2
 
     filename = get_config_file_name(
         num_experts,
@@ -263,6 +262,7 @@ def get_config_filename(
         dtype_str,
         block_shape,
         per_channel_quant,
+        down_moe,
     )
 
     return filename
