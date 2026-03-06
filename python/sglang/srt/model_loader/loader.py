@@ -2067,29 +2067,6 @@ class GGUFModelLoader(BaseModelLoader):
         return model
 
 
-_DTYPE_ELEMENT_SIZES = {
-    "float16": 2, "half": 2,
-    "bfloat16": 2,
-    "float32": 4, "float": 4,
-    "float64": 8, "double": 8,
-    "int8": 1,
-    "int16": 2,
-    "int32": 4,
-    "int64": 8,
-    "uint8": 1,
-    "float8_e4m3fn": 1,
-    "float8_e5m2": 1,
-}
-
-
-def _dtype_to_element_size(dtype_str: str) -> int:
-    """Convert dtype string to element size in bytes."""
-    size = _DTYPE_ELEMENT_SIZES.get(dtype_str)
-    if size is None:
-        raise ValueError(f"Unknown dtype: {dtype_str}")
-    return size
-
-
 class RemoteInstanceModelLoader(BaseModelLoader):
     """Model loader that can load Tensors from remote sglang instance."""
 
