@@ -47,6 +47,12 @@ class TransferInfo:
     decode_prefix_len: Optional[int] = None # for decode radix cache
 
     def is_dummy(self):
+        # A transfer is "dummy" only for CP non-authoritative ranks.
+        # When dst_kv_indices is empty due to a decode-side radix cache
+        # full hit (decode_prefix_len > 0), the transfer is NOT dummy --
+        # aux/state data still needs to be sent.
+        if self.dst_kv_indices.size == 0 and self.decode_prefix_len:
+            return False
         return self.dst_kv_indices.size == 0
 
     @classmethod
