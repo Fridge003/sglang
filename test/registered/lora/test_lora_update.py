@@ -1298,77 +1298,53 @@ class TestLoRADynamicUpdate(CustomTestCase):
     def _repeat_each(lst, n):
         return [x for x in lst for _ in range(n)]
 
-    def _run_operation_sequence(
+    def _execute_ops_on_session(
         self,
-        mode: LoRAUpdateTestSessionMode,
-        base: str,
-        initial_adapters: List[Union[str, dict]],
+        session,
         op_sequence: List[Operation],
-        max_loras_per_batch: int,
-        max_loaded_loras: Optional[int] = None,
-        enable_lora: Optional[bool] = None,
-        max_lora_rank: Optional[int] = None,
-        lora_target_modules: Optional[List[str]] = None,
         max_new_tokens: int = 32,
-    ) -> List[tuple]:
-        """
-        Runs a sequence of operations on the SRT runner, including loading and unloading LoRA adapters,
-        and performing forward passes with the current set of loaded adapters.
-        """
-
+    ) -> List[list]:
+        """Execute operations on an existing session and return forward outputs."""
         forward_outputs = []
-        with LoRAUpdateTestSession(
-            testcase=self,
-            mode=mode,
-            model_path=base,
-            lora_paths=initial_adapters,
-            max_loras_per_batch=max_loras_per_batch,
-            max_loaded_loras=max_loaded_loras,
-            max_lora_rank=max_lora_rank,
-            lora_target_modules=lora_target_modules,
-            enable_lora=enable_lora,
-        ) as session:
-            for op in op_sequence:
-                op_type = op.type
-                data = op.data
-                expected_error = op.expected_error
-                expected_implicit_evictions = op.expected_implicit_evictions
-                print("-" * 100)
-                print(
-                    f"Running operation: {op_type} --- data: {data} --- mode: {mode} ---"
+        for op in op_sequence:
+            op_type = op.type
+            data = op.data
+            expected_error = op.expected_error
+            expected_implicit_evictions = op.expected_implicit_evictions
+            print("-" * 100)
+            print(f"Running operation: {op_type} --- data: {data} ---")
+            if op_type == OperationType.LOAD:
+                if isinstance(data, str):
+                    adapter_info = {
+                        "lora_name": data,
+                        "lora_path": data,
+                        "pinned": False,
+                    }
+                else:
+                    adapter_info = data
+
+                session.load_lora_adapter(
+                    expected_error=expected_error,
+                    expected_implicit_evictions=expected_implicit_evictions,
+                    **adapter_info,
                 )
-                if op_type == OperationType.LOAD:
-                    if isinstance(data, str):
-                        adapter_info = {
-                            "lora_name": data,
-                            "lora_path": data,
-                            "pinned": False,
-                        }
-                    else:
-                        adapter_info = data
+            elif op_type == OperationType.UNLOAD:
+                session.unload_lora_adapter(
+                    lora_name=data,
+                )
+            elif op_type == OperationType.FORWARD:
+                prompts, adapters = zip(*data)
+                result = session.forward(
+                    prompts=list(prompts),
+                    lora_paths=list(adapters),
+                    max_new_tokens=max_new_tokens,
+                    expected_error=expected_error,
+                    expected_implicit_evictions=expected_implicit_evictions,
+                )
+                if not expected_error:
+                    forward_outputs.append(result)
 
-                    result = session.load_lora_adapter(
-                        expected_error=expected_error,
-                        expected_implicit_evictions=expected_implicit_evictions,
-                        **adapter_info,
-                    )
-                elif op_type == OperationType.UNLOAD:
-                    result = session.unload_lora_adapter(
-                        lora_name=data,
-                    )
-                elif op_type == OperationType.FORWARD:
-                    prompts, adapters = zip(*data)
-                    result = session.forward(
-                        prompts=list(prompts),
-                        lora_paths=list(adapters),
-                        max_new_tokens=max_new_tokens,
-                        expected_error=expected_error,
-                        expected_implicit_evictions=expected_implicit_evictions,
-                    )
-                    if not expected_error:
-                        forward_outputs.append(result)
-
-            return forward_outputs
+        return forward_outputs
 
     def _run_dynamic_adapter_updates(
         self, mode: LoRAUpdateTestSessionMode, test_cases: Iterable[TestCase]
@@ -1380,24 +1356,6 @@ class TestLoRADynamicUpdate(CustomTestCase):
             )
             print("=" * 100)
 
-            print(
-                f"--- Running dynamic update pass with {len(test_case.op_sequence)} operations ---"
-            )
-            # Test dynamic loading of adapters
-            dynamic_output = self._run_operation_sequence(
-                mode=mode,
-                initial_adapters=test_case.initial_adapters,
-                enable_lora=test_case.enable_lora,
-                base=test_case.base,
-                max_loras_per_batch=test_case.max_loras_per_batch,
-                max_loaded_loras=test_case.max_loaded_loras,
-                op_sequence=test_case.op_sequence,
-                max_new_tokens=test_case.max_new_tokens,
-                max_lora_rank=test_case.max_lora_rank,
-                lora_target_modules=test_case.lora_target_modules,
-            )
-
-            # static loading
             forward_ops = [
                 x
                 for x in test_case.op_sequence
@@ -1405,22 +1363,44 @@ class TestLoRADynamicUpdate(CustomTestCase):
             ]
 
             if not forward_ops:
-                print(
-                    f"No forward operations found in test case {case_idx}. Skipping static pass."
-                )
+                print(f"No forward operations found in test case {case_idx}. Skipping.")
                 continue
 
-            print("=" * 100)
-            print(f"\n--- Running static pass with {len(forward_ops)} operations ---")
-            static_output = self._run_operation_sequence(
+            # Run both passes in a SINGLE engine instance to eliminate
+            # cross-instance CUDA floating-point non-determinism.
+            with LoRAUpdateTestSession(
+                testcase=self,
                 mode=mode,
-                initial_adapters=test_case.all_adapters,
-                enable_lora=test_case.enable_lora,
-                base=test_case.base,
+                model_path=test_case.base,
+                lora_paths=test_case.initial_adapters,
                 max_loras_per_batch=test_case.max_loras_per_batch,
-                op_sequence=forward_ops,
-                max_new_tokens=test_case.max_new_tokens,
-            )
+                max_loaded_loras=test_case.max_loaded_loras,
+                max_lora_rank=test_case.max_lora_rank,
+                lora_target_modules=test_case.lora_target_modules,
+                enable_lora=test_case.enable_lora,
+            ) as session:
+                # --- Dynamic pass ---
+                print(
+                    f"--- Running dynamic update pass with {len(test_case.op_sequence)} operations ---"
+                )
+                dynamic_output = self._execute_ops_on_session(
+                    session, test_case.op_sequence, test_case.max_new_tokens
+                )
+
+                # --- Prepare for static pass: ensure all adapters are loaded ---
+                print("=" * 100)
+                print(
+                    f"\n--- Running static pass with {len(forward_ops)} operations (same engine) ---"
+                )
+                for adapter in test_case.all_adapters:
+                    if adapter not in session.expected_adapters:
+                        print(f"Reloading adapter {adapter} for static pass")
+                        session.load_lora_adapter(lora_name=adapter, lora_path=adapter)
+
+                # --- Static pass (same engine) ---
+                static_output = self._execute_ops_on_session(
+                    session, forward_ops, test_case.max_new_tokens
+                )
 
             ROUGE_L_TOL = 0.9
 
