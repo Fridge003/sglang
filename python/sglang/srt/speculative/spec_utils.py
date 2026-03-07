@@ -706,22 +706,27 @@ def draft_tp_context(tp_group: GroupCoordinator):
 
 
 def maybe_detect_nan(tensor: torch.Tensor, msg: str = ""):
-    """Async NaN check — no GPU-CPU sync, error surfaces at next sync point."""
+    """NaN check — skips during CUDA graph capture, sync check otherwise."""
     if not envs.SGLANG_SPEC_NAN_DETECTION.get():
         return
-    torch._assert_async(~torch.any(torch.isnan(tensor)), f"NaN detected! {msg}")
+    if torch.cuda.is_current_stream_capturing():
+        return
+    if torch.any(torch.isnan(tensor)).item():
+        raise RuntimeError(f"NaN detected! {msg}")
 
 
 def maybe_detect_oob(indices: torch.Tensor, low: int, high: int, msg: str):
-    """Async OOB check — no GPU-CPU sync, error surfaces at next sync point."""
+    """OOB check — skips during CUDA graph capture, sync check otherwise."""
     if not envs.SGLANG_SPEC_OOB_DETECTION.get():
+        return
+    if torch.cuda.is_current_stream_capturing():
         return
     if indices.numel() == 0:
         return
-    torch._assert_async(
-        (indices.min() >= low) & (indices.max() < high),
-        f"OOB indices not in [{low}, {high}): {msg}",
-    )
+    min_val = indices.min().item()
+    max_val = indices.max().item()
+    if min_val < low or max_val >= high:
+        raise RuntimeError(f"OOB indices not in [{low}, {high}): {msg}")
 
 
 # Disable torch.compile for this function because it will be
