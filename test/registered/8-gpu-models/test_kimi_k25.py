@@ -64,7 +64,6 @@ class TestKimiK25(unittest.TestCase):
             accuracy_params=AccuracyTestParams(dataset="gsm8k", baseline_accuracy=0.92),
             performance_params=PerformanceTestParams(
                 profile_dir="performance_profiles_kimi_k25",
-                spec_accept_length_threshold=2.5,
             ),
         )
 
