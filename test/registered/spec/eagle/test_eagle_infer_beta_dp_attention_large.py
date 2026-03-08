@@ -70,6 +70,10 @@ class TestEagleDPAttnServerLarge(CustomTestCase):
             "4",
             "--kv-cache-dtype",
             "fp8_e4m3",
+            # Workaround: flashinfer CUTLASS FP4 GEMM has PDL race condition on
+            # Blackwell (flashinfer#2708), use cuDNN backend until fixed upstream
+            "--fp4-gemm-backend",
+            "flashinfer_cudnn",
             "--model-loader-extra-config",
             '{"enable_multithread_load": true,"num_threads": 64}',
         ]
