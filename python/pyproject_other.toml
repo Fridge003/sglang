@@ -29,6 +29,7 @@ runtime_common = [
   "einops",
   "fastapi",
   "gguf",
+  "mistral-common>=1.9.0",
   "interegular",
   "llguidance>=0.7.11,<0.8.0",
   "modelscope",
