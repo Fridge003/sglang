@@ -48,6 +48,10 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         if self.is_multimodal:
             config = config.text_config
 
+        # The MTP model is unquantized in the nvfp4 checkpoint.
+        if quant_config and quant_config.get_name() == "modelopt_fp4":
+            quant_config = None
+
         self.config = config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.quant_config = quant_config
@@ -107,7 +111,7 @@ class Qwen3_5ForCausalLMMTP(nn.Module):
         if (
             forward_batch.forward_mode.is_extend()
             and forward_batch.contains_mm_inputs()
-            and not forward_batch.forward_mode.is_draft_extend()
+            and not forward_batch.forward_mode.is_draft_extend(include_v2=True)
         ):
             assert input_embeds is not None
             input_embeds = torch.cat(
