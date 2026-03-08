@@ -49,8 +49,6 @@ from sglang.srt.server_args import get_global_server_args
 
 if _is_cuda:
     from sgl_kernel import gelu_and_mul, moe_sum_reduce, silu_and_mul
-
-    from sglang.srt.server_args import get_global_server_args
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
