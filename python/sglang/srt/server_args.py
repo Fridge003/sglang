@@ -2875,10 +2875,9 @@ class ServerArgs:
         if self.disaggregation_mode == "decode":
             if self.disaggregation_decode_enable_radix_cache:
                 if self.enable_dp_attention:
-                    raise ValueError(
-                        "Decode-side radix cache is not yet compatible with DP attention. "
-                        "Please disable one of --disaggregation-decode-enable-radix-cache "
-                        "or --enable-dp-attention."
+                    logger.warning(
+                        "EXPERIMENTAL: Decode radix cache with DP attention. "
+                        "Requires prefix-aware DP rank routing for optimal cache hits."
                     )
                 self.disable_radix_cache = False
                 logger.warning("EXPERIMENTAL: Radix cache is enabled for decode server")
