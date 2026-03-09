@@ -661,11 +661,15 @@ class DecodePreallocQueue:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
-            # Subtract both the delta allocation and the locked prefix from
-            # the budget.  Locking the prefix makes those tokens non-evictable,
-            # so the effective cost is the full origin_input_len + reserved.
-            allocatable_tokens -= required_tokens_for_request + prefix_len
             self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
+            # Recompute from actual pool state instead of manual subtraction.
+            # _pre_alloc consumed pages (with rounding) and
+            # _match_prefix_and_lock locked tree nodes -- both are now
+            # reflected in available_size() and evictable_size(), so the
+            # budget is exact with no page-rounding drift.
+            allocatable_tokens = self._allocatable_tokens(
+                retractable_tokens=retractable_tokens, count_retracted=True
+            )
             decode_req.req.cache_protected_len = prefix_len
 
             # Only send delta indices (beyond prefix) to prefill
