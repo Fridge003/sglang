@@ -371,19 +371,15 @@ class DecodePreallocQueue:
         if self.scheduler.server_args.disable_radix_cache:
             raise ValueError("You shouldn't ever hit this lol")
         
-        (
-            prefix_indices,
-            last_device_node,
-            last_host_node,
-            host_hit_length,
-            mamba_branching_seqlen,
-        ) = self.tree_cache.match_prefix(
+        result = self.tree_cache.match_prefix(
             MatchPrefixParams(
                 key=RadixKey(req.origin_input_ids),
                 req=req,
                 cow_mamba=self.tree_cache.supports_mamba(),
             )
         )
+        prefix_indices = result.device_indices
+        last_device_node = result.last_device_node
         # Always lock to match aggregated scheduling behavior
         self.tree_cache.inc_lock_ref(last_device_node)
 
