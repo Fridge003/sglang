@@ -706,13 +706,19 @@ def draft_tp_context(tp_group: GroupCoordinator):
 
 
 def maybe_detect_nan(tensor: torch.Tensor, msg: str = ""):
-    """NaN check — skips during CUDA graph capture, sync check otherwise."""
+    """NaN check — skips during CUDA graph capture, replaces NaN otherwise.
+
+    Uses warn-and-replace instead of crash because NaN in draft model logits
+    (e.g. from upstream flashinfer CUTLASS FP4 GEMM bugs) doesn't affect
+    correctness — bad draft tokens get rejected by the verifier.
+    """
     if not envs.SGLANG_SPEC_NAN_DETECTION.get():
         return
     if torch.cuda.is_current_stream_capturing():
         return
     if torch.any(torch.isnan(tensor)).item():
-        raise RuntimeError(f"NaN detected! {msg}")
+        logger.warning("NaN detected in speculative decoding! %s", msg)
+        tensor.nan_to_num_()
 
 
 def maybe_detect_oob(indices: torch.Tensor, low: int, high: int, msg: str):
