@@ -189,6 +189,7 @@ class FusedMoE(torch.nn.Module):
         with_bias=False,
         routing_method_type: Optional[RoutingMethodType] = None,
         is_gated: bool = True,
+        is_deepep_shared_expert_fusion: bool = False,
     ):
         super().__init__()
         if params_dtype is None:
@@ -199,6 +200,10 @@ class FusedMoE(torch.nn.Module):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
         self.num_fused_shared_experts = num_fused_shared_experts
+        # Explicit flag: DeepEP shared expert is fused into MoE kernel as slot
+        # num_local_routed on home rank. num_experts is expanded by moe_ep_size.
+        # Needed to distinguish from no-fusion DeepEP (both have num_fused_shared=0).
+        self.is_deepep_shared_expert_fusion = is_deepep_shared_expert_fusion
 
         self.enable_flashinfer_cutlass_moe = (
             get_moe_runner_backend().is_flashinfer_cutlass()
@@ -558,13 +563,23 @@ class FusedMoE(torch.nn.Module):
         num_local_routed_experts = (
             self.num_local_experts - self.num_fused_shared_experts
         )
+
+        # DeepEP fusion expands num_experts by moe_ep_size (one shared slot per rank).
+        # Subtract ep_size to recover pre-expansion counts so checkpoint IDs (0-255 for
+        # routed, 256 for shared) map correctly to local slots.
+        # Use explicit flag to avoid false-positive for no-fusion DeepEP (which also
+        # has num_fused_shared_experts=0 but num_experts=256, not 272).
+        if self.is_deepep_shared_expert_fusion:
+            num_global_routed_experts -= self.moe_ep_size
+            num_local_routed_experts = num_global_routed_experts // self.moe_ep_size
+
         start_idx = self.moe_ep_rank * num_local_routed_experts
         end_idx = (self.moe_ep_rank + 1) * num_local_routed_experts
         if start_idx <= expert_id < end_idx:
             return expert_id - start_idx
         elif (
-            self.num_fused_shared_experts > 0 and expert_id >= num_global_routed_experts
-        ):
+            self.num_fused_shared_experts > 0 or self.is_deepep_shared_expert_fusion
+        ) and expert_id >= num_global_routed_experts:
             return expert_id - num_global_routed_experts + num_local_routed_experts
         else:
             return -1
@@ -610,7 +625,16 @@ class FusedMoE(torch.nn.Module):
             )
             return
 
-        if expert_id >= self.num_experts - self.num_fused_shared_experts:
+        # For DeepEP fusion num_fused_shared_experts=0 in FusedMoE but num_experts
+        # is expanded by moe_ep_size (e.g. 272 for EP=16). Shared expert IDs are
+        # >= num_experts - moe_ep_size (e.g. 256). Use explicit flag to avoid
+        # false-positive for no-fusion DeepEP.
+        _num_global_routed = (
+            self.num_experts - self.moe_ep_size
+            if self.is_deepep_shared_expert_fusion
+            else self.num_experts - self.num_fused_shared_experts
+        )
+        if expert_id >= _num_global_routed:
             # This is a shared expert.
             physical_expert_ids = [expert_id]
         else:

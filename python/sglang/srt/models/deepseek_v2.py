@@ -351,11 +351,65 @@ class DeepseekV2MoE(nn.Module):
         self.moe_ep_size = get_moe_expert_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.num_fused_shared_experts = (
-            0
-            if get_global_server_args().disable_shared_experts_fusion
-            else config.n_shared_experts
+
+        n_shared_experts = (
+            0 if config.n_shared_experts is None else int(config.n_shared_experts)
         )
+        _is_deepep_backend = (
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_mori()
+        )
+        _fusion_disabled = get_global_server_args().disable_shared_experts_fusion
+
+        # DeepEP shared expert fusion: shared expert is fused into the same MoE kernel
+        # as a local expert at the home EP rank (analogous to Standard dispatcher's
+        # local_expert_mapping[256] = num_local_routed_experts).
+        #
+        # Expert layout expanded: 256 routed → 256+EP_size (e.g. 272 for EP=16).
+        # Each rank has 17 local experts: slots 0-15 = routed, slot 16 = shared expert.
+        # Before dispatch, topk_ids are remapped: routed expert e → e + e//16 (shifts
+        # IDs to make room for shared slots), and shared expert → ep_rank*17+16 (routes
+        # back to home rank). Shared expert weights are loaded onto all ranks at slot 16.
+        _deepep_fusion_enabled = (
+            _is_deepep_backend and not _fusion_disabled and n_shared_experts > 0
+        )
+        self._deepep_fusion_enabled = _deepep_fusion_enabled
+
+        # num_fused_shared_experts drives weight remapping in deepseek_weight_loader:
+        # mlp.shared_experts → mlp.experts.256 when > 0.
+        self.num_fused_shared_experts = 0 if _fusion_disabled else n_shared_experts
+
+        # FusedMoE kernel impl: for DeepEP fusion, pass 0 so all 17 local experts are
+        # treated uniformly (no scaling factor, no TopK special-casing for expert 256).
+        # For Standard/AMD EP: pass n_shared_experts for inline kernel fusion.
+        num_fused_shared_experts_in_moe_impl = (
+            0 if _deepep_fusion_enabled else self.num_fused_shared_experts
+        )
+
+        if _deepep_fusion_enabled:
+            # 256 routed + EP_size shared slots = 272 experts total (for EP=16)
+            num_experts_for_moe = config.n_routed_experts + self.moe_ep_size
+            top_k_for_moe = config.num_experts_per_tok + 1  # 8 routed + 1 shared
+            _num_local_routed = config.n_routed_experts // self.moe_ep_size  # 16
+            _num_local_experts = _num_local_routed + 1  # 17
+            # After MoE, output *= routed_scaling_factor. Shared expert weight must
+            # compensate so its net contribution is 1.0: weight = 1/routed_scaling_factor
+            self._deepep_shared_weight = (
+                1.0 / self.routed_scaling_factor
+                if self.routed_scaling_factor != 0
+                else 1.0
+            )
+            self._deepep_num_local_routed = _num_local_routed
+            self._deepep_num_local_experts = _num_local_experts
+        else:
+            num_experts_for_moe = (
+                config.n_routed_experts + num_fused_shared_experts_in_moe_impl
+            )
+            top_k_for_moe = (
+                config.num_experts_per_tok + num_fused_shared_experts_in_moe_impl
+            )
+
         self.config = config
         self.layer_id = layer_id
         self.alt_stream = alt_stream
@@ -382,18 +436,17 @@ class DeepseekV2MoE(nn.Module):
 
         # scaling factor for fused shared experts on AMD-platform.
         fused_shared_experts_scaling_factor = None
-        if self.moe_ep_size > 1 and self.num_fused_shared_experts > 0:
+        if self.moe_ep_size > 1 and num_fused_shared_experts_in_moe_impl > 0:
             # if enable_ep_moe tp_szie == ep_size, every gpu get shared experts gemm output
             # so we scale with 1 / self.moe_ep_size in ep mode which will make it equalation as in tp mode
             # with fused_shared_experts
             fused_shared_experts_scaling_factor = 1.0 / float(self.moe_ep_size)
 
         self.experts = get_moe_impl_class(quant_config)(
-            num_experts=config.n_routed_experts
-            + self.num_fused_shared_experts
+            num_experts=num_experts_for_moe
             + get_global_server_args().ep_num_redundant_experts,
-            num_fused_shared_experts=self.num_fused_shared_experts,
-            top_k=config.num_experts_per_tok + self.num_fused_shared_experts,
+            num_fused_shared_experts=num_fused_shared_experts_in_moe_impl,
+            top_k=top_k_for_moe,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             layer_id=self.layer_id,
@@ -403,6 +456,7 @@ class DeepseekV2MoE(nn.Module):
                 config, "routing_method_type", RoutingMethodType.DeepSeekV3
             ),
             prefix=add_prefix("experts", prefix),
+            is_deepep_shared_expert_fusion=_deepep_fusion_enabled,
         )
 
         self.topk = TopK(
@@ -431,7 +485,14 @@ class DeepseekV2MoE(nn.Module):
         self.shared_experts_is_int8 = False
         self.shared_experts_is_fp8 = False
         self.shared_experts_weight_block_size = None
-        if config.n_shared_experts is not None and self.num_fused_shared_experts == 0:
+        # Shared experts: skip when fused into MoE kernel (num_fused_shared_experts_in_moe_impl > 0)
+        # or when DeepEP fusion is enabled (shared expert is local slot 16 in FusedMoE, no separate MLP).
+        if (
+            config.n_shared_experts is not None
+            and config.n_shared_experts > 0
+            and num_fused_shared_experts_in_moe_impl == 0
+            and not _deepep_fusion_enabled
+        ):
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
             # disable tp for shared experts when enable deepep moe, or with fp4 allgather
             self.shared_experts = DeepseekV2MLP(
@@ -517,13 +578,12 @@ class DeepseekV2MoE(nn.Module):
         self._fuse_shared_experts_inside_sbo = SboFlags.fuse_shared_experts_inside_sbo()
 
     def get_moe_weights(self):
+        num_local = self.experts.num_local_experts
         return [
             x.data
             for name, x in self.experts.named_parameters()
             if name not in ["correction_bias"]
-            and filter_moe_weight_param_global_expert(
-                name, x, self.experts.num_local_experts
-            )
+            and filter_moe_weight_param_global_expert(name, x, num_local)
         ]
 
     def forward(
@@ -741,7 +801,8 @@ class DeepseekV2MoE(nn.Module):
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states, forward_batch=forward_batch)
-            if not sbo_enabled_flag:
+
+            if not sbo_enabled_flag and self.num_fused_shared_experts == 0:
                 if self.alt_stream is not None:
                     self.alt_stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(self.alt_stream):
@@ -750,6 +811,7 @@ class DeepseekV2MoE(nn.Module):
                         shared_event = self.alt_stream.record_event()
                 else:
                     shared_output = self._forward_shared_experts(hidden_states)
+
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -758,8 +820,13 @@ class DeepseekV2MoE(nn.Module):
                     layer_id=self.layer_id,
                 ),
             )
+            if self._deepep_fusion_enabled:
+                topk_output = self._remap_topk_ids_for_deepep_fusion(topk_output)
+
         else:
             topk_output = self.topk.empty_topk_output(hidden_states.device)
+            if self._deepep_fusion_enabled:
+                topk_output = self._remap_topk_ids_for_deepep_fusion(topk_output)
 
         if sbo_overlap_dispatch_flag:
             shared_output = None
@@ -917,6 +984,7 @@ class DeepseekV2MoE(nn.Module):
         if (
             hidden_states.shape[0] > 0
             and not sbo_enabled_flag
+            and self.num_fused_shared_experts == 0
             and self.alt_stream is not None
         ):
             torch.cuda.current_stream().wait_event(shared_event)
@@ -937,6 +1005,60 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states *= self.routed_scaling_factor
 
         return final_hidden_states
+
+    def _remap_topk_ids_for_deepep_fusion(self, topk_output):
+        """Remap topk IDs for DeepEP shared expert fusion.
+
+        TopK (num_fused_shared_experts=1) outputs [N, 9]:
+          Columns 0-7: top-8 routed expert IDs in [0, 255]
+          Column 8: shared expert ID = 256 (set by TopK internally)
+
+        Remaps to expanded layout (n_routed_experts + EP_size total experts):
+          Routed expert e → e + e // num_local_routed
+            (shifts IDs to make room for shared slots at every 17th position)
+          Shared expert 256 → ep_rank * num_local_experts + num_local_routed
+            (routes to home rank's shared expert slot)
+
+        Also corrects the weight for column 8: TopK's weight (based on the 8th
+        router score) is not meaningful for the shared expert. We set it to
+        1/routed_scaling_factor so that after FusedMoE applies routed_scaling_factor
+        uniformly, the shared expert contributes with effective weight 1.0.
+        """
+        topk_ids = topk_output.topk_ids  # [N, 9] for N>0, [0, 8] for empty case
+        topk_weights = topk_output.topk_weights
+        N = topk_ids.shape[0]
+        num_local_routed = self._deepep_num_local_routed  # e.g. 16
+        num_local_experts = self._deepep_num_local_experts  # e.g. 17
+        ep_rank = self.experts.moe_ep_rank
+
+        if N == 0:
+            # empty_topk_output returns [0, top_k - num_fused_shared_experts] = [0, 8].
+            # Expand to [0, 9] to match FusedMoE's expected top_k=9.
+            return topk_output._replace(
+                topk_ids=torch.cat([topk_ids, topk_ids.new_empty((0, 1))], dim=-1),
+                topk_weights=torch.cat(
+                    [topk_weights, topk_weights.new_empty((0, 1))], dim=-1
+                ),
+            )
+
+        # Remap routed IDs (columns 0-7): e → e + e // num_local_routed
+        routed_ids = topk_ids[:, :-1]  # [N, 8]
+        new_routed_ids = routed_ids + routed_ids // num_local_routed
+
+        # Remap shared ID (column 8): 256 → ep_rank * num_local_experts + num_local_routed
+        home_shared_id = ep_rank * num_local_experts + num_local_routed
+        shared_ids = topk_ids.new_full((N, 1), home_shared_id)
+
+        # Correct weight for shared expert: 1/routed_scaling_factor so that
+        # weight * routed_scaling_factor = 1.0 in the FusedMoE kernel.
+        shared_weights = topk_weights.new_full((N, 1), self._deepep_shared_weight)
+
+        return topk_output._replace(
+            topk_ids=torch.cat([new_routed_ids, shared_ids], dim=-1),  # [N, 9]
+            topk_weights=torch.cat(
+                [topk_weights[:, :-1], shared_weights], dim=-1
+            ),  # [N, 9]
+        )
 
     def _forward_shared_experts(
         self, hidden_states, gemm_output_zero_allocator: BumpAllocator = None
@@ -2113,6 +2235,23 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
         if get_global_server_args().disable_shared_experts_fusion:
             return
 
+        # For DeepEP/Mori/Mooncake: shared expert is fused into the MoE kernel at the
+        # home EP rank's local expert slot (expanded 256+EP_size expert layout).
+        # num_fused_shared_experts=n_shared_experts enables weight remapping in
+        # deepseek_weight_loader: mlp.shared_experts → mlp.experts.256.
+        if (
+            get_moe_a2a_backend().is_deepep()
+            or get_moe_a2a_backend().is_mooncake()
+            or get_moe_a2a_backend().is_mori()
+        ):
+            log_info_on_rank0(
+                logger,
+                "DeepEP shared expert fusion: fusing shared expert into MoE kernel "
+                "at home EP rank local slot (expanded expert layout).",
+            )
+            self.num_fused_shared_experts = self.config.n_shared_experts
+            return
+
         # Only Deepseek V3/R1 can use shared experts fusion optimization now.
         disable_reason = None
         if (
@@ -2128,14 +2267,6 @@ class DeepseekV2ForCausalLM(nn.Module, DeepseekV2WeightLoaderMixin):
                 "Only Deepseek V3/R1 on NV-platform with capability >= 80 "
                 "or AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization."
             )
-        elif get_moe_expert_parallel_world_size() > 1 and (
-            not _is_hip or torch.cuda.get_device_capability("cuda") < (9, 4)
-        ):
-            disable_reason = "Only Deepseek V3/R1 on AMD-platform with capability >= gfx942(MI30x) can use shared experts fusion optimization under expert parallelism."
-        elif disable_reason is None and (
-            get_moe_a2a_backend().is_deepep() or get_moe_a2a_backend().is_mori()
-        ):
-            disable_reason = "Deepseek V3/R1 cannot use shared experts fusion optimization under deepep expert parallelism."
         elif self.quant_config and self.quant_config.get_name() == "w4afp8":
             disable_reason = "Deepseek V3/R1 W4AFP8 model uses different quant method for routed experts and shared experts."
 
