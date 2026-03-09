@@ -676,6 +676,7 @@ class ServerArgs:
     disaggregation_transfer_backend: str = "mooncake"
     disaggregation_bootstrap_port: int = 8998
     disaggregation_ib_device: Optional[str] = None
+    disaggregation_decode_enable_radix_cache: bool = False
     disaggregation_decode_enable_offload_kvcache: bool = False
     num_reserved_decode_tokens: int = 512  # used for decode kv cache offload in PD
     # FIXME: hack to reduce ITL when decode bs is small
@@ -2872,7 +2873,13 @@ class ServerArgs:
 
     def _handle_pd_disaggregation(self):
         if self.disaggregation_mode == "decode":
-            if os.environ.get("SGLANG_ENABLE_DECODE_RADIX_CACHE") == "1":
+            if self.disaggregation_decode_enable_radix_cache:
+                if self.enable_dp_attention:
+                    raise ValueError(
+                        "Decode-side radix cache is not yet compatible with DP attention. "
+                        "Please disable one of --disaggregation-decode-enable-radix-cache "
+                        "or --enable-dp-attention."
+                    )
                 self.disable_radix_cache = False
                 logger.warning("EXPERIMENTAL: Radix cache is enabled for decode server")
             else:
@@ -5322,6 +5329,11 @@ class ServerArgs:
             help="The InfiniBand devices for disaggregation transfer, accepts single device (e.g., --disaggregation-ib-device mlx5_0) "
             "or multiple comma-separated devices (e.g., --disaggregation-ib-device mlx5_0,mlx5_1). "
             "Default is None, which triggers automatic device detection when mooncake backend is enabled.",
+        )
+        parser.add_argument(
+            "--disaggregation-decode-enable-radix-cache",
+            action="store_true",
+            help="Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Not compatible with DP attention.",
         )
         parser.add_argument(
             "--disaggregation-decode-enable-offload-kvcache",
