@@ -880,6 +880,11 @@ jobs:
           # temporarily put backend-independent cpu tests here
           python3 run_suite.py --hw cpu --suite default $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-a-test-1
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
 
@@ -985,6 +990,13 @@ jobs:
           fi
           python3 run_suite.py --hw cuda --suite stage-b-test-small-1-gpu --auto-partition-id ${{ matrix.partition }} --auto-partition-size 8 $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-b-test-small-1-gpu
+          partition-id: ${{ matrix.partition }}
+          partition-size: "8"
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
         with:
@@ -1040,6 +1052,13 @@ jobs:
             CONTINUE_ON_ERROR_FLAG="--continue-on-error"
           fi
           python3 run_suite.py --hw cuda --suite stage-b-test-large-1-gpu --auto-partition-id ${{ matrix.partition }} --auto-partition-size 14 --timeout-per-file 1800 $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-b-test-large-1-gpu
+          partition-id: ${{ matrix.partition }}
+          partition-size: "14"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1097,6 +1116,13 @@ jobs:
             CONTINUE_ON_ERROR_FLAG="--continue-on-error"
           fi
           python3 run_suite.py --hw cuda --suite stage-b-test-large-2-gpu --auto-partition-id ${{ matrix.partition }} --auto-partition-size 4 $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-b-test-large-2-gpu
+          partition-id: ${{ matrix.partition }}
+          partition-size: "4"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1156,6 +1182,11 @@ jobs:
         run: |
           IS_BLACKWELL=1 python3 -m pytest -q python/sglang/jit_kernel/tests/test_flash_attention_4.py
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-b-test-4-gpu-b200
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
 
@@ -1210,6 +1241,13 @@ jobs:
             --partition-id ${{ matrix.part }} \
             --total-partitions 2 \
             $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: multimodal-gen-test-1-gpu
+          partition-id: ${{ matrix.part }}
+          partition-size: "2"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1269,6 +1307,13 @@ jobs:
             --total-partitions 2 \
             $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: multimodal-gen-test-2-gpu
+          partition-id: ${{ matrix.part }}
+          partition-size: "2"
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
         with:
@@ -1322,6 +1367,13 @@ jobs:
             CONTINUE_ON_ERROR_FLAG="--continue-on-error"
           fi
           python3 run_suite.py --hw cuda --suite stage-c-test-4-gpu-h100 --auto-partition-id ${{ matrix.part }} --auto-partition-size 3 $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-4-gpu-h100
+          partition-id: ${{ matrix.part }}
+          partition-size: "3"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1391,6 +1443,13 @@ jobs:
           fi
           python3 run_suite.py --hw cuda --suite stage-c-test-8-gpu-h200 --auto-partition-id ${{ matrix.part }} --auto-partition-size 4 $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-8-gpu-h200
+          partition-id: ${{ matrix.part }}
+          partition-size: "4"
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
         with:
@@ -1445,6 +1504,13 @@ jobs:
             CONTINUE_ON_ERROR_FLAG="--continue-on-error"
           fi
           python3 run_suite.py --hw cuda --suite stage-c-test-8-gpu-h20 --auto-partition-id ${{ matrix.part }} --auto-partition-size 2 $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-8-gpu-h20
+          partition-id: ${{ matrix.part }}
+          partition-size: "2"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -1508,6 +1574,11 @@ jobs:
           fi
           python3 run_suite.py --hw cuda --suite stage-c-test-deepep-4-gpu $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-deepep-4-gpu
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
 
@@ -1569,6 +1640,11 @@ jobs:
           fi
           python3 run_suite.py --hw cuda --suite stage-c-test-deepep-8-gpu-h200 $CONTINUE_ON_ERROR_FLAG
 
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-deepep-8-gpu-h200
+
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
 
@@ -1621,6 +1697,13 @@ jobs:
             CONTINUE_ON_ERROR_FLAG="--continue-on-error"
           fi
           IS_BLACKWELL=1 python3 run_suite.py --hw cuda --suite stage-c-test-4-gpu-b200 --auto-partition-id ${{ matrix.part }} --auto-partition-size 3 --timeout-per-file 1800 $CONTINUE_ON_ERROR_FLAG
+
+      - uses: ./.github/actions/extract-test-failures
+        if: failure()
+        with:
+          suite: stage-c-test-4-gpu-b200
+          partition-id: ${{ matrix.part }}
+          partition-size: "3"
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()

@@ -1,0 +1,47 @@
+name: Extract Test Failures
+description: Extract structured failure data from CI test runs and upload as artifact.
+
+inputs:
+  suite:
+    description: Test suite name (e.g. stage-b-test-large-1-gpu)
+    required: true
+  partition-id:
+    description: Matrix partition ID (if applicable)
+    required: false
+    default: ""
+  partition-size:
+    description: Matrix partition size (if applicable)
+    required: false
+    default: ""
+  results-json:
+    description: Path to structured test results JSON from ci_utils.py
+    required: false
+    default: "/tmp/sglang_test_results.json"
+  retention-days:
+    description: Number of days to retain the artifact
+    required: false
+    default: "30"
+
+runs:
+  using: composite
+  steps:
+    - name: Extract test failures
+      shell: bash
+      run: |
+        python3 scripts/ci/extract_failures.py \
+          --job-name "${{ github.job }}" \
+          --suite "${{ inputs.suite }}" \
+          --partition-id "${{ inputs.partition-id }}" \
+          --partition-size "${{ inputs.partition-size }}" \
+          --results-json "${{ inputs.results-json }}" \
+          --output /tmp/failure_report.json
+      continue-on-error: true
+
+    - name: Upload failure report
+      uses: actions/upload-artifact@v4
+      with:
+        name: failure-report-${{ github.job }}${{ inputs.partition-id && format('-{0}', inputs.partition-id) }}
+        path: /tmp/failure_report.json
+        retention-days: ${{ inputs.retention-days }}
+        if-no-files-found: ignore
+      continue-on-error: true

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -108,6 +109,66 @@ def write_github_step_summary(content: str):
     if summary_file:
         with open(summary_file, "a") as f:
             f.write(content)
+
+
+# Default path for structured test results JSON
+TEST_RESULTS_JSON_PATH = os.environ.get(
+    "SGLANG_TEST_RESULTS_JSON", "/tmp/sglang_test_results.json"
+)
+
+
+def write_test_results_json(
+    files,
+    passed_tests,
+    failed_tests,
+    retried_tests,
+    elapsed_total,
+    results_path=None,
+):
+    """
+    Write structured test results to a JSON file for automated CI failure tracking.
+
+    This file is consumed by scripts/ci/extract_failures.py to produce
+    per-job failure artifacts uploaded to GitHub Actions.
+    """
+    try:
+        results_path = results_path or TEST_RESULTS_JSON_PATH
+
+        total_files = []
+        for f in files:
+            if isinstance(f, CIRegistry):
+                total_files.append(
+                    {"filename": f.filename, "estimated_time": f.est_time}
+                )
+            else:
+                total_files.append(
+                    {"filename": f.name, "estimated_time": f.estimated_time}
+                )
+
+        results = {
+            "schema_version": "1.0",
+            "total_tests": len(files),
+            "passed_count": len(passed_tests),
+            "failed_count": len(failed_tests),
+            "retried_count": len(retried_tests),
+            "elapsed_total": round(elapsed_total, 2),
+            "all_files": total_files,
+            "passed_tests": list(passed_tests),
+            "failed_tests": [
+                {"test_file": name, "failure_reason": reason}
+                for name, reason in failed_tests
+            ],
+            "retried_tests": [
+                {"test_file": name, "attempts": attempts, "result": result}
+                for name, attempts, result in retried_tests
+            ],
+        }
+
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        logger.info(f"Test results written to {results_path}")
+    except Exception as e:
+        logger.warning(f"Failed to write test results JSON: {e}")
 
 
 def run_unittest_files(
@@ -300,5 +361,14 @@ def run_unittest_files(
         if failed_after_retry:
             summary += f"- ✗ Still failed: {', '.join(failed_after_retry)}\n"
         write_github_step_summary(summary)
+
+    # Write structured JSON results for CI failure tracking
+    write_test_results_json(
+        files=files,
+        passed_tests=passed_tests,
+        failed_tests=failed_tests,
+        retried_tests=retried_tests,
+        elapsed_total=elapsed_total,
+    )
 
     return 0 if success else -1
