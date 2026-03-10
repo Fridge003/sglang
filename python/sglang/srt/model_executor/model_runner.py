@@ -1730,6 +1730,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         else:
             self.attn_backend = self._get_attention_backend()
 
+    _MLA_ONLY_BACKENDS = {"trtllm_mla", "flashmla", "cutlass_mla"}
+
     def _get_attention_backend(self, init_new_workspace: bool = False):
         """Init attention kernel backend."""
         draft_attn_backend = self.server_args.speculative_draft_attention_backend
@@ -1741,6 +1743,22 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 draft_attn_backend,
                 init_new_workspace=init_new_workspace,
             )
+
+        # If draft worker is not MLA but the target model uses an MLA-only
+        # attention backend, fall back to flashinfer for the draft model.
+        if self.is_draft_worker and not self.use_mla_backend:
+            attn_backend_str = self.server_args.attention_backend
+            if attn_backend_str in self._MLA_ONLY_BACKENDS:
+                logger.info(
+                    f"Draft model is not MLA; falling back from "
+                    f"'{attn_backend_str}' to 'flashinfer' for draft worker."
+                )
+                self.prefill_attention_backend_str = "flashinfer"
+                self.decode_attention_backend_str = "flashinfer"
+                return self._get_attention_backend_from_str(
+                    "flashinfer",
+                    init_new_workspace=init_new_workspace,
+                )
 
         (
             self.prefill_attention_backend_str,

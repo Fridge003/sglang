@@ -7,6 +7,8 @@ logger = logging.getLogger(__name__)
 
 
 class DraftBackendFactory:
+    _MLA_ONLY_BACKENDS = {"trtllm_mla", "flashmla", "cutlass_mla"}
+
     def __init__(
         self,
         server_args: ServerArgs,
@@ -30,6 +32,18 @@ class DraftBackendFactory:
         )
         if backend_type is None:
             backend_type = self.server_args.attention_backend
+
+        # If the draft model is not MLA but the resolved backend is MLA-only,
+        # fall back to flashinfer (e.g. Eagle3 Llama draft + MLA target on B200).
+        if (
+            backend_type in self._MLA_ONLY_BACKENDS
+            and not self.draft_model_runner.use_mla_backend
+        ):
+            logger.info(
+                f"Draft model is not MLA; falling back from "
+                f"'{backend_type}' to 'flashinfer' for draft backend."
+            )
+            backend_type = "flashinfer"
 
         if backend_type not in backend_map:
             raise ValueError(error_template.format(backend_type=backend_type))
