@@ -117,6 +117,37 @@ def extract_test_cases_from_log(log_text: str) -> list[dict]:
     return test_cases
 
 
+def extract_test_cases_for_file(log_text: str, test_file: str) -> list[dict]:
+    """
+    Extract test case failures from the log section for a specific test file.
+
+    Finds the log output between Begin/End markers for this file, then parses
+    unittest/pytest failure patterns within that section. Falls back to parsing
+    the entire log if section markers aren't found.
+    """
+    file_base = test_file.replace(".py", "").split("/")[-1]
+
+    # Try to find the section for this test file between Begin/End markers
+    # The log format is:
+    #   .\n.\nBegin (N/M):\npython3 /path/to/test_foo.py\n.\n.\n
+    #   ... test output ...
+    #   .\n.\nEnd (N/M):\n...
+    section_pattern = re.compile(
+        r"Begin \(\d+/\d+\):\s*\n\s*python3?\s+\S*"
+        + re.escape(file_base)
+        + r"\.py\s*\n"
+        + r"(.*?)"
+        + r"(?:\.\n\.\nEnd \(\d+/\d+\):|$)",
+        re.DOTALL,
+    )
+    match = section_pattern.search(log_text)
+    if match:
+        return extract_test_cases_from_log(match.group(1))
+
+    # Fallback: parse the entire log
+    return extract_test_cases_from_log(log_text)
+
+
 def find_test_files_from_log(log_text: str) -> list[str]:
     """
     Grep test file names from partial/truncated logs.
@@ -240,20 +271,10 @@ def build_failure_report(
             test_file = failed["test_file"]
             failure_reason = failed.get("failure_reason", "unknown")
 
-            # Try to extract test cases from log if available
+            # Extract test case failures from the log section for this file
             test_cases = []
             if log_text:
-                # Find the section for this test file in the log
-                test_cases = extract_test_cases_from_log(log_text)
-                # Filter to cases matching this test file
-                file_base = test_file.replace(".py", "").split("/")[-1]
-                test_cases = [
-                    tc
-                    for tc in test_cases
-                    if file_base.replace("test_", "")
-                    in tc.get("class_name", "").lower()
-                    or file_base in tc.get("class_name", "").lower()
-                ]
+                test_cases = extract_test_cases_for_file(log_text, test_file)
 
             failure_category = "timeout" if "timeout" in failure_reason else "other"
             if test_cases:
@@ -288,13 +309,7 @@ def build_failure_report(
         if failed_files:
             report["source"] = "log_parsing"
             for tf in failed_files:
-                test_cases = extract_test_cases_from_log(log_text)
-                file_base = tf.replace(".py", "").replace("test_", "")
-                relevant_cases = [
-                    tc
-                    for tc in test_cases
-                    if file_base in tc.get("class_name", "").lower()
-                ]
+                relevant_cases = extract_test_cases_for_file(log_text, tf)
                 failure_category = "other"
                 if relevant_cases:
                     failure_category = classify_failure(

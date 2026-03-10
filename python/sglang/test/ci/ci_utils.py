@@ -116,6 +116,11 @@ TEST_RESULTS_JSON_PATH = os.environ.get(
     "SGLANG_TEST_RESULTS_JSON", "/tmp/sglang_test_results.json"
 )
 
+# Default path for captured test output log (used by extract_failures.py)
+TEST_LOG_OUTPUT_PATH = os.environ.get(
+    "SGLANG_TEST_LOG_OUTPUT", "/tmp/sglang_test_output.log"
+)
+
 
 def write_test_results_json(
     files,
@@ -196,6 +201,13 @@ def run_unittest_files(
     if coredump_enabled:
         cuda_coredump.cleanup_dump_dir()
 
+    # Truncate log file for failure tracking (best-effort)
+    try:
+        with open(TEST_LOG_OUTPUT_PATH, "w"):
+            pass
+    except Exception:
+        pass
+
     tic = time.perf_counter()
     success = True
     passed_tests = []
@@ -221,25 +233,33 @@ def run_unittest_files(
             )
             file_tic = time.perf_counter()
 
-            if capture_output:
-                # Capture output for retry decision
-                process = subprocess.Popen(
-                    ["python3", full_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    errors="ignore",  # Ignore non-UTF-8 bytes to prevent UnicodeDecodeError
-                )
-                output_lines = []
-                for line in process.stdout:
-                    logger.info(line.rstrip())
-                    output_lines.append(line)
-                process.wait()
-            else:
-                process = subprocess.Popen(
-                    ["python3", full_path], stdout=None, stderr=None
-                )
-                process.wait()
+            # Always capture output: tee to logger + log file for failure tracking
+            process = subprocess.Popen(
+                ["python3", full_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="ignore",  # Ignore non-UTF-8 bytes to prevent UnicodeDecodeError
+            )
+            output_lines = []
+            try:
+                log_f = open(TEST_LOG_OUTPUT_PATH, "a")
+            except Exception:
+                log_f = None
+            for line in process.stdout:
+                logger.info(line.rstrip())
+                output_lines.append(line)
+                if log_f:
+                    try:
+                        log_f.write(line)
+                    except Exception:
+                        pass
+            if log_f:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
+            process.wait()
 
             elapsed = time.perf_counter() - file_tic
 
@@ -264,7 +284,6 @@ def run_unittest_files(
                 ret_code = run_with_timeout(
                     run_one_file,
                     args=(filename,),
-                    kwargs={"capture_output": enable_retry},
                     timeout=timeout_per_file,
                 )
 

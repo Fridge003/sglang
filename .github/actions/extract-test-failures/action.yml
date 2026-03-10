@@ -34,6 +34,7 @@ runs:
           --partition-id "${{ inputs.partition-id }}" \
           --partition-size "${{ inputs.partition-size }}" \
           --results-json "${{ inputs.results-json }}" \
+          --log-file /tmp/sglang_test_output.log \
           --output /tmp/failure_report.json
       continue-on-error: true
 
