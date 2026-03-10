@@ -578,12 +578,13 @@ class DeepseekV2MoE(nn.Module):
         self._fuse_shared_experts_inside_sbo = SboFlags.fuse_shared_experts_inside_sbo()
 
     def get_moe_weights(self):
-        num_local = self.experts.num_local_experts
         return [
             x.data
             for name, x in self.experts.named_parameters()
             if name not in ["correction_bias"]
-            and filter_moe_weight_param_global_expert(name, x, num_local)
+            and filter_moe_weight_param_global_expert(
+                name, x, self.experts.num_local_experts
+            )
         ]
 
     def forward(
@@ -801,7 +802,6 @@ class DeepseekV2MoE(nn.Module):
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
             router_logits = self.gate(hidden_states, forward_batch=forward_batch)
-
             if not sbo_enabled_flag and self.num_fused_shared_experts == 0:
                 if self.alt_stream is not None:
                     self.alt_stream.wait_stream(torch.cuda.current_stream())
@@ -811,7 +811,6 @@ class DeepseekV2MoE(nn.Module):
                         shared_event = self.alt_stream.record_event()
                 else:
                     shared_output = self._forward_shared_experts(hidden_states)
-
             topk_output = self.topk(
                 hidden_states,
                 router_logits,
@@ -1007,58 +1006,21 @@ class DeepseekV2MoE(nn.Module):
         return final_hidden_states
 
     def _remap_topk_ids_for_deepep_fusion(self, topk_output):
-        """Remap topk IDs for DeepEP shared expert fusion.
-
-        TopK (num_fused_shared_experts=1) outputs [N, 9]:
-          Columns 0-7: top-8 routed expert IDs in [0, 255]
-          Column 8: shared expert ID = 256 (set by TopK internally)
-
-        Remaps to expanded layout (n_routed_experts + EP_size total experts):
-          Routed expert e → e + e // num_local_routed
-            (shifts IDs to make room for shared slots at every 17th position)
-          Shared expert 256 → ep_rank * num_local_experts + num_local_routed
-            (routes to home rank's shared expert slot)
-
-        Also corrects the weight for column 8: TopK's weight (based on the 8th
-        router score) is not meaningful for the shared expert. We set it to
-        1/routed_scaling_factor so that after FusedMoE applies routed_scaling_factor
-        uniformly, the shared expert contributes with effective weight 1.0.
-        """
-        topk_ids = topk_output.topk_ids  # [N, 9] for N>0, [0, 8] for empty case
-        topk_weights = topk_output.topk_weights
-        N = topk_ids.shape[0]
-        num_local_routed = self._deepep_num_local_routed  # e.g. 16
-        num_local_experts = self._deepep_num_local_experts  # e.g. 17
-        ep_rank = self.experts.moe_ep_rank
-
-        if N == 0:
-            # empty_topk_output returns [0, top_k - num_fused_shared_experts] = [0, 8].
-            # Expand to [0, 9] to match FusedMoE's expected top_k=9.
+        topk_ids, topk_weights = topk_output.topk_ids, topk_output.topk_weights
+        if topk_ids.shape[0] == 0:  # empty_topk_output returns [0, 8]; expand to [0, 9]
             return topk_output._replace(
-                topk_ids=torch.cat([topk_ids, topk_ids.new_empty((0, 1))], dim=-1),
-                topk_weights=torch.cat(
-                    [topk_weights, topk_weights.new_empty((0, 1))], dim=-1
-                ),
+                topk_ids=topk_ids.new_empty((0, topk_ids.shape[-1] + 1)),
+                topk_weights=topk_weights.new_empty((0, topk_weights.shape[-1] + 1)),
             )
-
-        # Remap routed IDs (columns 0-7): e → e + e // num_local_routed
-        routed_ids = topk_ids[:, :-1]  # [N, 8]
-        new_routed_ids = routed_ids + routed_ids // num_local_routed
-
-        # Remap shared ID (column 8): 256 → ep_rank * num_local_experts + num_local_routed
-        home_shared_id = ep_rank * num_local_experts + num_local_routed
-        shared_ids = topk_ids.new_full((N, 1), home_shared_id)
-
-        # Correct weight for shared expert: 1/routed_scaling_factor so that
-        # weight * routed_scaling_factor = 1.0 in the FusedMoE kernel.
-        shared_weights = topk_weights.new_full((N, 1), self._deepep_shared_weight)
-
-        return topk_output._replace(
-            topk_ids=torch.cat([new_routed_ids, shared_ids], dim=-1),  # [N, 9]
-            topk_weights=torch.cat(
-                [topk_weights[:, :-1], shared_weights], dim=-1
-            ),  # [N, 9]
+        # Remap routed IDs: e → e + e // num_local_routed (interleave shared slots)
+        topk_ids[:, :-1] += topk_ids[:, :-1] // self._deepep_num_local_routed
+        # Set shared expert to home rank's local slot; weight compensates routed_scaling_factor
+        topk_ids[:, -1] = (
+            self.experts.moe_ep_rank * self._deepep_num_local_experts
+            + self._deepep_num_local_routed
         )
+        topk_weights[:, -1] = self._deepep_shared_weight
+        return topk_output
 
     def _forward_shared_experts(
         self, hidden_states, gemm_output_zero_allocator: BumpAllocator = None

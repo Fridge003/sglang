@@ -200,9 +200,7 @@ class FusedMoE(torch.nn.Module):
         self.hidden_size = hidden_size
         self.num_experts = num_experts
         self.num_fused_shared_experts = num_fused_shared_experts
-        # Explicit flag: DeepEP shared expert is fused into MoE kernel as slot
-        # num_local_routed on home rank. num_experts is expanded by moe_ep_size.
-        # Needed to distinguish from no-fusion DeepEP (both have num_fused_shared=0).
+        # Needed to distinguish DeepEP fusion (num_experts expanded by moe_ep_size) from no-fusion DeepEP.
         self.is_deepep_shared_expert_fusion = is_deepep_shared_expert_fusion
 
         self.enable_flashinfer_cutlass_moe = (
@@ -563,12 +561,7 @@ class FusedMoE(torch.nn.Module):
         num_local_routed_experts = (
             self.num_local_experts - self.num_fused_shared_experts
         )
-
-        # DeepEP fusion expands num_experts by moe_ep_size (one shared slot per rank).
-        # Subtract ep_size to recover pre-expansion counts so checkpoint IDs (0-255 for
-        # routed, 256 for shared) map correctly to local slots.
-        # Use explicit flag to avoid false-positive for no-fusion DeepEP (which also
-        # has num_fused_shared_experts=0 but num_experts=256, not 272).
+        # DeepEP fusion: num_experts is expanded by moe_ep_size; adjust to original counts.
         if self.is_deepep_shared_expert_fusion:
             num_global_routed_experts -= self.moe_ep_size
             num_local_routed_experts = num_global_routed_experts // self.moe_ep_size
@@ -625,16 +618,12 @@ class FusedMoE(torch.nn.Module):
             )
             return
 
-        # For DeepEP fusion num_fused_shared_experts=0 in FusedMoE but num_experts
-        # is expanded by moe_ep_size (e.g. 272 for EP=16). Shared expert IDs are
-        # >= num_experts - moe_ep_size (e.g. 256). Use explicit flag to avoid
-        # false-positive for no-fusion DeepEP.
-        _num_global_routed = (
-            self.num_experts - self.moe_ep_size
+        # DeepEP fusion: shared experts start at num_experts - moe_ep_size, not num_fused_shared_experts.
+        if expert_id >= self.num_experts - (
+            self.moe_ep_size
             if self.is_deepep_shared_expert_fusion
-            else self.num_experts - self.num_fused_shared_experts
-        )
-        if expert_id >= _num_global_routed:
+            else self.num_fused_shared_experts
+        ):
             # This is a shared expert.
             physical_expert_ids = [expert_id]
         else:

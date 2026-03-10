@@ -756,15 +756,16 @@ def biased_grouped_topk_gpu(
         num_experts // num_expert_group if num_expert_group else num_experts
     )
 
+    # topk for routed experts only (shared experts are appended separately below)
+    topk_routed = topk - num_fused_shared_experts
     if (
         _is_cuda
         and fused_topk_deepseek is not None
-        and num_fused_shared_experts == 0
         and is_power_of_two(num_experts)
-        # flashinfer constraints
-        and topk <= 8
+        # flashinfer constraints (applied to routed experts only)
+        and topk_routed <= 8
         and topk_group <= num_expert_group
-        and topk_group * num_expert_group >= topk
+        and topk_group * num_expert_group >= topk_routed
         and (
             (experts_per_group <= 32 and experts_per_group * topk_group <= 128)
             if num_expert_group > 1
@@ -773,10 +774,10 @@ def biased_grouped_topk_gpu(
     ):
         # Pre-allocate output tensors (flashinfer mutates them in-place)
         topk_weights = torch.empty(
-            (num_tokens, topk), dtype=torch.float32, device=gating_output.device
+            (num_tokens, topk_routed), dtype=torch.float32, device=gating_output.device
         )
         topk_ids = torch.empty(
-            (num_tokens, topk), dtype=torch.int32, device=gating_output.device
+            (num_tokens, topk_routed), dtype=torch.int32, device=gating_output.device
         )
 
         # flashinfer always applies the scaling_factor internally
@@ -790,12 +791,25 @@ def biased_grouped_topk_gpu(
             correction_bias,
             num_expert_group,
             topk_group,
-            topk,
+            topk_routed,
             scaling_factor,
             topk_weights,
             topk_ids,
             True,
         )
+
+        if num_fused_shared_experts > 0:
+            # Append placeholder columns for shared experts.  The actual IDs and
+            # weights will be overwritten by _remap_topk_ids_for_deepep_fusion
+            # before dispatch, so the values here don't matter.
+            shared_ids = topk_ids.new_full(
+                (num_tokens, num_fused_shared_experts), num_experts
+            )
+            shared_weights = topk_weights.new_zeros(
+                (num_tokens, num_fused_shared_experts)
+            )
+            topk_ids = torch.cat([topk_ids, shared_ids], dim=-1)
+            topk_weights = torch.cat([topk_weights, shared_weights], dim=-1)
 
         return topk_weights, topk_ids
 
