@@ -21,8 +21,6 @@ class DeepseekOCRProcessor(BaseMultimodalProcessor):
             == 896
         )
         _processor.ocr2_mode = is_ocr2
-        if is_ocr2:
-            _processor.downsample_ratio = 4
         super().__init__(hf_config, server_args, _processor, *args, **kwargs)
         self.mm_tokens = MultimodalSpecialTokens(
             image_token="<image>", image_token_id=self._processor.image_token_id
