@@ -369,7 +369,7 @@ class TestMamba(unittest.TestCase):
         req9_token_ids = [1, 2, 3, 4, 5, 6, 7]
         req9 = make_dummy_req()
         result = tree.match_prefix(
-            MatchPrefixParams(key=RadixKey(req9_token_ids), req=req9, cow_mamba=True)
+            MatchPrefixParams(key=RadixKey(req9_token_ids), req=req9)
         )
         kv_indices, last_node = result.device_indices, result.last_device_node
         assert req9.mamba_pool_idx is not None
