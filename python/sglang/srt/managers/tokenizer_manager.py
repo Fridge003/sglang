@@ -1629,64 +1629,37 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             if getattr(recv_obj, "dp_ranks", None):
                 meta_info["dp_rank"] = recv_obj.dp_ranks[i]
 
-            if isinstance(recv_obj, BatchStrOutput):
-                state.append_text(recv_obj.output_strs[i])
+            if isinstance(recv_obj, (BatchStrOutput, BatchTokenIDOutput)):
                 # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
-                is_stream = getattr(state.obj, "stream", False)
-                effective_stream = self.server_args.stream_output and is_stream
+                effective_stream = self.server_args.stream_output and getattr(
+                    state.obj, "stream", False
+                )
                 state.finished = recv_obj.finished_reasons[i] is not None
+                if isinstance(recv_obj, BatchStrOutput):
+                    state.append_text(recv_obj.output_strs[i])
+                state.output_ids.extend(recv_obj.output_ids[i])
                 if effective_stream:
-                    state.output_ids.extend(recv_obj.output_ids[i])
                     output_token_ids = state.output_ids[state.last_output_offset :]
                     state.last_output_offset = len(state.output_ids)
+                    out_dict = {"output_ids": output_token_ids, "meta_info": meta_info}
+                elif state.finished:
                     out_dict = {
-                        "text": state.get_text(),
-                        "output_ids": output_token_ids,
+                        "output_ids": state.output_ids.copy(),
                         "meta_info": meta_info,
                     }
                 else:
-                    state.output_ids.extend(recv_obj.output_ids[i])
-                    output_token_ids = state.output_ids.copy()
                     out_dict = None
-                    if state.finished:
-                        out_dict = {
-                            "text": state.get_text(),
-                            "output_ids": output_token_ids,
-                            "meta_info": meta_info,
-                        }
-
-            elif isinstance(recv_obj, BatchTokenIDOutput):
-                is_stream = getattr(state.obj, "stream", False)
-                effective_stream = self.server_args.stream_output and is_stream
-                state.finished = recv_obj.finished_reasons[i] is not None
-                if effective_stream:
-                    state.output_ids.extend(recv_obj.output_ids[i])
-                    output_token_ids = state.output_ids[state.last_output_offset :]
-                    state.last_output_offset = len(state.output_ids)
-                    out_dict = {
-                        "output_ids": output_token_ids,
-                        "meta_info": meta_info,
-                    }
-                else:
-                    state.output_ids.extend(recv_obj.output_ids[i])
-                    output_token_ids = state.output_ids.copy()
-                    out_dict = None
-                    if state.finished:
-                        out_dict = {
-                            "output_ids": output_token_ids,
-                            "meta_info": meta_info,
-                        }
+                if out_dict and isinstance(recv_obj, BatchStrOutput):
+                    out_dict["text"] = state.get_text()
             elif isinstance(recv_obj, BatchMultimodalOutput):
                 raise NotImplementedError("BatchMultimodalOut not implemented")
             else:
                 assert isinstance(recv_obj, BatchEmbeddingOutput)
+                state.finished = recv_obj.finished_reasons[i] is not None
                 out_dict = {
                     "embedding": recv_obj.embeddings[i],
                     "meta_info": meta_info,
                 }
-
-            if not isinstance(recv_obj, (BatchStrOutput, BatchTokenIDOutput)):
-                state.finished = recv_obj.finished_reasons[i] is not None
 
             # Set first_token_time on the first output batch.
             # This is the single write point for first_token_time.
