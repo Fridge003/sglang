@@ -909,13 +909,26 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
 
             site = web.TCPSite(self._runner, host=self.host, port=self.port)
             self._loop.run_until_complete(site.start())
+            logger.info(f"Bootstrap server started on {self.host}:{self.port}")
             self._loop.run_forever()
+        except OSError as e:
+            # Log a clear error when the bootstrap port is already in use.
+            # This usually means a stale bootstrap server from a previous run
+            # is still occupying the port, which will cause page_size or other
+            # config mismatches when servers connect to the stale instance.
+            logger.error(
+                f"Bootstrap server failed to bind {self.host}:{self.port}: {e}. "
+                f"A stale bootstrap server may be running on this port from a "
+                f"previous process. This can cause page_size mismatch errors."
+            )
         except Exception as e:
             logger.error(f"Server error: {str(e)}")
         finally:
             # Cleanup
-            self._loop.run_until_complete(self._runner.cleanup())
-            self._loop.close()
+            if hasattr(self, "_loop") and self._loop is not None:
+                if hasattr(self, "_runner") and self._runner is not None:
+                    self._loop.run_until_complete(self._runner.cleanup())
+                self._loop.close()
 
     def close(self):
         """Shutdown"""

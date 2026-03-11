@@ -1,6 +1,8 @@
 import logging
 import os
 import shlex
+import signal
+import subprocess
 import time
 import warnings
 from urllib.parse import urlparse
@@ -18,6 +20,38 @@ from sglang.utils import wait_for_http_ready
 
 logger = logging.getLogger(__name__)
 
+# Default bootstrap port used by disaggregation servers
+DEFAULT_BOOTSTRAP_PORT = 8998
+
+
+def _kill_processes_on_port(port: int):
+    """Kill any processes listening on the given port.
+
+    This prevents stale bootstrap servers from previous CI runs from
+    interfering with new tests.
+    """
+    try:
+        # Use lsof to find PIDs listening on the port
+        result = subprocess.run(
+            ["lsof", "-ti", f"tcp:{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.stdout.strip():
+            pids = result.stdout.strip().split("\n")
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str.strip())
+                    os.kill(pid, signal.SIGKILL)
+                    logger.warning(f"Killed stale process {pid} on port {port}")
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+            # Give the OS time to release the port
+            time.sleep(1)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
 
 class PDDisaggregationServerBase(CustomTestCase):
     @classmethod
@@ -33,6 +67,14 @@ class PDDisaggregationServerBase(CustomTestCase):
         cls.lb_url = f"http://{cls.base_host}:{cls.lb_port}"
         print(f"{cls.base_host=} {cls.lb_port=} {cls.prefill_port=} {cls.decode_port=}")
         cls.process_lb, cls.process_decode, cls.process_prefill = None, None, None
+
+        # Kill any stale processes on ports used by disaggregation tests.
+        # This prevents stale bootstrap/server processes from previous CI runs
+        # from interfering with new tests (causes page_size mismatch errors).
+        _kill_processes_on_port(DEFAULT_BOOTSTRAP_PORT)
+        _kill_processes_on_port(int(cls.prefill_port))
+        _kill_processes_on_port(int(cls.decode_port))
+        _kill_processes_on_port(int(cls.lb_port))
 
         # config transfer backend and rdma devices
         if is_in_ci():
@@ -88,6 +130,10 @@ class PDDisaggregationServerBase(CustomTestCase):
                     kill_process_tree(process.pid)
                 except Exception as e:
                     print(f"Error killing process {process.pid}: {e}")
+
+        # Kill any remaining processes on the bootstrap port to prevent
+        # stale bootstrap servers from interfering with subsequent tests
+        _kill_processes_on_port(DEFAULT_BOOTSTRAP_PORT)
 
         # wait for 5 seconds
         time.sleep(5)
