@@ -1329,7 +1329,10 @@ class MooncakeKVReceiver(CommonKVReceiver):
         super().__init__(mgr, bootstrap_addr, bootstrap_room, prefill_dp_rank)
 
         self.kv_mgr.addr_to_rooms_tracker[self.bootstrap_addr].add(self.bootstrap_room)
-        self.kv_mgr.update_status(self.bootstrap_room, KVPoll.WaitingForInput)
+        # Only transition to WaitingForInput if bootstrap succeeded;
+        # if super().__init__() set status to Failed, do not override it.
+        if self.bootstrap_infos is not None:
+            self.kv_mgr.update_status(self.bootstrap_room, KVPoll.WaitingForInput)
 
     def _register_kv_args(self):
         for bootstrap_info in self.bootstrap_infos:

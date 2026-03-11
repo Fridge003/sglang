@@ -24,6 +24,7 @@ from sglang.srt.disaggregation.base.conn import (
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.distributed import get_pp_group
 from sglang.srt.layers.dp_attention import (
+    get_attention_cp_size,
     get_attention_dp_rank,
     get_attention_dp_size,
     get_attention_tp_rank,
@@ -119,9 +120,12 @@ class CommonKVManager(BaseKVManager):
         route_attn_tp_rank = self.attn_tp_rank
         # In prefill CP mode, attention TP rank is flattened to 0, but requests are
         # still routed by engine rank; register by engine rank to preserve all routes.
+        # Only apply this when actual CP is in use (cp_size > 1), not in pure DP
+        # attention mode (e.g. EP64) where each rank has its own dp_group already.
         if (
             self.disaggregation_mode == DisaggregationMode.PREFILL
             and self.attn_tp_size == 1
+            and get_attention_cp_size() > 1
         ):
             route_attn_tp_rank = self.kv_args.engine_rank
         payload = {
@@ -372,7 +376,12 @@ class CommonKVReceiver(BaseKVReceiver):
             # For prefill CP mode (decode attention TP=1, prefill attention TP>1),
             # route bootstrap to all prefill ranks as non-dummy so the serving rank
             # always receives decode-side metadata.
-            if self.kv_mgr.attn_tp_size == 1 and self.prefill_attn_tp_size > 1:
+            # Only apply CP-mode routing when actual CP is in use (cp_size > 1).
+            if (
+                self.kv_mgr.attn_tp_size == 1
+                and self.prefill_attn_tp_size > 1
+                and get_attention_cp_size() > 1
+            ):
                 self.target_tp_rank = None
             self.required_dst_info_num = 1
             if self.kv_mgr.is_mla_backend:
@@ -439,6 +448,7 @@ class CommonKVReceiver(BaseKVReceiver):
                             f"Could not fetch bootstrap info for engine rank: {self.kv_mgr.kv_args.engine_rank} and target_dp_group: {self.target_dp_group} and target_pp_rank {target_pp_rank}",
                         )
                         self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
+                        self.bootstrap_infos = None
                         return
 
             self.bootstrap_infos = bootstrap_infos
@@ -631,6 +641,10 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 (len(v) for v in self.prefill_port_table.values()),
                 default=self.attn_tp_size,
             )
+            # Use the declared attn_tp_size unless all DP groups have fully
+            # registered, to avoid returning a partial count during startup.
+            if inferred_attn_tp_size < self.attn_tp_size:
+                inferred_attn_tp_size = self.attn_tp_size
             prefill_parallel_info = {
                 "prefill_attn_tp_size": inferred_attn_tp_size,
                 "prefill_dp_size": self.dp_size,
