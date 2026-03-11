@@ -27,30 +27,84 @@ DEFAULT_BOOTSTRAP_PORT = 8998
 def _kill_processes_on_port(port: int):
     """Kill any processes listening on the given port.
 
-    This prevents stale bootstrap servers from previous CI runs from
-    interfering with new tests.
+    Tries multiple methods (fuser, lsof, /proc/net/tcp) since CI containers
+    may not have all tools installed.
     """
+    killed = False
+
+    # Method 1: fuser (commonly available on Linux, part of psmisc)
     try:
-        # Use lsof to find PIDs listening on the port
         result = subprocess.run(
-            ["lsof", "-ti", f"tcp:{port}"],
+            ["fuser", "-k", f"{port}/tcp"],
             capture_output=True,
             text=True,
             timeout=5,
         )
-        if result.stdout.strip():
-            pids = result.stdout.strip().split("\n")
-            for pid_str in pids:
-                try:
-                    pid = int(pid_str.strip())
-                    os.kill(pid, signal.SIGKILL)
-                    logger.warning(f"Killed stale process {pid} on port {port}")
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-            # Give the OS time to release the port
-            time.sleep(1)
+        if result.returncode == 0:
+            logger.warning(f"Killed processes on port {port} via fuser")
+            killed = True
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
+
+    # Method 2: lsof
+    if not killed:
+        try:
+            result = subprocess.run(
+                ["lsof", "-ti", f"tcp:{port}"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.stdout.strip():
+                for pid_str in result.stdout.strip().split("\n"):
+                    try:
+                        os.kill(int(pid_str.strip()), signal.SIGKILL)
+                        logger.warning(
+                            f"Killed stale process {pid_str.strip()} on port {port}"
+                        )
+                        killed = True
+                    except (ValueError, ProcessLookupError, PermissionError):
+                        pass
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+
+    # Method 3: parse /proc/net/tcp (always available on Linux, no tools needed)
+    if not killed and os.path.exists("/proc/net/tcp"):
+        try:
+            hex_port = f"{port:04X}"
+            with open("/proc/net/tcp") as f:
+                for line in f:
+                    fields = line.split()
+                    if len(fields) < 4:
+                        continue
+                    # fields[1] is local_address (hex_ip:hex_port)
+                    # fields[3] is state (0A = LISTEN)
+                    if fields[3] == "0A" and fields[1].endswith(f":{hex_port}"):
+                        # inode is fields[9], find pid via /proc/*/fd
+                        inode = fields[9]
+                        for pid_dir in os.listdir("/proc"):
+                            if not pid_dir.isdigit():
+                                continue
+                            fd_dir = f"/proc/{pid_dir}/fd"
+                            try:
+                                for fd in os.listdir(fd_dir):
+                                    link = os.readlink(f"{fd_dir}/{fd}")
+                                    if f"socket:[{inode}]" in link:
+                                        pid = int(pid_dir)
+                                        os.kill(pid, signal.SIGKILL)
+                                        logger.warning(
+                                            f"Killed stale process {pid} on port {port} via /proc"
+                                        )
+                                        killed = True
+                                        break
+                            except (OSError, PermissionError):
+                                continue
+        except (OSError, PermissionError):
+            pass
+
+    if killed:
+        time.sleep(1)  # Give the OS time to release the port
+    return killed
 
 
 class PDDisaggregationServerBase(CustomTestCase):
