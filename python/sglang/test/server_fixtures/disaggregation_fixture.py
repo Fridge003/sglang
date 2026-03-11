@@ -31,6 +31,7 @@ def _kill_processes_on_port(port: int):
     may not have all tools installed.
     """
     killed = False
+    methods_tried = []
 
     # Method 1: fuser (commonly available on Linux, part of psmisc)
     try:
@@ -43,8 +44,11 @@ def _kill_processes_on_port(port: int):
         if result.returncode == 0:
             logger.warning(f"Killed processes on port {port} via fuser")
             killed = True
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
+        methods_tried.append("fuser:available")
+    except FileNotFoundError:
+        methods_tried.append("fuser:not_found")
+    except subprocess.TimeoutExpired:
+        methods_tried.append("fuser:timeout")
 
     # Method 2: lsof
     if not killed:
@@ -55,55 +59,70 @@ def _kill_processes_on_port(port: int):
                 text=True,
                 timeout=5,
             )
+            methods_tried.append("lsof:available")
             if result.stdout.strip():
+                my_pid = os.getpid()
                 for pid_str in result.stdout.strip().split("\n"):
                     try:
-                        os.kill(int(pid_str.strip()), signal.SIGKILL)
-                        logger.warning(
-                            f"Killed stale process {pid_str.strip()} on port {port}"
-                        )
+                        pid = int(pid_str.strip())
+                        if pid == my_pid:
+                            continue  # Don't kill ourselves
+                        os.kill(pid, signal.SIGKILL)
+                        logger.warning(f"Killed stale process {pid} on port {port}")
                         killed = True
                     except (ValueError, ProcessLookupError, PermissionError):
                         pass
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+        except FileNotFoundError:
+            methods_tried.append("lsof:not_found")
+        except subprocess.TimeoutExpired:
+            methods_tried.append("lsof:timeout")
 
     # Method 3: parse /proc/net/tcp (always available on Linux, no tools needed)
-    if not killed and os.path.exists("/proc/net/tcp"):
-        try:
-            hex_port = f"{port:04X}"
-            with open("/proc/net/tcp") as f:
-                for line in f:
-                    fields = line.split()
-                    if len(fields) < 4:
-                        continue
-                    # fields[1] is local_address (hex_ip:hex_port)
-                    # fields[3] is state (0A = LISTEN)
-                    if fields[3] == "0A" and fields[1].endswith(f":{hex_port}"):
-                        # inode is fields[9], find pid via /proc/*/fd
-                        inode = fields[9]
-                        for pid_dir in os.listdir("/proc"):
-                            if not pid_dir.isdigit():
-                                continue
-                            fd_dir = f"/proc/{pid_dir}/fd"
-                            try:
-                                for fd in os.listdir(fd_dir):
-                                    link = os.readlink(f"{fd_dir}/{fd}")
-                                    if f"socket:[{inode}]" in link:
-                                        pid = int(pid_dir)
-                                        os.kill(pid, signal.SIGKILL)
-                                        logger.warning(
-                                            f"Killed stale process {pid} on port {port} via /proc"
-                                        )
-                                        killed = True
-                                        break
-                            except (OSError, PermissionError):
-                                continue
-        except (OSError, PermissionError):
-            pass
+    if not killed:
+        if not os.path.exists("/proc/net/tcp"):
+            methods_tried.append("/proc:not_available")
+        else:
+            methods_tried.append("/proc:available")
+            try:
+                hex_port = f"{port:04X}"
+                with open("/proc/net/tcp") as f:
+                    for line in f:
+                        fields = line.split()
+                        if len(fields) < 10:
+                            continue
+                        # fields[1] is local_address (hex_ip:hex_port)
+                        # fields[3] is state (0A = LISTEN)
+                        if fields[3] == "0A" and fields[1].endswith(f":{hex_port}"):
+                            # inode is fields[9], find pid via /proc/*/fd
+                            inode = fields[9]
+                            for pid_dir in os.listdir("/proc"):
+                                if not pid_dir.isdigit():
+                                    continue
+                                fd_dir = f"/proc/{pid_dir}/fd"
+                                try:
+                                    for fd in os.listdir(fd_dir):
+                                        link = os.readlink(f"{fd_dir}/{fd}")
+                                        if f"socket:[{inode}]" in link:
+                                            pid = int(pid_dir)
+                                            if pid == os.getpid():
+                                                break  # Don't kill ourselves
+                                            os.kill(pid, signal.SIGKILL)
+                                            logger.warning(
+                                                f"Killed stale process {pid} on port {port} via /proc"
+                                            )
+                                            killed = True
+                                            break
+                                except (OSError, PermissionError):
+                                    continue
+            except (OSError, PermissionError) as e:
+                methods_tried.append(f"/proc:error({e})")
 
     if killed:
         time.sleep(1)  # Give the OS time to release the port
+
+    logger.warning(
+        f"_kill_processes_on_port({port}): killed={killed}, methods=[{', '.join(methods_tried)}]"
+    )
     return killed
 
 
