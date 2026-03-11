@@ -1629,12 +1629,12 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             if getattr(recv_obj, "dp_ranks", None):
                 meta_info["dp_rank"] = recv_obj.dp_ranks[i]
 
+            state.finished = recv_obj.finished_reasons[i] is not None
             if isinstance(recv_obj, (BatchStrOutput, BatchTokenIDOutput)):
                 # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
                 effective_stream = self.server_args.stream_output and getattr(
                     state.obj, "stream", False
                 )
-                state.finished = recv_obj.finished_reasons[i] is not None
                 if isinstance(recv_obj, BatchStrOutput):
                     state.append_text(recv_obj.output_strs[i])
                 state.output_ids.extend(recv_obj.output_ids[i])
@@ -1655,7 +1655,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 raise NotImplementedError("BatchMultimodalOut not implemented")
             else:
                 assert isinstance(recv_obj, BatchEmbeddingOutput)
-                state.finished = recv_obj.finished_reasons[i] is not None
                 out_dict = {
                     "embedding": recv_obj.embeddings[i],
                     "meta_info": meta_info,
