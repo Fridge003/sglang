@@ -1271,26 +1271,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
 
             state.event.clear()
 
-            if is_stream:
-                # Record response sent time right before we send response.
-                if not state.time_stats.response_sent_to_client_time:
-                    state.time_stats.set_response_sent_to_client_time()
-                    out["meta_info"][
-                        "response_sent_to_client_ts"
-                    ] = state.time_stats.get_response_sent_to_client_realtime()
-                yield out
-            else:
-                if (
-                    request is not None
-                    and not obj.background
-                    and await request.is_disconnected()
-                ):
-                    # Abort the request for disconnected requests (non-streaming, running)
-                    self.abort_request(obj.rid)
-                    # Use exception to kill the whole call stack and asyncio task
-                    raise ValueError(
-                        f"Request is disconnected from the client side (type 3). Abort request {obj.rid=}"
-                    )
+            # Only streaming requests should reach here
+            if is_stream and not state.time_stats.response_sent_to_client_time:
+                state.time_stats.set_response_sent_to_client_time()
+                out["meta_info"][
+                    "response_sent_to_client_ts"
+                ] = state.time_stats.get_response_sent_to_client_realtime()
+            yield out
 
     async def _handle_batch_request(
         self,
@@ -1649,7 +1636,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     }
                 else:
                     out_dict = None
-                if out_dict and isinstance(recv_obj, BatchStrOutput):
+                if out_dict is not None and isinstance(recv_obj, BatchStrOutput):
                     out_dict["text"] = state.get_text()
             elif isinstance(recv_obj, BatchMultimodalOutput):
                 raise NotImplementedError("BatchMultimodalOut not implemented")
