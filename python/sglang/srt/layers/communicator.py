@@ -91,6 +91,10 @@ FUSE_ALLREDUCE_MAX_BATCH_SIZE = 2048
 
 
 def apply_flashinfer_allreduce_fusion(batch_size: int):
+    from sglang.srt.layers.flashinfer_comm_fusion import (
+        is_flashinfer_fusion_probe_ok,
+    )
+
     return (
         # NOTE: flashinfer 0.6.1 caused performance regression on sm100 for allreduce fusion
         # Ref: https://github.com/sgl-project/sglang/issues/17237
@@ -100,6 +104,7 @@ def apply_flashinfer_allreduce_fusion(batch_size: int):
         and batch_size <= FUSE_ALLREDUCE_MAX_BATCH_SIZE
         and not is_dp_attention_enabled()
         and get_global_server_args().enable_flashinfer_allreduce_fusion
+        and is_flashinfer_fusion_probe_ok()
     )
 
 

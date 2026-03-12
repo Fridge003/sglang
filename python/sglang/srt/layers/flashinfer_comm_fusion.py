@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _flashinfer_comm = None
 _workspace_manager = None
+_fusion_probe_failed = False
 
 if is_flashinfer_available():
     try:
@@ -73,7 +74,12 @@ class FlashInferWorkspaceManager:
                 force_oneshot_support=bool(use_oneshot),
             )
         except Exception as e:
-            logger.warning(f"Failed to initialize FlashInfer workspace: {e}")
+            global _fusion_probe_failed
+            _fusion_probe_failed = True
+            logger.warning(
+                f"Failed to initialize FlashInfer workspace: {e}. "
+                "Allreduce fusion permanently disabled for this process."
+            )
             self.workspace = None
             self.initialized = False
             return
@@ -266,6 +272,61 @@ def flashinfer_allreduce_residual_rmsnorm(
     )
 
     return norm_out, residual_out
+
+
+def probe_flashinfer_fusion_workspace() -> bool:
+    """Early probe to test if flashinfer allreduce fusion workspace can be created.
+
+    Must be called after TP groups are initialized but BEFORE torch.compile /
+    CUDA graph capture.  If SymmDeviceMemory is unavailable (e.g. missing
+    IMEX daemon, insufficient driver), this sets ``_fusion_probe_failed`` so
+    that ``apply_flashinfer_allreduce_fusion()`` returns False during
+    torch.compile tracing and the custom op is never compiled into the
+    FX graph.
+    """
+    global _fusion_probe_failed
+
+    if _fusion_probe_failed:
+        return False
+
+    if _flashinfer_comm is None:
+        return False
+
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size <= 1:
+        return True  # fusion not used for single GPU
+
+    rank = get_tensor_model_parallel_rank()
+
+    try:
+        ws = _flashinfer_comm.create_allreduce_fusion_workspace(
+            backend="trtllm",
+            world_size=world_size,
+            rank=rank,
+            max_token_num=16,
+            hidden_dim=128,
+            dtype=torch.float16,
+            force_oneshot_support=False,
+        )
+        ws.destroy()
+        logger.info(f"FlashInfer allreduce fusion probe succeeded on rank {rank}")
+        return True
+    except Exception as e:
+        _fusion_probe_failed = True
+        logger.warning(
+            f"FlashInfer allreduce fusion probe failed on rank {rank}: {e}. "
+            "Allreduce fusion permanently disabled for this process."
+        )
+        return False
+
+
+def is_flashinfer_fusion_probe_ok() -> bool:
+    """Check if the flashinfer allreduce fusion workspace probe has succeeded.
+
+    Returns False if a prior initialization attempt failed (e.g., due to
+    cudaErrorInsufficientDriver when SymmDeviceMemory is unavailable).
+    """
+    return not _fusion_probe_failed
 
 
 def cleanup_flashinfer_workspace():

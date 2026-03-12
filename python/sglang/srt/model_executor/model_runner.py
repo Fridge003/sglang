@@ -635,6 +635,17 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 self.eagle_aux_hidden_state_layer_ids
             )
 
+        # Probe flashinfer allreduce fusion workspace before torch.compile
+        # tracing to detect SymmDeviceMemory failures early. If this fails,
+        # apply_flashinfer_allreduce_fusion() will return False and the custom
+        # op won't be compiled into the FX graph.
+        if server_args.enable_flashinfer_allreduce_fusion:
+            from sglang.srt.layers.flashinfer_comm_fusion import (
+                probe_flashinfer_fusion_workspace,
+            )
+
+            probe_flashinfer_fusion_workspace()
+
         # Initialize piecewise CUDA graph
         self.init_piecewise_cuda_graphs()
 
