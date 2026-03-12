@@ -25,7 +25,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=350, suite="stage-b-test-large-2-gpu")
+register_cuda_ci(est_time=1100, suite="stage-b-test-large-2-gpu")
 
 
 class TestDPAttentionDP2TP2(
@@ -144,10 +144,11 @@ class TestDPAttentionDP2TP2DeepseekV3MTP(
         ]
         if not is_in_amd_ci():
             other_args += ["--mem-frac", "0.7"]
+        # DP2+TP2+Eagle MTP needs extended timeout for DeepGEMM warmup
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
-            timeout=900,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH * 1.5,
             other_args=other_args,
         )
 
