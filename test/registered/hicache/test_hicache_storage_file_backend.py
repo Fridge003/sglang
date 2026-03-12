@@ -271,7 +271,6 @@ class TestHiCacheStorageAccuracy(HiCacheStorageBaseMixin, CustomTestCase):
     def _get_additional_server_args_and_env(cls):
         """Get additional server arguments specific to configuration - override in subclasses"""
         server_args = {
-            "--tp-size": 2,
             "--hicache-ratio": 1.5,
         }
 
@@ -282,7 +281,7 @@ class TestHiCacheStorageAccuracy(HiCacheStorageBaseMixin, CustomTestCase):
         run_eval_accuracy_test(self)
 
 
-def run_eval_accuracy_test(test_instance, accuracy_threshold: float = 0.05):
+def run_eval_accuracy_test(test_instance, accuracy_threshold: float = 0.03):
     """Generic eval accuracy test with configurable accuracy threshold
 
     Args:
