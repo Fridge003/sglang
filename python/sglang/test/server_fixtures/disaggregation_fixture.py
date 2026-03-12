@@ -336,20 +336,13 @@ def get_rdma_devices_args():
             )
 
     # 3. Generate RDMA device names
-    # Detect total PHYSICAL GPUs on the node (not just visible ones).
-    # torch.cuda.device_count() respects CUDA_VISIBLE_DEVICES and returns
-    # only visible GPUs (e.g., 2 for CUDA_VISIBLE_DEVICES=4,5), which breaks
-    # the GPU-to-RDMA mapping. Use /proc to get the real physical count.
-    total_gpus = 8  # Fallback to common 8-GPU setup
+    # Detect total GPUs on the node (not just visible ones)
     try:
-        nvidia_proc = "/proc/driver/nvidia/gpus"
-        if os.path.isdir(nvidia_proc):
-            total_gpus = len(os.listdir(nvidia_proc))
-        else:
-            # If /proc not available, infer from GPU indices
-            total_gpus = max(max(gpu_indices) + 1, 8)
+        import torch
+
+        total_gpus = torch.cuda.device_count()
     except Exception:
-        total_gpus = 8
+        total_gpus = 8  # Fallback to common 8-GPU setup
 
     # Handle edge cases
     if total_gpus == 0:
