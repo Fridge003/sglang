@@ -456,16 +456,12 @@ class TestReqStateCrashDump(unittest.TestCase):
     def test_with_text_only(self):
         state = _make_state(buffer_text=False)
         state.append_text("partial output")
-        self.assertEqual(
-            state.get_crash_dump_output(), {"text": "partial output"}
-        )
+        self.assertEqual(state.get_crash_dump_output(), {"text": "partial output"})
 
     def test_with_output_ids_only(self):
         state = _make_state(buffer_text=False)
         state.output_ids = [1, 2, 3]
-        self.assertEqual(
-            state.get_crash_dump_output(), {"output_ids": [1, 2, 3]}
-        )
+        self.assertEqual(state.get_crash_dump_output(), {"output_ids": [1, 2, 3]})
 
     def test_with_text_and_output_ids(self):
         state = _make_state(buffer_text=False)
