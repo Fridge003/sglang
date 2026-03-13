@@ -19,11 +19,25 @@ jobs:
   patch:
     if: github.repository == 'sgl-project/sglang'
     runs-on: x64-docker-build-node
+    timeout-minutes: 60
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - name: Validate inputs
+        run: |
+          IMAGE_TAG="${{ inputs.image_tag }}"
+          if ! [[ "${IMAGE_TAG}" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            echo "::error::Invalid image_tag: ${IMAGE_TAG}"
+            exit 1
+          fi
+          if [ -n "${{ inputs.pr_numbers }}" ]; then
+            IFS=',' read -ra PRS <<< "${{ inputs.pr_numbers }}"
+            for pr in "${PRS[@]}"; do
+              pr=$(echo "${pr}" | xargs)
+              if ! [[ "${pr}" =~ ^[0-9]+$ ]]; then
+                echo "::error::Invalid PR number: ${pr}"
+                exit 1
+              fi
+            done
+          fi
 
       - name: Login to Docker Hub
         uses: docker/login-action@v2
@@ -31,85 +45,91 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Pull base image and extract commit
+      - name: Pull base image and start container
         run: |
           IMAGE="lmsysorg/sglang:${{ inputs.image_tag }}"
           docker pull "${IMAGE}"
-          if BASE_SHA=$(docker run --rm "${IMAGE}" git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null); then
-            echo "Image built from commit: ${BASE_SHA}"
-          else
-            BASE_SHA=""
-            echo "::warning::Image has no .git directory — cannot extract base commit"
+
+          # Start a long-running container so we can exec into it
+          CONTAINER_ID=$(docker run -d "${IMAGE}" sleep infinity)
+          echo "CONTAINER_ID=${CONTAINER_ID}" >> "$GITHUB_ENV"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+          # Extract and validate the base commit SHA
+          BASE_SHA=$(docker exec "${CONTAINER_ID}" \
+            git -C /sgl-workspace/sglang rev-parse HEAD 2>/dev/null \
+            | tr -d '[:space:]') || true
+          if [ -z "${BASE_SHA}" ]; then
+            echo "::error::Image has no .git directory — cannot apply changes"
+            docker rm -f "${CONTAINER_ID}"
+            exit 1
           fi
+          echo "Image built from commit: ${BASE_SHA}"
           echo "BASE_SHA=${BASE_SHA}" >> "$GITHUB_ENV"
 
-      - name: Generate patches
+      - name: Apply changes
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git fetch origin main
-          mkdir -p /tmp/patch-ctx
+          set -eo pipefail
+          REPO_URL="https://github.com/sgl-project/sglang.git"
+          GIT=(git -C /sgl-workspace/sglang)
+
+          # Configure git identity for merge commits inside the container
+          docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.email "ci@sglang.ai"
+          docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.name "SGLang CI"
+
+          # Ensure the remote points to the canonical repo
+          docker exec "${CONTAINER_ID}" bash -c \
+            "cd /sgl-workspace/sglang && git remote set-url origin '${REPO_URL}' 2>/dev/null || git remote add origin '${REPO_URL}'"
 
           if [ -n "${{ inputs.pr_numbers }}" ]; then
+            # --- PR mode: merge each PR with theirs-wins strategy ---
+            # Conflicts are auto-resolved in favour of the PR's version.
             IFS=',' read -ra PRS <<< "${{ inputs.pr_numbers }}"
             for pr in "${PRS[@]}"; do
               pr=$(echo "${pr}" | xargs)
-              echo "Fetching PR #${pr}"
-              git fetch origin "pull/${pr}/head:pr-${pr}"
-              MERGE_BASE=$(git merge-base origin/main "pr-${pr}")
-              echo "  PR #${pr}: merge-base=${MERGE_BASE}"
-              git diff "${MERGE_BASE}..pr-${pr}" > "/tmp/patch-ctx/${pr}.patch"
-              echo "  PR #${pr}: $(wc -l < /tmp/patch-ctx/${pr}.patch) lines"
+              echo "=== Applying PR #${pr} ==="
+              docker exec "${CONTAINER_ID}" bash -c \
+                "cd /sgl-workspace/sglang && git fetch origin 'pull/${pr}/head:pr-${pr}' && git merge 'pr-${pr}' --strategy=ort --strategy-option=theirs --no-edit -m 'Merge PR #${pr}'"
             done
-          elif [ -n "${BASE_SHA}" ]; then
-            echo "Generating diff: image ${BASE_SHA} → latest main"
-            git fetch origin "${BASE_SHA}"
-            git diff "${BASE_SHA}..origin/main" > /tmp/patch-ctx/main.patch
-            echo "  main: $(wc -l < /tmp/patch-ctx/main.patch) lines"
           else
-            echo "::error::No PR numbers specified and image has no .git — cannot generate diff against main"
-            exit 1
+            # --- Main mode: merge to latest main ---
+            # Conflicts are auto-resolved in favour of main's version.
+            echo "=== Merging latest main ==="
+            docker exec "${CONTAINER_ID}" "${GIT[@]}" fetch origin main
+
+            NEW_COMMITS=$(docker exec "${CONTAINER_ID}" \
+              "${GIT[@]}" rev-list HEAD..origin/main --count \
+              | tr -d '[:space:]')
+            NEW_COMMITS="${NEW_COMMITS:-0}"
+
+            if [ "${NEW_COMMITS}" -eq 0 ]; then
+              echo "::warning::Image is already up to date with main"
+              echo "SKIP_PUSH=true" >> "$GITHUB_ENV"
+            else
+              echo "${NEW_COMMITS} new commits to apply"
+              docker exec "${CONTAINER_ID}" bash -c \
+                "cd /sgl-workspace/sglang && git merge origin/main --strategy=ort --strategy-option=theirs --no-edit -m 'Merge main (catch-up)'"
+            fi
           fi
 
-          TOTAL=$(cat /tmp/patch-ctx/*.patch | wc -l)
-          if [ "${TOTAL}" -eq 0 ]; then
-            echo "::warning::All patches are empty — image is already up to date"
-            echo "SKIP_BUILD=true" >> "$GITHUB_ENV"
-          fi
-
-      - name: Build patched image
-        if: env.SKIP_BUILD != 'true'
+      - name: Commit and push image
+        if: env.SKIP_PUSH != 'true'
         run: |
-          IMAGE="lmsysorg/sglang:${{ inputs.image_tag }}"
-
-          cat <<'DOCKERFILE' > /tmp/patch-ctx/Dockerfile
-          ARG BASE_IMAGE
-          FROM ${BASE_IMAGE}
-          COPY *.patch /tmp/patches/
-          RUN cd /sgl-workspace/sglang \
-              && for p in /tmp/patches/*.patch; do \
-                   if [ ! -s "${p}" ]; then \
-                     echo "Skipping ${p} (empty)"; \
-                   else \
-                     echo "Applying ${p}..." \
-                     && patch -p1 --fuzz=2 --no-backup-if-mismatch -f < "${p}" \
-                     || { echo "ERROR: Failed to apply ${p}"; exit 1; }; \
-                   fi; \
-                 done \
-              && rm -rf /tmp/patches
-          DOCKERFILE
-
-          docker build \
-            --no-cache \
-            --build-arg BASE_IMAGE="${IMAGE}" \
-            -t "${IMAGE}" \
-            /tmp/patch-ctx/
-
-      - name: Push patched image
-        if: env.SKIP_BUILD != 'true'
-        run: |
-          IMAGE="lmsysorg/sglang:${{ inputs.image_tag }}"
+          # Snapshot the container as the new image and push
+          docker commit "${CONTAINER_ID}" "${IMAGE}"
           docker push "${IMAGE}"
 
           echo "### Patched \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Base commit:** \`${BASE_SHA:-unknown (no .git)}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Base commit:** \`${BASE_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+          NEW_SHA=$(docker exec "${CONTAINER_ID}" \
+            git -C /sgl-workspace/sglang rev-parse HEAD \
+            | tr -d '[:space:]')
+          echo "- **New commit:** \`${NEW_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Source:** ${{ inputs.pr_numbers && format('PRs: {0}', inputs.pr_numbers) || 'latest main' }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ -n "${CONTAINER_ID}" ]; then
+            docker rm -f "${CONTAINER_ID}" || true
+          fi
