@@ -70,16 +70,20 @@ jobs:
       - name: Apply changes
         run: |
           set -eo pipefail
-          REPO_URL="https://${{ secrets.GH_PAT_FOR_DOCKER_PATCH }}@github.com/sgl-project/sglang.git"
           GIT=(git -C /sgl-workspace/sglang)
 
           # Configure git identity for cherry-pick/merge commits inside the container
           docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.email "ci@sglang.ai"
           docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.name "SGLang CI"
 
-          # Set authenticated remote so we can fetch any SHA
-          docker exec "${CONTAINER_ID}" "${GIT[@]}" remote set-url origin "${REPO_URL}" \
-            || docker exec "${CONTAINER_ID}" "${GIT[@]}" remote add origin "${REPO_URL}"
+          # Remove any baked-in auth headers from the image (e.g. GitHub Actions extraheader)
+          docker exec "${CONTAINER_ID}" "${GIT[@]}" config --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+          # Authenticate git inside the container via token-in-URL
+          docker exec "${CONTAINER_ID}" "${GIT[@]}" remote set-url origin \
+            "https://x-access-token:${{ secrets.GH_PAT_FOR_DOCKER_PATCH }}@github.com/sgl-project/sglang.git" \
+            || docker exec "${CONTAINER_ID}" "${GIT[@]}" remote add origin \
+            "https://x-access-token:${{ secrets.GH_PAT_FOR_DOCKER_PATCH }}@github.com/sgl-project/sglang.git"
 
           if [ -n "${{ inputs.commits }}" ]; then
             # --- Cherry-pick mode: apply specific commits ---
@@ -145,7 +149,7 @@ jobs:
             fi
           fi
 
-          # Scrub the PAT from the remote URL before committing the image
+          # Scrub credentials before committing the image
           docker exec "${CONTAINER_ID}" "${GIT[@]}" remote set-url origin "https://github.com/sgl-project/sglang.git"
 
       - name: Commit and push image
