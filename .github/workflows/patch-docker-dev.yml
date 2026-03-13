@@ -3,8 +3,8 @@ name: Patch Docker Image
 on:
   workflow_dispatch:
     inputs:
-      pr_numbers:
-        description: "Comma-separated PR numbers to apply (e.g. 18962,19010)"
+      commits:
+        description: "Comma-separated commit SHAs to cherry-pick (e.g. abc123,def456)"
         required: false
         default: ""
       image_tag:
@@ -28,12 +28,12 @@ jobs:
             echo "::error::Invalid image_tag: ${IMAGE_TAG}"
             exit 1
           fi
-          if [ -n "${{ inputs.pr_numbers }}" ]; then
-            IFS=',' read -ra PRS <<< "${{ inputs.pr_numbers }}"
-            for pr in "${PRS[@]}"; do
-              pr=$(echo "${pr}" | xargs)
-              if ! [[ "${pr}" =~ ^[0-9]+$ ]]; then
-                echo "::error::Invalid PR number: ${pr}"
+          if [ -n "${{ inputs.commits }}" ]; then
+            IFS=',' read -ra SHAS <<< "${{ inputs.commits }}"
+            for sha in "${SHAS[@]}"; do
+              sha=$(echo "${sha}" | xargs)
+              if ! [[ "${sha}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+                echo "::error::Invalid commit SHA: ${sha}"
                 exit 1
               fi
             done
@@ -73,7 +73,7 @@ jobs:
           REPO_URL="https://github.com/sgl-project/sglang.git"
           GIT=(git -C /sgl-workspace/sglang)
 
-          # Configure git identity for merge commits inside the container
+          # Configure git identity for cherry-pick/merge commits inside the container
           docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.email "ci@sglang.ai"
           docker exec "${CONTAINER_ID}" "${GIT[@]}" config user.name "SGLang CI"
 
@@ -81,16 +81,49 @@ jobs:
           docker exec "${CONTAINER_ID}" bash -c \
             "cd /sgl-workspace/sglang && git remote set-url origin '${REPO_URL}' 2>/dev/null || git remote add origin '${REPO_URL}'"
 
-          if [ -n "${{ inputs.pr_numbers }}" ]; then
-            # --- PR mode: merge each PR with theirs-wins strategy ---
-            # Conflicts are auto-resolved in favour of the PR's version.
-            IFS=',' read -ra PRS <<< "${{ inputs.pr_numbers }}"
-            for pr in "${PRS[@]}"; do
-              pr=$(echo "${pr}" | xargs)
-              echo "=== Applying PR #${pr} ==="
-              docker exec "${CONTAINER_ID}" bash -c \
-                "cd /sgl-workspace/sglang && git fetch origin 'pull/${pr}/head:pr-${pr}' && git merge 'pr-${pr}' --strategy=ort --strategy-option=theirs --no-edit -m 'Merge PR #${pr}'"
+          if [ -n "${{ inputs.commits }}" ]; then
+            # --- Cherry-pick mode: apply specific commits ---
+            # Conflicts are auto-resolved in favour of the cherry-picked commit.
+            APPLIED=0
+            IFS=',' read -ra SHAS <<< "${{ inputs.commits }}"
+            for sha in "${SHAS[@]}"; do
+              sha=$(echo "${sha}" | xargs)
+              echo "=== Cherry-picking ${sha} ==="
+
+              # Fetch this specific commit (works for any SHA on GitHub, not just main)
+              docker exec "${CONTAINER_ID}" "${GIT[@]}" fetch origin "${sha}"
+
+              # Verify the object actually exists after fetch
+              if ! docker exec "${CONTAINER_ID}" "${GIT[@]}" cat-file -e "${sha}^{commit}" 2>/dev/null; then
+                echo "::error::Commit ${sha} not found — verify the SHA exists in the repo"
+                exit 1
+              fi
+
+              # Reject merge commits — cherry-pick requires -m which is ambiguous for patching
+              PARENT_COUNT=$(docker exec "${CONTAINER_ID}" "${GIT[@]}" cat-file -p "${sha}" \
+                | grep -c '^parent' || true)
+              if [ "${PARENT_COUNT}" -gt 1 ]; then
+                echo "::error::Commit ${sha} is a merge commit — supply the individual commit SHAs instead"
+                exit 1
+              fi
+
+              # Skip if this commit is already in the image's history
+              if docker exec "${CONTAINER_ID}" "${GIT[@]}" merge-base --is-ancestor "${sha}" HEAD 2>/dev/null; then
+                echo "  ${sha} is already in the image — skipping"
+                continue
+              fi
+
+              docker exec "${CONTAINER_ID}" "${GIT[@]}" cherry-pick "${sha}" \
+                --strategy=ort --strategy-option=theirs --no-edit
+              APPLIED=$((APPLIED + 1))
             done
+
+            if [ "${APPLIED}" -eq 0 ]; then
+              echo "::warning::All commits already in image — nothing to do"
+              echo "SKIP_PUSH=true" >> "$GITHUB_ENV"
+            else
+              echo "Applied ${APPLIED} commit(s)"
+            fi
           else
             # --- Main mode: merge to latest main ---
             # Conflicts are auto-resolved in favour of main's version.
@@ -107,8 +140,8 @@ jobs:
               echo "SKIP_PUSH=true" >> "$GITHUB_ENV"
             else
               echo "${NEW_COMMITS} new commits to apply"
-              docker exec "${CONTAINER_ID}" bash -c \
-                "cd /sgl-workspace/sglang && git merge origin/main --strategy=ort --strategy-option=theirs --no-edit -m 'Merge main (catch-up)'"
+              docker exec "${CONTAINER_ID}" "${GIT[@]}" merge origin/main \
+                --strategy=ort --strategy-option=theirs --no-edit -m "Merge main (catch-up)"
             fi
           fi
 
@@ -125,7 +158,7 @@ jobs:
             git -C /sgl-workspace/sglang rev-parse HEAD \
             | tr -d '[:space:]')
           echo "- **New commit:** \`${NEW_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Source:** ${{ inputs.pr_numbers && format('PRs: {0}', inputs.pr_numbers) || 'latest main' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Source:** ${{ inputs.commits && format('commits: {0}', inputs.commits) || 'latest main' }}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Cleanup
         if: always()
