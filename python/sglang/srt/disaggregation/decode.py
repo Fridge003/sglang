@@ -373,7 +373,7 @@ class DecodePreallocQueue:
         
         result = self.tree_cache.match_prefix(
             MatchPrefixParams(
-                key=RadixKey(req.origin_input_ids),
+                key=RadixKey(req.origin_input_ids, extra_key=req.extra_key),
                 req=req,
                 cow_mamba=self.tree_cache.supports_mamba(),
             )
