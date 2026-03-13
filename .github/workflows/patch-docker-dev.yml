@@ -70,7 +70,7 @@ jobs:
       - name: Apply changes
         run: |
           set -eo pipefail
-          REPO_URL="https://x-access-token:${{ secrets.GH_PAT_FOR_DOCKER_PATCH }}@github.com/sgl-project/sglang.git"
+          REPO_URL="https://${{ secrets.GH_PAT_FOR_DOCKER_PATCH }}@github.com/sgl-project/sglang.git"
           GIT=(git -C /sgl-workspace/sglang)
 
           # Configure git identity for cherry-pick/merge commits inside the container
