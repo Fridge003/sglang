@@ -24,7 +24,6 @@ import logging
 
 import triton
 import triton.language as tl
-
 from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
@@ -357,7 +356,7 @@ def _fwd_grouped_kernel_stage1(
                 mask=(offs_n[None, :] < split_kv_end) & (mask_d[:, None]),
                 other=0.0,
             )
-            qk = tl.dot(q, k.to(q.dtype))
+            qk = tl.dot(q.to(k.dtype), k)
             if BLOCK_DPE > 0:
                 offs_buf_kpe = kv_loc[None, :] * stride_buf_kbs + base_offs_kpe
                 kpe = tl.load(
@@ -391,7 +390,7 @@ def _fwd_grouped_kernel_stage1(
             re_scale = tl.exp(e_max - n_e_max)
             p = tl.exp(qk - n_e_max[:, None])
             acc *= re_scale[:, None]
-            acc += tl.dot(p.to(q.dtype), v.to(q.dtype))
+            acc += tl.dot(p.to(v.dtype), v)
 
             e_sum = e_sum * re_scale + tl.sum(p, 1)
             e_max = n_e_max
