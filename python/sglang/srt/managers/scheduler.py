@@ -2618,6 +2618,11 @@ class Scheduler(
             self.process_batch_result_idle(batch, result)
 
         self.log_batch_result_stats(batch, result)
+
+        # Emit forward pass metrics (every iteration when enabled)
+        if self.enable_fpm:
+            self._emit_forward_pass_metrics(batch)
+
         self._maybe_clear_mm_inputs(batch)
         self.maybe_send_health_check_signal()
 
