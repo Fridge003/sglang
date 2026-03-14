@@ -170,7 +170,9 @@ class SchedulerMetricsMixin:
 
             self._fpm_dp_rank = self.dp_rank if self.dp_rank is not None else 0
             port = fpm_base_port + self._fpm_dp_rank
-            self._fpm_worker_id = ""
+            self._fpm_worker_id = getattr(
+                self.server_args, "forward_pass_metrics_worker_id", ""
+            )
             self._fpm_publisher = _FpmPublisherThread(
                 f"tcp://*:{port}",
                 worker_id=self._fpm_worker_id,
@@ -192,6 +194,78 @@ class SchedulerMetricsMixin:
             self.kv_event_publisher = EventPublisherFactory.create(
                 kv_events_config, self.attn_dp_rank
             )
+
+    def _build_scheduled_request_metrics(self: Scheduler, batch: ScheduleBatch):
+        from sglang.srt.observability.forward_pass_metrics import (
+            ScheduledRequestMetrics,
+            WelfordAccumulator,
+        )
+
+        num_prefill_requests = 0
+        sum_prefill_tokens = 0
+        sum_prefill_kv_tokens = 0
+        prefill_lengths = WelfordAccumulator()
+
+        if batch.forward_mode.is_mixed():
+            decode_req_ids = {
+                id(req) for req in batch.decoding_reqs or []
+            }
+            prefill_reqs = [
+                req for req in batch.reqs if id(req) not in decode_req_ids
+            ]
+        elif batch.forward_mode.is_extend():
+            prefill_reqs = batch.reqs
+        else:
+            prefill_reqs = []
+
+        if prefill_reqs:
+            stats = batch.prefill_stats
+            for req in prefill_reqs:
+                prefill_lengths.add(len(req.origin_input_ids))
+            num_prefill_requests = stats.num_new_seqs if stats else len(prefill_reqs)
+            sum_prefill_tokens = stats.log_input_tokens if stats else 0
+            sum_prefill_kv_tokens = stats.log_hit_tokens if stats else 0
+
+        decode_kv = WelfordAccumulator()
+        if batch.forward_mode.is_mixed():
+            for req in batch.decoding_reqs or []:
+                decode_kv.add(req.seqlen)
+        elif batch.forward_mode.is_decode():
+            for sl in batch.seq_lens_cpu:
+                decode_kv.add(int(sl))
+
+        return ScheduledRequestMetrics(
+            num_prefill_requests=num_prefill_requests,
+            sum_prefill_tokens=sum_prefill_tokens,
+            var_prefill_length=prefill_lengths.variance(),
+            sum_prefill_kv_tokens=sum_prefill_kv_tokens,
+            num_decode_requests=decode_kv.n,
+            sum_decode_kv_tokens=decode_kv.s,
+            var_decode_kv_tokens=decode_kv.variance(),
+        )
+
+    def _build_queued_request_metrics(self: Scheduler):
+        from sglang.srt.observability.forward_pass_metrics import (
+            QueuedRequestMetrics,
+            WelfordAccumulator,
+        )
+
+        prefill_q = WelfordAccumulator()
+        decode_q = WelfordAccumulator()
+        for req in self.waiting_queue:
+            if len(req.output_ids) > 0:
+                decode_q.add(req.seqlen)
+            else:
+                prefill_q.add(len(req.origin_input_ids))
+
+        return QueuedRequestMetrics(
+            num_prefill_requests=prefill_q.n,
+            sum_prefill_tokens=prefill_q.s,
+            var_prefill_length=prefill_q.variance(),
+            num_decode_requests=decode_q.n,
+            sum_decode_kv_tokens=decode_q.s,
+            var_decode_kv_tokens=decode_q.variance(),
+        )
 
     def update_spec_metrics(self: Scheduler, bs: int, num_accepted_tokens: int):
         self.spec_num_accepted_tokens += num_accepted_tokens + bs
@@ -639,61 +713,14 @@ class SchedulerMetricsMixin:
 
         from sglang.srt.observability.forward_pass_metrics import (
             ForwardPassMetrics,
-            QueuedRequestMetrics,
-            ScheduledRequestMetrics,
-            WelfordAccumulator,
-        )
-
-        # Scheduled requests
-        if batch.forward_mode.is_extend():
-            prefill_lengths = WelfordAccumulator()
-            for req in batch.reqs:
-                prefill_lengths.add(len(req.origin_input_ids))
-
-            stats = batch.prefill_stats
-            scheduled = ScheduledRequestMetrics(
-                num_prefill_requests=stats.num_new_seqs if stats else len(batch.reqs),
-                sum_prefill_tokens=stats.log_input_tokens if stats else 0,
-                sum_prefill_kv_tokens=stats.log_hit_tokens if stats else 0,
-                var_prefill_length=prefill_lengths.variance(),
-            )
-        elif batch.forward_mode.is_decode():
-            decode_kv = WelfordAccumulator()
-            for sl in batch.seq_lens_cpu:
-                decode_kv.add(int(sl))
-
-            scheduled = ScheduledRequestMetrics(
-                num_decode_requests=decode_kv.n,
-                sum_decode_kv_tokens=decode_kv.s,
-                var_decode_kv_tokens=decode_kv.variance(),
-            )
-        else:
-            scheduled = ScheduledRequestMetrics()
-
-        # Queued requests
-        prefill_q = WelfordAccumulator()
-        decode_q = WelfordAccumulator()
-        for req in self.waiting_queue:
-            if len(req.output_ids) > 0:
-                decode_q.add(req.seqlen)
-            else:
-                prefill_q.add(len(req.origin_input_ids))
-
-        queued = QueuedRequestMetrics(
-            num_prefill_requests=prefill_q.n,
-            sum_prefill_tokens=prefill_q.s,
-            var_prefill_length=prefill_q.variance(),
-            num_decode_requests=decode_q.n,
-            sum_decode_kv_tokens=decode_q.s,
-            var_decode_kv_tokens=decode_q.variance(),
         )
 
         fpm = ForwardPassMetrics(
             worker_id=self._fpm_worker_id,
             dp_rank=self._fpm_dp_rank,
-            wall_time=time.monotonic(),
-            scheduled_requests=scheduled,
-            queued_requests=queued,
+            wall_time=max(0.0, time.monotonic() - batch.fpm_start_time),
+            scheduled_requests=self._build_scheduled_request_metrics(batch),
+            queued_requests=self._build_queued_request_metrics(),
         )
         self._fpm_publisher.publish(fpm)
 

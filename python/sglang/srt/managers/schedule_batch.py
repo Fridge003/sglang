@@ -1293,6 +1293,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     split_forward_batch: ForwardBatch = None
     seq_lens_cpu_cache: torch.Tensor = None
 
+    # Forward-pass metrics
+    fpm_start_time: float = 0.0
+
     # Stream
     has_stream: bool = False
 
@@ -2312,6 +2315,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             mamba_track_seqlens=self.mamba_track_seqlens,
             dp_cooperation_info=self.dp_cooperation_info,
             prefill_stats=self.prefill_stats,
+            fpm_start_time=self.fpm_start_time,
         )
 
     def maybe_evict_swa(self):

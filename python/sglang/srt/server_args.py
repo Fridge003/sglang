@@ -410,6 +410,7 @@ class ServerArgs:
     enable_request_time_stats_logging: bool = False
     kv_events_config: Optional[str] = None
     forward_pass_metrics_port: Optional[int] = None
+    forward_pass_metrics_worker_id: str = ""
     enable_trace: bool = False
     otlp_traces_endpoint: str = "localhost:4317"
 

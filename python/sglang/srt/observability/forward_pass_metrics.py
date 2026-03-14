@@ -98,8 +98,7 @@ class ForwardPassMetrics(
     """Per-iteration metrics emitted by the scheduler.
 
     One message per scheduler iteration (one per forward pass).
-    ``wall_time`` is ``time.monotonic()`` at emit time; consumers can
-    compute inter-iteration cadence from successive deltas.
+    ``wall_time`` is the iteration duration in seconds.
     An idle heartbeat (all zeros, wall_time=0) is emitted when the
     engine transitions from active to idle.
     """
