@@ -2930,6 +2930,11 @@ class ServerArgs:
     def _handle_pd_disaggregation(self):
         if self.disaggregation_mode == "decode":
             if self.disaggregation_decode_enable_radix_cache:
+                if self.disaggregation_transfer_backend != "nixl":
+                    raise ValueError(
+                        "--disaggregation-decode-enable-radix-cache currently "
+                        "requires --disaggregation-transfer-backend nixl"
+                    )
                 if self.enable_dp_attention:
                     logger.warning(
                         "EXPERIMENTAL: Decode radix cache with DP attention. "
@@ -5388,7 +5393,7 @@ class ServerArgs:
         parser.add_argument(
             "--disaggregation-decode-enable-radix-cache",
             action="store_true",
-            help="Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Not compatible with DP attention.",
+            help="Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Currently requires --disaggregation-transfer-backend nixl.",
         )
         parser.add_argument(
             "--disaggregation-decode-enable-offload-kvcache",
