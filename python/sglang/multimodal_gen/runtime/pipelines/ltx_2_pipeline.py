@@ -1,12 +1,12 @@
-import inspect
-import json
 import math
-import os
 
 import numpy as np
 import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 
+from sglang.multimodal_gen.runtime.loader.component_loaders.component_loader import (
+    PipelineComponentLoader,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
@@ -16,7 +16,10 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages import (
     LTX2AVDecodingStage,
     LTX2AVDenoisingStage,
     LTX2AVLatentPreparationStage,
+    LTX2HalveResolutionStage,
+    LTX2RefinementStage,
     LTX2TextConnectorStage,
+    LTX2UpsampleStage,
     TextEncodingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
@@ -66,41 +69,6 @@ def prepare_mu(batch: Req, server_args: ServerArgs):
     return "mu", mu
 
 
-def _load_component_config(model_path: str, component_name: str):
-    """Helper to load component config from model_index.json or config.json"""
-    try:
-        # Try loading model_index.json first
-        index_path = os.path.join(model_path, "model_index.json")
-        if os.path.exists(index_path):
-            with open(index_path, "r") as f:
-                index = json.load(f)
-
-            if component_name in index:
-                # It's a subfolder
-                subfolder = index[component_name][1]
-                config_path = os.path.join(model_path, subfolder, "config.json")
-                if os.path.exists(config_path):
-                    with open(config_path, "r") as f:
-                        return json.load(f)
-
-        # Fallback to direct config.json in subfolder if standard structure
-        config_path = os.path.join(model_path, component_name, "config.json")
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                return json.load(f)
-
-    except Exception as e:
-        logger.warning(f"Failed to load config for {component_name}: {e}")
-
-    return {}
-
-
-def _filter_kwargs_for_cls(cls, kwargs):
-    """Filter kwargs to only include those accepted by cls.__init__"""
-    sig = inspect.signature(cls.__init__)
-    return {k: v for k, v in kwargs.items() if k in sig.parameters}
-
-
 class LTX2FlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
     """Override ``_time_shift_exponential`` to use torch f32 instead of numpy f64."""
 
@@ -127,11 +95,35 @@ class LTX2Pipeline(ComposedPipelineBase):
         "connectors",
     ]
 
+    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
+
     def initialize_pipeline(self, server_args: ServerArgs):
         orig = self.get_module("scheduler")
         self.modules["scheduler"] = LTX2FlowMatchScheduler.from_config(orig.config)
 
+        # Load optional spatial_upsampler if path is provided
+        upsampler_path = server_args.component_paths.get("spatial_upsampler")
+        if upsampler_path is not None:
+            logger.info(
+                "Loading spatial_upsampler from %s (two-stage mode)", upsampler_path
+            )
+            module, memory_usage = PipelineComponentLoader.load_component(
+                component_name="spatial_upsampler",
+                component_model_path=upsampler_path,
+                transformers_or_diffusers="diffusers",
+                server_args=server_args,
+            )
+            self.modules["spatial_upsampler"] = module
+            self.memory_usages["spatial_upsampler"] = memory_usage
+            logger.info("Two-stage mode enabled")
+        else:
+            self.modules["spatial_upsampler"] = None
+
     def create_pipeline_stages(self, server_args: ServerArgs):
+        spatial_upsampler = self.get_module("spatial_upsampler")
+        is_two_stage = spatial_upsampler is not None
+
+        # Shared front stages
         self.add_stages(
             [
                 InputValidationStage(),
@@ -142,6 +134,9 @@ class LTX2Pipeline(ComposedPipelineBase):
                 LTX2TextConnectorStage(connectors=self.get_module("connectors")),
             ]
         )
+
+        if is_two_stage:
+            self.add_stage(LTX2HalveResolutionStage())
 
         self.add_standard_timestep_preparation_stage(prepare_extra_kwargs=[prepare_mu])
 
@@ -158,13 +153,34 @@ class LTX2Pipeline(ComposedPipelineBase):
                     vae=self.get_module("vae"),
                     audio_vae=self.get_module("audio_vae"),
                 ),
-                LTX2AVDecodingStage(
-                    vae=self.get_module("vae"),
-                    audio_vae=self.get_module("audio_vae"),
-                    vocoder=self.get_module("vocoder"),
-                    pipeline=self,
-                ),
             ]
+        )
+
+        if is_two_stage:
+            self.add_stages(
+                [
+                    LTX2UpsampleStage(
+                        spatial_upsampler=spatial_upsampler,
+                        vae=self.get_module("vae"),
+                        audio_vae=self.get_module("audio_vae"),
+                    ),
+                    LTX2RefinementStage(
+                        transformer=self.get_module("transformer"),
+                        scheduler=self.get_module("scheduler"),
+                        distilled_sigmas=self.STAGE_2_DISTILLED_SIGMA_VALUES,
+                        vae=self.get_module("vae"),
+                        audio_vae=self.get_module("audio_vae"),
+                    ),
+                ]
+            )
+
+        self.add_stage(
+            LTX2AVDecodingStage(
+                vae=self.get_module("vae"),
+                audio_vae=self.get_module("audio_vae"),
+                vocoder=self.get_module("vocoder"),
+                pipeline=self,
+            )
         )
 
 

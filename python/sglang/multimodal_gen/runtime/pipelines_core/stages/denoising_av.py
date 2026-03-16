@@ -769,26 +769,35 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         noise = torch.randn_like(batch.latents)
         batch.latents = batch.latents + noise * noise_scale
 
-        # 2. Run denoising loop with distilled_sigmas
-        # Save original sigmas
-        original_sigmas = self.scheduler.sigmas
-        original_timesteps = self.scheduler.timesteps
-        original_num_inference_steps = self.scheduler.num_inference_steps
+        # 2. Invalidate stale TI2V conditioning from Stage 1 (half-res) so it
+        #    gets re-encoded at the current (full) resolution in Stage 2.
+        batch.image_latent = None
+        batch.ltx2_num_image_tokens = 0
 
-        # Set distilled sigmas
-        self.scheduler.sigmas = self.distilled_sigmas.to(self.scheduler.sigmas.device)
-        # Approximation for timesteps
-        self.scheduler.timesteps = self.scheduler.sigmas * 1000
-        self.scheduler.num_inference_steps = len(self.distilled_sigmas) - 1
+        # 3. Run denoising loop with distilled_sigmas using a private scheduler
+        #    copy to avoid mutating the shared scheduler instance.
+        original_scheduler = self.scheduler
+        original_batch_timesteps = batch.timesteps
+        original_batch_num_inference_steps = batch.num_inference_steps
 
-        # Call parent forward
+        self.scheduler = copy.deepcopy(original_scheduler)
+        distilled_device = self.scheduler.sigmas.device
+        self.scheduler.sigmas = self.distilled_sigmas.to(distilled_device)
+        num_steps = len(self.distilled_sigmas) - 1
+        self.scheduler.num_inference_steps = num_steps
+        self.scheduler.timesteps = (self.distilled_sigmas[:num_steps] * 1000).to(
+            distilled_device
+        )
+
+        batch.timesteps = self.scheduler.timesteps
+        batch.num_inference_steps = num_steps
+
         try:
             batch = super().forward(batch, server_args)
         finally:
-            # Restore original sigmas
-            self.scheduler.sigmas = original_sigmas
-            self.scheduler.timesteps = original_timesteps
-            self.scheduler.num_inference_steps = original_num_inference_steps
+            self.scheduler = original_scheduler
+            batch.timesteps = original_batch_timesteps
+            batch.num_inference_steps = original_batch_num_inference_steps
 
         return batch
 
