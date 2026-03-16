@@ -14,6 +14,7 @@ from sglang.multimodal_gen.runtime.models.upsampler.latent_upsampler import (
     LatentUpsampler,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import maybe_download_model
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -52,7 +53,7 @@ def _download_hf_file(repo_id: str, filename: str, revision: str = "main") -> st
 
 
 def _find_safetensors_file(path: str) -> str:
-    """Resolve path to a single safetensors file (local path, directory, or HF URL)."""
+    """Resolve path to a single safetensors file (local path, directory, HF URL, or HF repo id)."""
     if os.path.isfile(path) and path.endswith(".safetensors"):
         return path
 
@@ -70,10 +71,24 @@ def _find_safetensors_file(path: str) -> str:
         repo_id, revision, filename = hf
         return _download_hf_file(repo_id, filename, revision)
 
+    try:
+        maybe_downloaded = maybe_download_model(path)
+        if os.path.isdir(maybe_downloaded):
+            files = sorted(glob.glob(os.path.join(maybe_downloaded, "*.safetensors")))
+            if len(files) == 1:
+                return files[0]
+            elif len(files) > 1:
+                raise ValueError(
+                    f"Found {len(files)} safetensors files in {maybe_downloaded}, expected 1"
+                )
+    except Exception:
+        pass
+
     raise FileNotFoundError(
         f"No safetensors file found at {path}. "
         "Provide a local .safetensors file, a directory containing one, "
-        "or a HuggingFace URL (https://huggingface.co/<repo>/blob/main/<path>)."
+        "a HuggingFace URL (https://huggingface.co/<repo>/blob/main/<path>), "
+        "or a HuggingFace repo id."
     )
 
 

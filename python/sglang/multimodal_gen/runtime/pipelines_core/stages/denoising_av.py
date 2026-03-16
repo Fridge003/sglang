@@ -764,35 +764,54 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         self.distilled_sigmas = torch.tensor(distilled_sigmas)
 
     @staticmethod
-    def _resolve_stage2_generator(batch: Req):
+    def _randn_like_with_batch_generators(
+        reference_tensor: torch.Tensor, batch: Req
+    ) -> torch.Tensor:
         generator = getattr(batch, "generator", None)
         if isinstance(generator, torch.Generator):
-            return generator
+            return torch.randn(
+                reference_tensor.shape,
+                device=reference_tensor.device,
+                dtype=reference_tensor.dtype,
+                generator=generator,
+            )
         if isinstance(generator, list):
-            for g in generator:
-                if isinstance(g, torch.Generator):
-                    return g
-        return None
+            bsz = int(reference_tensor.shape[0])
+            valid_generators = [g for g in generator if isinstance(g, torch.Generator)]
+            if len(valid_generators) == 1:
+                return torch.randn(
+                    reference_tensor.shape,
+                    device=reference_tensor.device,
+                    dtype=reference_tensor.dtype,
+                    generator=valid_generators[0],
+                )
+            if len(valid_generators) >= bsz:
+                per_sample_noise = []
+                for i in range(bsz):
+                    per_sample_noise.append(
+                        torch.randn(
+                            (1, *reference_tensor.shape[1:]),
+                            device=reference_tensor.device,
+                            dtype=reference_tensor.dtype,
+                            generator=valid_generators[i],
+                        )
+                    )
+                return torch.cat(per_sample_noise, dim=0)
+        return torch.randn(
+            reference_tensor.shape,
+            device=reference_tensor.device,
+            dtype=reference_tensor.dtype,
+        )
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         # 1. Add noise to latents
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
-        stage2_generator = self._resolve_stage2_generator(batch)
-
-        video_noise = torch.randn(
-            batch.latents.shape,
-            device=batch.latents.device,
-            dtype=batch.latents.dtype,
-            generator=stage2_generator,
-        )
+        video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = batch.latents + video_noise * noise_scale
 
         if isinstance(batch.audio_latents, torch.Tensor):
-            audio_noise = torch.randn(
-                batch.audio_latents.shape,
-                device=batch.audio_latents.device,
-                dtype=batch.audio_latents.dtype,
-                generator=stage2_generator,
+            audio_noise = self._randn_like_with_batch_generators(
+                batch.audio_latents, batch
             )
             batch.audio_latents = batch.audio_latents + audio_noise * noise_scale.to(
                 batch.audio_latents.device, batch.audio_latents.dtype
