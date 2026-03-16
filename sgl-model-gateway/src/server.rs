@@ -91,8 +91,36 @@ async fn parse_reasoning(
     parse::parse_reasoning(&state.context, &req).await
 }
 
-async fn sink_handler() -> Response {
-    StatusCode::NOT_FOUND.into_response()
+/// Fallback handler for unmatched routes.
+/// Extracts `model` from query params and forwards the raw request body to the
+/// appropriate worker. This enables multipart/form-data endpoints like /v1/videos
+/// to work through the router without needing typed handlers for each path.
+async fn raw_proxy_fallback(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = req.uri().path().to_string();
+    let method = req.method().clone();
+    let model_id = params.get("model").map(|s| s.as_str());
+    let headers = req.headers().clone();
+
+    // Read the raw body bytes
+    let body = match axum::body::to_bytes(req.into_body(), 500 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read request body: {}", e),
+            )
+                .into_response();
+        }
+    };
+
+    state
+        .router
+        .route_raw_request(Some(&headers), body, &route, model_id, &method)
+        .await
 }
 
 async fn liveness() -> Response {
@@ -695,7 +723,7 @@ pub fn build_app(
         ))
         .layer(middleware::RequestIdLayer::new(request_id_headers))
         .layer(create_cors_layer(cors_allowed_origins))
-        .fallback(sink_handler)
+        .fallback(raw_proxy_fallback)
         .with_state(app_state)
 }
 

@@ -196,6 +196,20 @@ pub trait RouterTrait: Send + Sync + Debug {
         (StatusCode::NOT_IMPLEMENTED, "Rerank not implemented").into_response()
     }
 
+    /// Route a raw request (multipart, binary, etc.) to a worker by model_id.
+    /// Used as a fallback for endpoints the router doesn't have typed handlers for
+    /// (e.g. /v1/videos, /v1/images/generations).
+    async fn route_raw_request(
+        &self,
+        _headers: Option<&HeaderMap>,
+        _body: bytes::Bytes,
+        _route: &str,
+        _model_id: Option<&str>,
+        _method: &axum::http::Method,
+    ) -> Response {
+        (StatusCode::NOT_IMPLEMENTED, "Raw request routing not implemented").into_response()
+    }
+
     /// Get router type name
     fn router_type(&self) -> &'static str;
 

@@ -835,6 +835,81 @@ impl RouterTrait for Router {
         }
     }
 
+    async fn route_raw_request(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: bytes::Bytes,
+        route: &str,
+        model_id: Option<&str>,
+        method: &Method,
+    ) -> Response {
+        let worker = match self
+            .select_worker_for_model(model_id, None, headers)
+            .await
+        {
+            Some(w) => w,
+            None => {
+                return error::service_unavailable(
+                    "no_available_workers",
+                    "No available workers for raw request routing",
+                );
+            }
+        };
+
+        let url = format!("{}{}", self.worker_base_url(worker.url()), route);
+
+        // Build the request, preserving original method, Content-Type and other headers
+        let mut request_builder = self.client.request(method.clone(), &url).body(body);
+
+        if let Some(hdrs) = headers {
+            for (name, value) in hdrs {
+                if header_utils::should_forward_request_header(name.as_str())
+                    || name.as_str() == "content-type"
+                {
+                    request_builder = request_builder.header(name, value);
+                }
+            }
+        }
+
+        if let Some(key) = worker.api_key() {
+            let mut auth_header = String::with_capacity(7 + key.len());
+            auth_header.push_str("Bearer ");
+            auth_header.push_str(&key);
+            request_builder = request_builder.header("Authorization", auth_header);
+        }
+
+        let res = match request_builder.send().await {
+            Ok(res) => res,
+            Err(e) => {
+                error!(
+                    "Failed to send raw request worker_url={} route={} error={}",
+                    worker.url(), route, e
+                );
+                return error::bad_gateway(
+                    "raw_request_failed",
+                    format!("Failed to forward raw request: {}", e),
+                );
+            }
+        };
+
+        let status = StatusCode::from_u16(res.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let response_headers = header_utils::preserve_response_headers(res.headers());
+
+        match res.bytes().await {
+            Ok(response_body) => {
+                let mut response = Response::new(Body::from(response_body));
+                *response.status_mut() = status;
+                *response.headers_mut() = response_headers;
+                response
+            }
+            Err(e) => error::internal_error(
+                "read_response_failed",
+                format!("Failed to read raw response body: {}", e),
+            ),
+        }
+    }
+
     fn router_type(&self) -> &'static str {
         "regular"
     }

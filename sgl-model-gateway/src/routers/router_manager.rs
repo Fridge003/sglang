@@ -729,6 +729,39 @@ impl RouterTrait for RouterManager {
         }
     }
 
+    async fn route_raw_request(
+        &self,
+        headers: Option<&HeaderMap>,
+        body: bytes::Bytes,
+        route: &str,
+        model_id: Option<&str>,
+        method: &axum::http::Method,
+    ) -> Response {
+        let effective_model_id = if self.enable_igw {
+            match self.resolve_model_id(model_id) {
+                Ok(id) => Some(id),
+                Err(err_response) => return *err_response,
+            }
+        } else {
+            None
+        };
+
+        let router =
+            self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
+
+        if let Some(router) = router {
+            router
+                .route_raw_request(headers, body, route, effective_model_id.as_deref().or(model_id), method)
+                .await
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                "No router available for raw request",
+            )
+                .into_response()
+        }
+    }
+
     fn router_type(&self) -> &'static str {
         "manager"
     }
