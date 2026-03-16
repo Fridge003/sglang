@@ -14,6 +14,15 @@ class LTX2HalveResolutionStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         original_h, original_w = batch.height, batch.width
+
+        vae_scale_factor = getattr(server_args.pipeline_config, "vae_scale_factor", 32)
+        required_alignment = max(64, int(vae_scale_factor) * 2)
+        if original_h % required_alignment != 0 or original_w % required_alignment != 0:
+            raise ValueError(
+                "LTX-2 two-stage requires resolution divisible by "
+                f"{required_alignment}, got ({original_h}x{original_w})."
+            )
+
         batch.height = batch.height // 2
         batch.width = batch.width // 2
         logger.info(
