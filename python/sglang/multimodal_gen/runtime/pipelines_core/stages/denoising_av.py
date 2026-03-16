@@ -763,11 +763,40 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         super().__init__(transformer, scheduler, vae, audio_vae)
         self.distilled_sigmas = torch.tensor(distilled_sigmas)
 
+    @staticmethod
+    def _resolve_stage2_generator(batch: Req):
+        generator = getattr(batch, "generator", None)
+        if isinstance(generator, torch.Generator):
+            return generator
+        if isinstance(generator, list):
+            for g in generator:
+                if isinstance(g, torch.Generator):
+                    return g
+        return None
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         # 1. Add noise to latents
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
-        noise = torch.randn_like(batch.latents)
-        batch.latents = batch.latents + noise * noise_scale
+        stage2_generator = self._resolve_stage2_generator(batch)
+
+        video_noise = torch.randn(
+            batch.latents.shape,
+            device=batch.latents.device,
+            dtype=batch.latents.dtype,
+            generator=stage2_generator,
+        )
+        batch.latents = batch.latents + video_noise * noise_scale
+
+        if isinstance(batch.audio_latents, torch.Tensor):
+            audio_noise = torch.randn(
+                batch.audio_latents.shape,
+                device=batch.audio_latents.device,
+                dtype=batch.audio_latents.dtype,
+                generator=stage2_generator,
+            )
+            batch.audio_latents = batch.audio_latents + audio_noise * noise_scale.to(
+                batch.audio_latents.device, batch.audio_latents.dtype
+            )
 
         # 2. Invalidate stale TI2V conditioning from Stage 1 (half-res) so it
         #    gets re-encoded at the current (full) resolution in Stage 2.
@@ -791,6 +820,8 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
 
         batch.timesteps = self.scheduler.timesteps
         batch.num_inference_steps = num_steps
+        original_do_cfg = batch.do_classifier_free_guidance
+        batch.do_classifier_free_guidance = False
 
         try:
             batch = super().forward(batch, server_args)
@@ -798,6 +829,7 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             self.scheduler = original_scheduler
             batch.timesteps = original_batch_timesteps
             batch.num_inference_steps = original_batch_num_inference_steps
+            batch.do_classifier_free_guidance = original_do_cfg
 
         return batch
 
