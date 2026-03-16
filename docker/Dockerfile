@@ -219,6 +219,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     fi \
     && FLASHINFER_CUBIN_DOWNLOAD_THREADS=${BUILD_AND_DOWNLOAD_PARALLEL} FLASHINFER_LOGGING_LEVEL=warning python3 -m flashinfer --download-cubin
 
+# Install patched transformers with Mistral 4 tokenizer fix
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install "transformers @ git+https://github.com/dougyster/transformers.git@mistral-4-patch"
+
 # DeepEP
 # We use Tom's DeepEP fork for GB200 for now; the 1fd57b0276311d035d16176bb0076426166e52f3 commit is https://github.com/fzyzcjy/DeepEP/tree/gb200_blog_part_2
 # TODO: move from Tom's branch to DeepEP hybrid-ep branch
