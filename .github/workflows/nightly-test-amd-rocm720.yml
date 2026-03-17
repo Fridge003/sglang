@@ -115,7 +115,7 @@ jobs:
   # 1-GPU Unit Tests - LoRA, debug utils, scheduler, etc. (MI30x ROCm 7.2)
   nightly-test-1-gpu-unit-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-test-1-gpu-unit-rocm720,'))
-    runs-on: linux-mi325-1gpu-sglang
+    runs-on: linux-mi325-1gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -144,7 +144,7 @@ jobs:
   # 2-GPU Accuracy Tests - GSM8K eval (MI30x ROCm 7.2)
   nightly-accuracy-2-gpu-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-2-gpu-rocm720,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -172,7 +172,7 @@ jobs:
   # 2-GPU VLM Accuracy Tests - Vision-Language Models MMMU evaluation (ROCm 7.2)
   nightly-accuracy-2-gpu-vlm-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-2-gpu-vlm-rocm720,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -201,7 +201,7 @@ jobs:
   # 2-GPU Text Models Performance Tests (ROCm 7.2)
   nightly-perf-2-gpu-text-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-perf-2-gpu-text-rocm720,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -231,7 +231,7 @@ jobs:
   # 2-GPU VLM Performance Tests (ROCm 7.2)
   nightly-perf-2-gpu-vlm-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-perf-2-gpu-vlm-rocm720,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -261,7 +261,7 @@ jobs:
   # 8-GPU Accuracy Tests - GPT-OSS, Grok1-FP8 (ROCm 7.2)
   nightly-accuracy-8-gpu-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-8-gpu-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -301,7 +301,7 @@ jobs:
   # 8-GPU Grok1-INT4 (Accuracy + Performance) ROCm 7.2
   nightly-8-gpu-grok1-int4-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-grok1-int4-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -344,7 +344,7 @@ jobs:
   # 8-GPU Grok2 (Accuracy + Performance) ROCm 7.2
   nightly-8-gpu-grok2-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-grok2-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -387,7 +387,7 @@ jobs:
   # 8-GPU DeepSeek-V3.1 (Accuracy + Performance) ROCm 7.2
   nightly-8-gpu-deepseek-v31-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v31-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -430,7 +430,7 @@ jobs:
   # 8-GPU DeepSeek-V3.2 (Basic Accuracy + Perf) ROCm 7.2
   nightly-8-gpu-deepseek-v32-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v32-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -471,7 +471,7 @@ jobs:
   # 8-GPU DeepSeek-V3.2 MTP (MTP Accuracy + Perf) ROCm 7.2
   nightly-8-gpu-deepseek-v32-mtp-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v32-mtp-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -512,7 +512,7 @@ jobs:
   # 8-GPU DeepSeek-V3 KV FP8 (Basic + MTP with --kv-cache-dtype fp8_e4m3) ROCm 7.2
   nightly-8-gpu-deepseek-v3-kv-fp8-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v3-kv-fp8-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -542,7 +542,7 @@ jobs:
   # 8-GPU Kimi-K2.5 (Accuracy) ROCm 7.2
   nightly-8-gpu-kimi-k25-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-kimi-k25-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -572,7 +572,7 @@ jobs:
   # 8-GPU Qwen3-235B (Accuracy + Performance) ROCm 7.2
   nightly-8-gpu-qwen3-235b-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-qwen3-235b-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -602,7 +602,7 @@ jobs:
   # 8-GPU Qwen 3.5 (Accuracy) ROCm 7.2
   nightly-8-gpu-qwen35-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-qwen35-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -634,7 +634,7 @@ jobs:
   # 8-GPU GLM-5 (Accuracy) ROCm 7.2
   nightly-8-gpu-glm5-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-glm5-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -667,7 +667,7 @@ jobs:
   # 8-GPU MiniMax-M2.5 (Accuracy) ROCm 7.2
   nightly-8-gpu-minimax-m25-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-minimax-m25-rocm720,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -699,7 +699,7 @@ jobs:
   # 1-GPU Z-Image-Turbo (Diffusion T2I) ROCm 7.2
   nightly-1-gpu-zimage-turbo-rocm720:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-1-gpu-zimage-turbo-rocm720,'))
-    runs-on: linux-mi325-1gpu-sglang
+    runs-on: linux-mi325-1gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

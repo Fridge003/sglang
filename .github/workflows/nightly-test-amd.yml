@@ -115,7 +115,7 @@ jobs:
   # 1-GPU Unit Tests - LoRA, debug utils, scheduler, etc. (MI30x only)
   nightly-test-1-gpu-unit:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-test-1-gpu-unit,'))
-    runs-on: linux-mi325-1gpu-sglang
+    runs-on: linux-mi325-1gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -145,7 +145,7 @@ jobs:
   # 2-GPU Accuracy Tests - GSM8K eval (MI30x only)
   nightly-accuracy-2-gpu:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-2-gpu,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -174,7 +174,7 @@ jobs:
   # 2-GPU VLM Accuracy Tests - Vision-Language Models MMMU evaluation
   nightly-accuracy-2-gpu-vlm:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-2-gpu-vlm,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -204,7 +204,7 @@ jobs:
   # 2-GPU Text Models Performance Tests
   nightly-perf-2-gpu-text:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-perf-2-gpu-text,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -235,7 +235,7 @@ jobs:
   # 2-GPU VLM Performance Tests
   nightly-perf-2-gpu-vlm:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-perf-2-gpu-vlm,'))
-    runs-on: linux-mi325-2gpu-sglang
+    runs-on: linux-mi325-2gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -266,7 +266,7 @@ jobs:
   # 8-GPU Accuracy Tests - GPT-OSS, Grok1-FP8 (accuracy only)
   nightly-accuracy-8-gpu:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-accuracy-8-gpu,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -306,7 +306,7 @@ jobs:
   # 8-GPU Grok1-INT4 (Accuracy + Performance combined)
   nightly-8-gpu-grok1-int4:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-grok1-int4,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -349,7 +349,7 @@ jobs:
   # 8-GPU Grok2 (Accuracy + Performance combined)
   nightly-8-gpu-grok2:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-grok2,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -392,7 +392,7 @@ jobs:
   # 8-GPU DeepSeek-V3.1 (Accuracy + Performance combined)
   nightly-8-gpu-deepseek-v31:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v31,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -435,7 +435,7 @@ jobs:
   # 8-GPU DeepSeek-V3.2 (Basic Accuracy + Perf)
   nightly-8-gpu-deepseek-v32:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v32,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -476,7 +476,7 @@ jobs:
   # 8-GPU DeepSeek-V3.2 MTP (MTP Accuracy + Perf)
   nightly-8-gpu-deepseek-v32-mtp:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v32-mtp,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -517,7 +517,7 @@ jobs:
   # 8-GPU DeepSeek-V3 KV FP8 (Basic + MTP with --kv-cache-dtype fp8_e4m3)
   nightly-8-gpu-deepseek-v3-kv-fp8:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-deepseek-v3-kv-fp8,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -547,7 +547,7 @@ jobs:
   # 8-GPU Kimi-K2.5 (Accuracy)
   nightly-8-gpu-kimi-k25:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-kimi-k25,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -576,7 +576,7 @@ jobs:
 
   nightly-8-gpu-qwen3-235b:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-qwen3-235b,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -606,7 +606,7 @@ jobs:
   # 8-GPU Qwen 3.5 (Accuracy)
   nightly-8-gpu-qwen35:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-qwen35,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -637,7 +637,7 @@ jobs:
 
   nightly-8-gpu-glm5:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-glm5,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -670,7 +670,7 @@ jobs:
   # 8-GPU MiniMax-M2.5 (Accuracy)
   nightly-8-gpu-minimax-m25:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-8-gpu-minimax-m25,'))
-    runs-on: linux-mi325-8gpu-sglang
+    runs-on: linux-mi325-8gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -702,7 +702,7 @@ jobs:
   # 1-GPU Z-Image-Turbo (Diffusion T2I)
   nightly-1-gpu-zimage-turbo:
     if: (github.repository == 'sgl-project/sglang' || github.event_name == 'pull_request') && (!(inputs.job_filter || inputs.job_select) || (inputs.job_filter || inputs.job_select) == 'all' || contains(format(',{0},', inputs.job_filter || inputs.job_select), ',nightly-1-gpu-zimage-turbo,'))
-    runs-on: linux-mi325-1gpu-sglang
+    runs-on: linux-mi325-1gpu-sglang.test
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
