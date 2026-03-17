@@ -804,7 +804,6 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         )
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        # 1. Add noise to latents
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
         video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = batch.latents + video_noise * noise_scale
@@ -817,13 +816,11 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 batch.audio_latents.device, batch.audio_latents.dtype
             )
 
-        # 2. Invalidate stale TI2V conditioning from Stage 1 (half-res) so it
-        #    gets re-encoded at the current (full) resolution in Stage 2.
+        # Stage 2 runs at full resolution, so Stage 1 TI2V conditioning is invalid.
         batch.image_latent = None
         batch.ltx2_num_image_tokens = 0
 
-        # 3. Run denoising loop with distilled_sigmas using a private scheduler
-        #    copy to avoid mutating the shared scheduler instance.
+        # Use a private scheduler copy to avoid mutating shared state.
         original_scheduler = self.scheduler
         original_batch_timesteps = batch.timesteps
         original_batch_num_inference_steps = batch.num_inference_steps
