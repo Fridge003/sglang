@@ -253,7 +253,7 @@ class DecodePreallocQueue:
         self.req_to_metadata_buffer_idx_allocator = req_to_metadata_buffer_idx_allocator
         self.scheduler = scheduler
         self.transfer_queue = transfer_queue
-        self.tree_cache = tree_cache  # this is always a chunk cache
+        self.tree_cache = tree_cache
         self.gloo_group = gloo_group
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -363,14 +363,9 @@ class DecodePreallocQueue:
 
     def _match_prefix_and_lock(self, req: Req) -> Tuple[torch.Tensor, int]:
         """
-        When decode side radix cache is enabled, we need to
-        1. match prefix using radix tree
-        2. lock those nodes to prevent eviction until req lifecycle ends
-        3. return the length/information of the prefix
+        Match a request against the decode-side radix cache, lock the matched
+        node to prevent eviction, and return the matched prefix information.
         """
-        if self.scheduler.server_args.disable_radix_cache:
-            raise ValueError("You shouldn't ever hit this lol")
-        
         result = self.tree_cache.match_prefix(
             MatchPrefixParams(
                 key=RadixKey(req.origin_input_ids, extra_key=req.extra_key),
