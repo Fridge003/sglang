@@ -303,7 +303,7 @@ class PrefillBootstrapQueue:
                     self.scheduler.tree_cache.release_aborted_request(req.rid)
                 continue
 
-            # KV.WaitingForInput - decode is ready to recieve. initialize the kv sender
+            # KV.WaitingForInput - decode is ready to receive. initialize the kv sender
             req.time_stats.set_bootstrap_done_time()
             num_kv_indices = len(req.origin_input_ids)
             if self.req_to_metadata_buffer_idx_allocator.available_size() == 0:
@@ -318,15 +318,18 @@ class PrefillBootstrapQueue:
             # if decode has a cached prefix, we need to send the delta indices
             # otherwise, send the entire request
             decode_prefix_len = 0
-            xfer_infos = req.disagg_kv_sender.kv_mgr.transfer_infos.get(req.bootstrap_room, {})
+            xfer_infos = req.disagg_kv_sender.kv_mgr.transfer_infos.get(
+                req.bootstrap_room, {}
+            )
             for info in xfer_infos.values():
                 if info.decode_prefix_len is not None:
                     decode_prefix_len = info.decode_prefix_len
                     break
-            req.decode_prefix_len = decode_prefix_len
             req.start_send_idx = decode_prefix_len
             num_kv_indices_to_send = num_kv_indices - decode_prefix_len
-            num_pages = kv_to_page_num(num_kv_indices_to_send, self.token_to_kv_pool.page_size)
+            num_pages = kv_to_page_num(
+                num_kv_indices_to_send, self.token_to_kv_pool.page_size
+            )
             req.disagg_kv_sender.init(num_pages, req.metadata_buffer_index)
 
             bootstrapped_reqs.append(req)
@@ -741,11 +744,10 @@ class SchedulerDisaggregationPrefillMixin:
         # In that case we should send an empty chunk instead of rewinding.
         if end_idx < start_idx:
             logger.debug(
-                "send_kv_chunk clamp: rid=%s start_idx=%s end_idx=%s decode_prefix_len=%s",
+                "send_kv_chunk clamp: rid=%s start_send_idx=%s end_idx=%s",
                 req.rid,
                 start_idx,
                 end_idx,
-                getattr(req, "decode_prefix_len", None),
             )
             end_idx = start_idx
 

@@ -44,7 +44,7 @@ class TransferInfo:
     dst_aux_index: int
     required_dst_info_num: int
     dst_state_indices: List[int]
-    decode_prefix_len: Optional[int] = None # for decode radix cache
+    decode_prefix_len: Optional[int] = None  # for decode radix cache
 
     def is_dummy(self):
         # A transfer is "dummy" only for CP non-authoritative ranks.
@@ -72,7 +72,9 @@ class TransferInfo:
             dst_aux_index=int(msg[5].decode("ascii")),
             required_dst_info_num=int(msg[6].decode("ascii")),
             dst_state_indices=dst_state_indices,
-            decode_prefix_len=int(msg[8].decode("ascii")) if len(msg) > 8 and msg[8] != b"" else None, # hacky just add it into the message that will be sent
+            decode_prefix_len=(
+                int(msg[8].decode("ascii")) if len(msg) > 8 and msg[8] != b"" else None
+            ),  # hacky just add it into the message that will be sent
         )
 
 
@@ -762,7 +764,9 @@ class NixlKVManager(CommonKVManager):
             # (e.g., decode-side radix cache matched the entire prefix).
             # Aux data is still sent below when is_last=True.
             if len(kv_indices) > 0:
-                notif = f"{req.room}_kv_{chunk_id}_{int(is_last)}_{self.kv_args.pp_rank}"
+                notif = (
+                    f"{req.room}_kv_{chunk_id}_{int(is_last)}_{self.kv_args.pp_rank}"
+                )
 
                 if self.is_mla_backend or (decode_tp_size == self.attn_tp_size):
                     kv_xfer_handle = self.send_kvcache(
@@ -862,14 +866,10 @@ class NixlKVManager(CommonKVManager):
                     # this pp_rank (decode-side radix cache hit).
                     if len(components) > 3 and components[2] == "nokv":
                         pp_rank = int(components[3])
-                        self.transfer_statuses[room].expected_kvs_per_pp[
-                            pp_rank
-                        ] = 0
+                        self.transfer_statuses[room].expected_kvs_per_pp[pp_rank] = 0
                     if self.transfer_statuses[room].num_pp_ranks_expected is None:
                         self.transfer_statuses[room].num_pp_ranks_expected = (
-                            self.required_prefill_response_num_table.get(
-                                room, 1
-                            )
+                            self.required_prefill_response_num_table.get(room, 1)
                         )
                 elif components[1] == "state":
                     pp_rank = int(components[2]) if len(components) > 2 else 0
@@ -1008,7 +1008,7 @@ class NixlKVReceiver(CommonKVReceiver):
         kv_indices: npt.NDArray[np.int32],
         aux_index: Optional[int] = None,
         state_indices: Optional[List[int]] = None,
-        decode_prefix_len: Optional[int] = None
+        decode_prefix_len: Optional[int] = None,
     ):
         if self.bootstrap_infos is None:
             logger.error(
@@ -1042,7 +1042,7 @@ class NixlKVReceiver(CommonKVReceiver):
                             if not is_dummy and state_indices is not None
                             else b""
                         ),
-                        str(decode_prefix_len or 0).encode("ascii")
+                        str(decode_prefix_len or 0).encode("ascii"),
                     ]
                 )
 

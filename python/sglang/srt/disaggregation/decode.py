@@ -51,11 +51,12 @@ from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
-from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
-from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+from sglang.srt.mem_cache.base_prefix_cache import (
+    BasePrefixCache,
+    EvictParams,
+    MatchPrefixParams,
+)
 from sglang.srt.mem_cache.common import release_kv_cache
-from sglang.srt.mem_cache.radix_cache import RadixKey
-from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
 from sglang.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -63,6 +64,7 @@ from sglang.srt.mem_cache.memory_pool import (
     NSATokenToKVPool,
     ReqToTokenPool,
 )
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.observability.req_time_stats import (
     set_schedule_time_batch,
@@ -631,9 +633,7 @@ class DecodePreallocQueue:
 
             # Match prefix against decode's radix cache
             if not self.scheduler.server_args.disable_radix_cache:
-                prefix_indices, prefix_len = self._match_prefix_and_lock(
-                    decode_req.req
-                )
+                prefix_indices, prefix_len = self._match_prefix_and_lock(decode_req.req)
                 # Align prefix_len down to page boundary so both prefill and
                 # decode agree on the page-aligned split point for KV transfer.
                 page_size = self.token_to_kv_pool_allocator.page_size
@@ -738,7 +738,9 @@ class DecodePreallocQueue:
             assert decode_req.metadata_buffer_index is not None
             page_indices = kv_to_page_indices(kv_indices, page_size)
             decode_req.kv_receiver.init(
-                page_indices, decode_req.metadata_buffer_index, state_indices,
+                page_indices,
+                decode_req.metadata_buffer_index,
+                state_indices,
                 decode_prefix_len=prefix_len,
             )
             preallocated_reqs.append(decode_req)
@@ -811,7 +813,12 @@ class DecodePreallocQueue:
             )
         return allocatable_tokens
 
-    def _pre_alloc(self, req: Req, prefix_indices: Optional[torch.Tensor] = None, prefix_len: Optional[int] = None) -> torch.Tensor:
+    def _pre_alloc(
+        self,
+        req: Req,
+        prefix_indices: Optional[torch.Tensor] = None,
+        prefix_len: Optional[int] = None,
+    ) -> torch.Tensor:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
         if prefix_len is None:
             prefix_len = 0
@@ -851,7 +858,9 @@ class DecodePreallocQueue:
                 else torch.tensor([-1], dtype=torch.int64, device=device)
             )
             kv_loc = self.token_to_kv_pool_allocator.alloc_extend(
-                prefix_lens=torch.tensor([prefix_len], dtype=torch.int64, device=device),
+                prefix_lens=torch.tensor(
+                    [prefix_len], dtype=torch.int64, device=device
+                ),
                 prefix_lens_cpu=torch.tensor([prefix_len], dtype=torch.int64),
                 seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
                 seq_lens_cpu=torch.tensor([fill_len], dtype=torch.int64),
@@ -872,7 +881,9 @@ class DecodePreallocQueue:
         # prepare_for_extend) see the correct prefix length. In the agg path
         # this is done inside init_next_round_input, but decode-disagg needs
         # allocation info before batch assembly so we set it here.
-        req.prefix_indices = prefix_indices if prefix_len > 0 else torch.empty((0,), dtype=torch.int64)
+        req.prefix_indices = (
+            prefix_indices if prefix_len > 0 else torch.empty((0,), dtype=torch.int64)
+        )
         req.set_extend_input_len(len(req.fill_ids) - prefix_len)
 
         return kv_loc
@@ -1195,7 +1206,11 @@ class SchedulerDisaggregationDecodeMixin:
                 # inserted the same prefix) and overwrite cache_protected_len,
                 # making `cache_unfinished_req` free the wrong range (leak).
                 # Non-radix decode keeps the original behavior.
-                tree_cache = None if not self.server_args.disable_radix_cache else self.tree_cache
+                tree_cache = (
+                    None
+                    if not self.server_args.disable_radix_cache
+                    else self.tree_cache
+                )
                 req.init_next_round_input(tree_cache)
             else:
                 waiting_queue.append(req)
