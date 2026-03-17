@@ -830,6 +830,7 @@ class NixlKVManager(CommonKVManager):
                 handles.append(aux_xfer_handle)
         if is_last:
             del self.transfer_infos[bootstrap_room]
+            self.req_to_decode_prefix_len.pop(bootstrap_room, None)
         return handles
 
     def update_transfer_status(self):
@@ -912,6 +913,14 @@ class NixlKVManager(CommonKVManager):
                 ].required_dst_info_num
                 logger.debug(f"got info {room=} {agent_name=} {required_dst_info_num=}")
                 if len(self.transfer_infos[room]) == required_dst_info_num:
+                    self.req_to_decode_prefix_len[room] = next(
+                        (
+                            info.decode_prefix_len
+                            for info in self.transfer_infos[room].values()
+                            if info.decode_prefix_len is not None
+                        ),
+                        0,
+                    )
                     logger.debug(f"{room=} is bootstrapped")
                     self.update_status(room, KVPoll.WaitingForInput)
 
