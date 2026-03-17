@@ -36,18 +36,7 @@ class LTX2HalveResolutionStage(PipelineStage):
 
 
 class LTX2UpsampleStage(PipelineStage):
-    """
-    Upsample video latents from Stage 1 (half-res) to full resolution using
-    a spatial LatentUpsampler. Also re-packs video and audio latents for Stage 2.
-
-    Flow:
-      1. Denormalize video latents (using VAE per-channel stats)
-      2. Run LatentUpsampler (spatial 2x)
-      3. Re-normalize video latents
-      4. Double batch.height / batch.width
-      5. Re-pack video latents to [B, S', D]
-      6. Re-pack + re-normalize audio latents to [B, S, D]
-    """
+    """Upsample Stage-1 video latents and prepare Stage-2 inputs."""
 
     def __init__(self, spatial_upsampler, vae, audio_vae=None):
         super().__init__()
@@ -55,37 +44,34 @@ class LTX2UpsampleStage(PipelineStage):
         self.vae = vae
         self.audio_vae = audio_vae
 
-    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        device = get_local_torch_device()
-        latents = batch.latents  # [B, C, F, H_half, W_half] normalized
-
-        # --- Video: denormalize -> upsample -> renormalize ---
+    def _upsample_video_latents(
+        self, latents: torch.Tensor, server_args: ServerArgs, device: torch.device
+    ) -> torch.Tensor:
         vae_mean = self.vae.latents_mean.view(1, -1, 1, 1, 1).to(
             device=device, dtype=latents.dtype
         )
         vae_std = self.vae.latents_std.view(1, -1, 1, 1, 1).to(
             device=device, dtype=latents.dtype
         )
-
         latents = latents * vae_std + vae_mean
-
         self.spatial_upsampler = self.spatial_upsampler.to(
             device=device, dtype=latents.dtype
         )
         latents = self.spatial_upsampler(latents)
-
         if server_args.vae_cpu_offload:
             self.spatial_upsampler = self.spatial_upsampler.to("cpu")
-
         latents = (latents - vae_mean) / vae_std
+        return latents
 
-        logger.info("Upsampled video latents: %s", list(latents.shape))
+    @staticmethod
+    def _restore_full_resolution(batch: Req) -> None:
+        batch.height *= 2
+        batch.width *= 2
 
-        # --- Update resolution (restore to user-requested full resolution) ---
-        batch.height = batch.height * 2
-        batch.width = batch.width * 2
-
-        # --- Re-pack video latents to [B, S', D] for Stage 2 denoising ---
+    @staticmethod
+    def _pack_video_latents(
+        batch: Req, latents: torch.Tensor, server_args: ServerArgs
+    ) -> None:
         batch_size = latents.shape[0]
         latents = server_args.pipeline_config.maybe_pack_latents(
             latents, batch_size, batch
@@ -93,38 +79,48 @@ class LTX2UpsampleStage(PipelineStage):
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
 
+    def _pack_and_normalize_audio_latents(
+        self, batch: Req, server_args: ServerArgs
+    ) -> None:
+        if batch.audio_latents is None or self.audio_vae is None:
+            return
+        audio_latents = server_args.pipeline_config.maybe_pack_audio_latents(
+            batch.audio_latents, batch.audio_latents.shape[0], batch
+        )
+        audio_mean = getattr(self.audio_vae, "latents_mean", None)
+        audio_std = getattr(self.audio_vae, "latents_std", None)
+        if isinstance(audio_mean, torch.Tensor) and isinstance(audio_std, torch.Tensor):
+            audio_mean = audio_mean.to(
+                device=audio_latents.device, dtype=audio_latents.dtype
+            )
+            audio_std = audio_std.to(
+                device=audio_latents.device, dtype=audio_latents.dtype
+            )
+            if audio_latents.ndim == 3:
+                audio_latents = (audio_latents - audio_mean.view(1, 1, -1)) / (
+                    audio_std.view(1, 1, -1)
+                )
+            elif audio_latents.ndim == 2:
+                audio_latents = (audio_latents - audio_mean.view(1, -1)) / (
+                    audio_std.view(1, -1)
+                )
+        batch.audio_latents = audio_latents
+        batch.raw_audio_latent_shape = audio_latents.shape
+        logger.info(
+            "Re-packed audio latents for Stage 2: %s", list(audio_latents.shape)
+        )
+
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        device = get_local_torch_device()
+        latents = self._upsample_video_latents(batch.latents, server_args, device)
+        logger.info("Upsampled video latents: %s", list(latents.shape))
+        self._restore_full_resolution(batch)
+        self._pack_video_latents(batch, latents, server_args)
         logger.info(
             "Packed video latents for Stage 2: %s (resolution %dx%d)",
-            list(latents.shape),
+            list(batch.latents.shape),
             batch.height,
             batch.width,
         )
-
-        # --- Re-pack + re-normalize audio latents ---
-        audio_latents = batch.audio_latents
-        if audio_latents is not None and self.audio_vae is not None:
-            # After Stage 1 _post_denoising_loop: audio is [B, C, L, M] denormalized
-            # Re-pack: [B, C, L, M] -> [B, L, C*M] = [B, S, D]
-            audio_packed = audio_latents.transpose(1, 2).flatten(2)
-
-            # Re-normalize using audio VAE stats
-            audio_mean = getattr(self.audio_vae, "latents_mean", None)
-            audio_std = getattr(self.audio_vae, "latents_std", None)
-            if isinstance(audio_mean, torch.Tensor) and isinstance(
-                audio_std, torch.Tensor
-            ):
-                audio_mean = audio_mean.to(
-                    device=audio_packed.device, dtype=audio_packed.dtype
-                ).view(1, 1, -1)
-                audio_std = audio_std.to(
-                    device=audio_packed.device, dtype=audio_packed.dtype
-                ).view(1, 1, -1)
-                audio_packed = (audio_packed - audio_mean) / audio_std
-
-            batch.audio_latents = audio_packed
-            batch.raw_audio_latent_shape = audio_packed.shape
-            logger.info(
-                "Re-packed audio latents for Stage 2: %s", list(audio_packed.shape)
-            )
-
+        self._pack_and_normalize_audio_latents(batch, server_args)
         return batch

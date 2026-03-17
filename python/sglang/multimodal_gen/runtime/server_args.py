@@ -573,6 +573,15 @@ class ServerArgs:
                 "(e.g. 'Qwen-Image' for 'Qwen/Qwen-Image')."
             ),
         )
+        parser.add_argument(
+            "--pipeline-class-name",
+            type=str,
+            default=ServerArgs.pipeline_class_name,
+            help=(
+                "Override pipeline class selection from model_index.json. "
+                "Must match a registered pipeline_name."
+            ),
+        )
         # attention
         parser.add_argument(
             "--attention-backend",

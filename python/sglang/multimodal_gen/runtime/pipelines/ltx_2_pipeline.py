@@ -42,31 +42,77 @@ def calculate_shift(
 
 
 def prepare_mu(batch: Req, server_args: ServerArgs):
-    height = batch.height
-    width = batch.width
-    num_frames = batch.num_frames
-
     vae_arch = getattr(
         getattr(server_args.pipeline_config, "vae_config", None), "arch_config", None
     )
-    vae_scale_factor = (
+    vae_scale_factor = int(
         getattr(vae_arch, "spatial_compression_ratio", None)
         or getattr(vae_arch, "vae_scale_factor", None)
         or getattr(server_args.pipeline_config, "vae_scale_factor", None)
+        or 32
     )
-    vae_temporal_compression = getattr(
-        vae_arch, "temporal_compression_ratio", None
-    ) or getattr(server_args.pipeline_config, "vae_temporal_compression", None)
+    vae_temporal_compression = int(
+        getattr(vae_arch, "temporal_compression_ratio", None)
+        or getattr(server_args.pipeline_config, "vae_temporal_compression", None)
+        or 8
+    )
+    latent_height = max(1, int(batch.height) // vae_scale_factor)
+    latent_width = max(1, int(batch.width) // vae_scale_factor)
+    latent_frames = max(1, (int(batch.num_frames) - 1) // vae_temporal_compression + 1)
+    image_seq_len = latent_height * latent_width * latent_frames
+    image_seq_len = max(1024, min(4096, image_seq_len))
 
-    # Values from LTX2Pipeline in diffusers
     mu = calculate_shift(
-        4096,
+        image_seq_len,
         base_seq_len=1024,
         max_seq_len=4096,
         base_shift=0.95,
         max_shift=2.05,
     )
     return "mu", mu
+
+
+def _add_ltx2_front_stages(pipeline: ComposedPipelineBase):
+    pipeline.add_stages(
+        [
+            InputValidationStage(),
+            TextEncodingStage(
+                text_encoders=[pipeline.get_module("text_encoder")],
+                tokenizers=[pipeline.get_module("tokenizer")],
+            ),
+            LTX2TextConnectorStage(connectors=pipeline.get_module("connectors")),
+        ]
+    )
+
+
+def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
+    pipeline.add_standard_timestep_preparation_stage(prepare_extra_kwargs=[prepare_mu])
+    pipeline.add_stages(
+        [
+            LTX2AVLatentPreparationStage(
+                scheduler=pipeline.get_module("scheduler"),
+                transformer=pipeline.get_module("transformer"),
+                audio_vae=pipeline.get_module("audio_vae"),
+            ),
+            LTX2AVDenoisingStage(
+                transformer=pipeline.get_module("transformer"),
+                scheduler=pipeline.get_module("scheduler"),
+                vae=pipeline.get_module("vae"),
+                audio_vae=pipeline.get_module("audio_vae"),
+            ),
+        ]
+    )
+
+
+def _add_ltx2_decoding_stage(pipeline: ComposedPipelineBase):
+    pipeline.add_stage(
+        LTX2AVDecodingStage(
+            vae=pipeline.get_module("vae"),
+            audio_vae=pipeline.get_module("audio_vae"),
+            vocoder=pipeline.get_module("vocoder"),
+            pipeline=pipeline,
+        )
+    )
 
 
 class LTX2FlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
@@ -80,10 +126,7 @@ class LTX2FlowMatchScheduler(FlowMatchEulerDiscreteScheduler):
         return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
-class LTX2Pipeline(ComposedPipelineBase):
-    # NOTE: must match `model_index.json`'s `_class_name` for native dispatch.
-    pipeline_name = "LTX2Pipeline"
-
+class _BaseLTX2Pipeline(ComposedPipelineBase):
     _required_config_modules = [
         "transformer",
         "text_encoder",
@@ -95,93 +138,63 @@ class LTX2Pipeline(ComposedPipelineBase):
         "connectors",
     ]
 
-    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
-
     def initialize_pipeline(self, server_args: ServerArgs):
         orig = self.get_module("scheduler")
         self.modules["scheduler"] = LTX2FlowMatchScheduler.from_config(orig.config)
 
-        # Load optional spatial_upsampler if path is provided
-        upsampler_path = server_args.component_paths.get("spatial_upsampler")
-        if upsampler_path is not None:
-            logger.info(
-                "Loading spatial_upsampler from %s (two-stage mode)", upsampler_path
-            )
-            module, memory_usage = PipelineComponentLoader.load_component(
-                component_name="spatial_upsampler",
-                component_model_path=upsampler_path,
-                transformers_or_diffusers="diffusers",
-                server_args=server_args,
-            )
-            self.modules["spatial_upsampler"] = module
-            self.memory_usages["spatial_upsampler"] = memory_usage
-            logger.info("Two-stage mode enabled")
-        else:
-            self.modules["spatial_upsampler"] = None
+
+class LTX2Pipeline(_BaseLTX2Pipeline):
+    # Must match model_index.json `_class_name`.
+    pipeline_name = "LTX2Pipeline"
 
     def create_pipeline_stages(self, server_args: ServerArgs):
-        spatial_upsampler = self.get_module("spatial_upsampler")
-        is_two_stage = spatial_upsampler is not None
+        _add_ltx2_front_stages(self)
+        _add_ltx2_stage1_generation_stages(self)
+        _add_ltx2_decoding_stage(self)
 
-        # Shared front stages
-        self.add_stages(
-            [
-                InputValidationStage(),
-                TextEncodingStage(
-                    text_encoders=[self.get_module("text_encoder")],
-                    tokenizers=[self.get_module("tokenizer")],
-                ),
-                LTX2TextConnectorStage(connectors=self.get_module("connectors")),
-            ]
+
+class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
+    pipeline_name = "LTX2TwoStagePipeline"
+    STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
+
+    def initialize_pipeline(self, server_args: ServerArgs):
+        super().initialize_pipeline(server_args)
+        upsampler_path = server_args.component_paths.get("spatial_upsampler")
+        if not upsampler_path:
+            raise ValueError(
+                "LTX2TwoStagePipeline requires --spatial-upsampler-path "
+                "(component_paths['spatial_upsampler'])."
+            )
+        module, memory_usage = PipelineComponentLoader.load_component(
+            component_name="spatial_upsampler",
+            component_model_path=upsampler_path,
+            transformers_or_diffusers="diffusers",
+            server_args=server_args,
         )
+        self.modules["spatial_upsampler"] = module
+        self.memory_usages["spatial_upsampler"] = memory_usage
 
-        if is_two_stage:
-            self.add_stage(LTX2HalveResolutionStage())
-
-        self.add_standard_timestep_preparation_stage(prepare_extra_kwargs=[prepare_mu])
-
+    def create_pipeline_stages(self, server_args: ServerArgs):
+        _add_ltx2_front_stages(self)
+        self.add_stage(LTX2HalveResolutionStage())
+        _add_ltx2_stage1_generation_stages(self)
         self.add_stages(
             [
-                LTX2AVLatentPreparationStage(
-                    scheduler=self.get_module("scheduler"),
-                    transformer=self.get_module("transformer"),
+                LTX2UpsampleStage(
+                    spatial_upsampler=self.get_module("spatial_upsampler"),
+                    vae=self.get_module("vae"),
                     audio_vae=self.get_module("audio_vae"),
                 ),
-                LTX2AVDenoisingStage(
+                LTX2RefinementStage(
                     transformer=self.get_module("transformer"),
                     scheduler=self.get_module("scheduler"),
+                    distilled_sigmas=self.STAGE_2_DISTILLED_SIGMA_VALUES,
                     vae=self.get_module("vae"),
                     audio_vae=self.get_module("audio_vae"),
                 ),
             ]
         )
-
-        if is_two_stage:
-            self.add_stages(
-                [
-                    LTX2UpsampleStage(
-                        spatial_upsampler=spatial_upsampler,
-                        vae=self.get_module("vae"),
-                        audio_vae=self.get_module("audio_vae"),
-                    ),
-                    LTX2RefinementStage(
-                        transformer=self.get_module("transformer"),
-                        scheduler=self.get_module("scheduler"),
-                        distilled_sigmas=self.STAGE_2_DISTILLED_SIGMA_VALUES,
-                        vae=self.get_module("vae"),
-                        audio_vae=self.get_module("audio_vae"),
-                    ),
-                ]
-            )
-
-        self.add_stage(
-            LTX2AVDecodingStage(
-                vae=self.get_module("vae"),
-                audio_vae=self.get_module("audio_vae"),
-                vocoder=self.get_module("vocoder"),
-                pipeline=self,
-            )
-        )
+        _add_ltx2_decoding_stage(self)
 
 
-EntryClass = LTX2Pipeline
+EntryClass = [LTX2Pipeline, LTX2TwoStagePipeline]
