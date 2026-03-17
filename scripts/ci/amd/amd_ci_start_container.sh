@@ -21,8 +21,9 @@ fi
 
 # Default base tags (can be overridden by command line arguments)
 ROCM_VERSION="rocm700"
-DEFAULT_MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x"
-DEFAULT_MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x"
+IMAGE_SUFFIX="test-pr-20023"
+DEFAULT_MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x-${IMAGE_SUFFIX}"
+DEFAULT_MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x-${IMAGE_SUFFIX}"
 
 # Parse command line arguments
 MI30X_BASE_TAG="${DEFAULT_MI30X_BASE_TAG}"
@@ -40,8 +41,8 @@ while [[ $# -gt 0 ]]; do
     --gpu-arch) GPU_ARCH_BUILD="$2"; shift 2;;
     --rocm-version)
       ROCM_VERSION="$2"
-      MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x"
-      MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x"
+      MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x-${IMAGE_SUFFIX}"
+      MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x-${IMAGE_SUFFIX}"
       echo "Using ROCm version override: ${ROCM_VERSION}"
       shift 2;;
     -h|--help)
@@ -131,11 +132,11 @@ find_latest_image() {
     fi
   done
 
-  # If still not found, try finding any image matching ROCm+arch from remote registry
-  echo "Exact version not found. Searching remote registry for any ${ROCM_VERSION}-${gpu_arch} image…" >&2
+  # If still not found, try finding any image matching ROCm+arch+suffix from remote registry
+  echo "Exact version not found. Searching remote registry for any ${ROCM_VERSION}-${gpu_arch}-${IMAGE_SUFFIX} image…" >&2
   for days_back in {0..6}; do
     local target_date=$(date -d "${days_back} days ago" +%Y%m%d)
-    local remote_tags=$(curl -s "https://registry.hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&name=${ROCM_VERSION}-${gpu_arch}-${target_date}" 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | head -n 1)
+    local remote_tags=$(curl -s "https://registry.hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&name=${ROCM_VERSION}-${gpu_arch}-${IMAGE_SUFFIX}-${target_date}" 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | head -n 1)
     if [[ -n "$remote_tags" ]]; then
       echo "Found available image: rocm/sgl-dev:${remote_tags}" >&2
       echo "rocm/sgl-dev:${remote_tags}"
@@ -143,9 +144,9 @@ find_latest_image() {
     fi
   done
 
-  echo "No recent images found. Searching any cached local images matching ROCm+arch…" >&2
+  echo "No recent images found. Searching any cached local images matching ROCm+arch+suffix…" >&2
   local any_local
-  any_local=$(docker images --format '{{.Repository}}:{{.Tag}}' --filter "reference=rocm/sgl-dev:*${ROCM_VERSION}*${gpu_arch}*" | sort -r | head -n 1)
+  any_local=$(docker images --format '{{.Repository}}:{{.Tag}}' --filter "reference=rocm/sgl-dev:*${ROCM_VERSION}*${gpu_arch}*${IMAGE_SUFFIX}*" | sort -r | head -n 1)
   if [[ -n "$any_local" ]]; then
       echo "Using cached fallback image: ${any_local}" >&2
       echo "${any_local}"
