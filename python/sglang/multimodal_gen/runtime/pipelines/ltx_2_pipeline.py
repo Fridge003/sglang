@@ -107,6 +107,7 @@ def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
                 scheduler=pipeline.get_module("scheduler"),
                 vae=pipeline.get_module("vae"),
                 audio_vae=pipeline.get_module("audio_vae"),
+                pipeline=pipeline,
             ),
         ]
     )
@@ -216,9 +217,6 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 "(component_paths['distilled_lora'])."
             )
         self._distilled_lora_path = distilled_lora_path
-        self._configured_distilled_lora_scale = float(
-            getattr(server_args, "distilled_lora_scale", 1.0)
-        )
         self._stage1_lora_path = server_args.lora_path
         self._stage1_lora_scale = float(server_args.lora_scale)
         self._active_lora_phase = None
