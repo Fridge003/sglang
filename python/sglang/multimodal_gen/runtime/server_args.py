@@ -254,6 +254,7 @@ class ServerArgs:
         self._validate_offload()
         self._validate_parallelism()
         self._validate_cfg_parallel()
+        self._validate_cuda_graph_compile_mode()
 
     def _adjust_save_paths(self):
         """Normalize empty-string save paths to None (disabled)."""
@@ -302,6 +303,12 @@ class ServerArgs:
         if any(length <= 0 for length in self.cuda_graph_txt_lengths):
             raise ValueError(
                 "cuda_graph_txt_lengths must contain only positive integers"
+            )
+
+    def _validate_cuda_graph_compile_mode(self):
+        if self.enable_torch_compile and self.enable_cuda_graph:
+            raise ValueError(
+                "--enable-torch-compile and --enable-cuda-graph are mutually exclusive for diffusion runtime"
             )
 
     def adjust_pipeline_config(self):

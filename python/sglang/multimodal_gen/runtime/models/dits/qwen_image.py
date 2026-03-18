@@ -675,6 +675,14 @@ class QwenImageCrossAttention(nn.Module):
 
 
 class QwenImageTransformerBlock(nn.Module):
+    _shared_cuda_graph_pool_handle = None
+
+    @classmethod
+    def _get_shared_cuda_graph_pool_handle(cls):
+        if cls._shared_cuda_graph_pool_handle is None:
+            cls._shared_cuda_graph_pool_handle = torch.cuda.graphs.graph_pool_handle()
+        return cls._shared_cuda_graph_pool_handle
+
     def __init__(
         self,
         dim: int,
@@ -785,6 +793,7 @@ class QwenImageTransformerBlock(nn.Module):
         self._cuda_graphs = CudaGraphCallableCache(
             label=prefix or self.__class__.__name__,
             log_capture_events=log_graph_events,
+            pool_handle=self._get_shared_cuda_graph_pool_handle(),
         )
         self._cuda_graph_text_buckets: tuple[int, ...] | None = None
         self._log_cuda_graph_events = log_graph_events

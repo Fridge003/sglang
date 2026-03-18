@@ -53,10 +53,11 @@ class CudaGraphCallableCache:
         max_entries: int = 32,
         label: str | None = None,
         log_capture_events: bool = False,
+        pool_handle: Any | None = None,
     ):
         self._max_entries = max_entries
         self._cache: OrderedDict[Hashable, Callable[..., Any]] = OrderedDict()
-        self._pool_handle = None
+        self._pool_handle = pool_handle
         self._label = label or "cuda-graph-cache"
         self._log_capture_events = log_capture_events
 
