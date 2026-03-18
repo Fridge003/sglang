@@ -50,7 +50,7 @@ class LTX2LoRASwitchStage(PipelineStage):
                 "LTX2LoRASwitchStage requires pipeline.switch_lora_phase()"
             )
         switch_fn(self.phase)
-        batch.extra["ltx2_trace_stage"] = self.phase
+        batch.extra["ltx2_phase"] = self.phase
         return batch
 
 

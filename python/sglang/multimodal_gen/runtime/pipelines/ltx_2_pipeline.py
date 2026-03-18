@@ -34,50 +34,6 @@ BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
 
 
-def calculate_shift(
-    image_seq_len,
-    base_seq_len: int = 256,
-    max_seq_len: int = 4096,
-    base_shift: float = 0.5,
-    max_shift: float = 1.15,
-):
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    mu = image_seq_len * m + b
-    return mu
-
-
-def prepare_mu(batch: Req, server_args: ServerArgs):
-    vae_arch = getattr(
-        getattr(server_args.pipeline_config, "vae_config", None), "arch_config", None
-    )
-    vae_scale_factor = int(
-        getattr(vae_arch, "spatial_compression_ratio", None)
-        or getattr(vae_arch, "vae_scale_factor", None)
-        or getattr(server_args.pipeline_config, "vae_scale_factor", None)
-        or 32
-    )
-    vae_temporal_compression = int(
-        getattr(vae_arch, "temporal_compression_ratio", None)
-        or getattr(server_args.pipeline_config, "vae_temporal_compression", None)
-        or 8
-    )
-    latent_height = max(1, int(batch.height) // vae_scale_factor)
-    latent_width = max(1, int(batch.width) // vae_scale_factor)
-    latent_frames = max(1, (int(batch.num_frames) - 1) // vae_temporal_compression + 1)
-    image_seq_len = latent_height * latent_width * latent_frames
-    image_seq_len = max(1024, min(4096, image_seq_len))
-
-    mu = calculate_shift(
-        image_seq_len,
-        base_seq_len=1024,
-        max_seq_len=4096,
-        base_shift=0.95,
-        max_shift=2.05,
-    )
-    return "mu", mu
-
-
 def build_ltx2_native_sigmas(
     batch: Req,
     server_args: ServerArgs,
@@ -117,7 +73,7 @@ class LTX2SigmaPreparationStage(PipelineStage):
     """Prepare native LTX-2 sigma schedule before timestep setup."""
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        batch.extra["ltx2_trace_stage"] = "stage1"
+        batch.extra["ltx2_phase"] = "stage1"
         sigmas = build_ltx2_native_sigmas(batch, server_args)
         batch.sigmas = sigmas[:-1].tolist()
         return batch
@@ -263,24 +219,9 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self._configured_distilled_lora_scale = float(
             getattr(server_args, "distilled_lora_scale", 1.0)
         )
-        self._effective_distilled_lora_scale = 1.0
         self._stage1_lora_path = server_args.lora_path
         self._stage1_lora_scale = float(server_args.lora_scale)
         self._active_lora_phase = None
-
-    def get_ltx2_trace_lora_state(self) -> dict[str, object]:
-        return {
-            "active_phase": self._active_lora_phase,
-            "base_lora_path": self._stage1_lora_path,
-            "base_lora_scale": self._stage1_lora_scale,
-            "distilled_lora_path": self._distilled_lora_path,
-            "distilled_lora_scale_configured": self._configured_distilled_lora_scale,
-            "distilled_lora_scale_effective": self._effective_distilled_lora_scale,
-            "adapter_config": self.cur_adapter_config.get("transformer"),
-            "adapter_name": self.cur_adapter_name.get("transformer"),
-            "adapter_path": self.cur_adapter_path.get("transformer"),
-            "adapter_strength": self.cur_adapter_strength.get("transformer"),
-        }
 
     def switch_lora_phase(self, phase: str) -> None:
         if phase == self._active_lora_phase:
