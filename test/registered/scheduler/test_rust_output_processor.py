@@ -1,17 +1,20 @@
 """
-Tests for the Rust output processor serialization roundtrip.
+Tests for the Rust output processor.
 
-These tests verify that:
-1. BatchTokenIDOutput can be serialized to msgpack and deserialized back
-2. BatchEmbeddingOutput can be serialized to msgpack and deserialized back
-3. The format prefix bytes are correctly applied
-4. The dual-format receiver can handle both pickle and msgpack messages
+Unit tests verify serialization roundtrip (msgpack encode/decode).
+E2E test launches an SRT engine with SGLANG_USE_RUST_OUTPUT_PROCESSOR=1
+and verifies it can serve requests correctly.
+
+Usage:
+    python3 -m pytest test/registered/scheduler/test_rust_output_processor.py -v
+    python3 test/registered/scheduler/test_rust_output_processor.py
 """
 
+import os
 import pickle
 import unittest
 
-import msgspec
+import requests
 
 from sglang.srt.managers.io_struct import (
     BatchEmbeddingOutput,
@@ -24,6 +27,13 @@ from sglang.srt.managers.rust_output_processor import (
     _serialize_batch_embedding_output,
     _serialize_batch_token_id_output,
     deserialize_rust_output,
+)
+from sglang.srt.utils import kill_process_tree
+from sglang.test.test_utils import (
+    DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+    DEFAULT_URL_FOR_TEST,
+    CustomTestCase,
+    popen_launch_server,
 )
 
 
@@ -161,10 +171,18 @@ class TestSerializationRoundtrip(unittest.TestCase):
         result = deserialize_rust_output(msg)
 
         self.assertIsInstance(result, BatchTokenIDOutput)
-        self.assertEqual(result.input_token_logprobs_val, original.input_token_logprobs_val)
-        self.assertEqual(result.input_token_logprobs_idx, original.input_token_logprobs_idx)
-        self.assertEqual(result.output_token_logprobs_val, original.output_token_logprobs_val)
-        self.assertEqual(result.output_token_logprobs_idx, original.output_token_logprobs_idx)
+        self.assertEqual(
+            result.input_token_logprobs_val, original.input_token_logprobs_val
+        )
+        self.assertEqual(
+            result.input_token_logprobs_idx, original.input_token_logprobs_idx
+        )
+        self.assertEqual(
+            result.output_token_logprobs_val, original.output_token_logprobs_val
+        )
+        self.assertEqual(
+            result.output_token_logprobs_idx, original.output_token_logprobs_idx
+        )
 
     def test_embedding_output_roundtrip(self):
         """Test BatchEmbeddingOutput roundtrip."""
@@ -271,12 +289,9 @@ class TestFeatureGate(unittest.TestCase):
 
     def test_default_disabled(self):
         """Without env var, Rust output should be disabled."""
-        import os
-
         # Save and clear the env var
         old_val = os.environ.pop("SGLANG_USE_RUST_OUTPUT_PROCESSOR", None)
         try:
-            # Re-import to get fresh state
             import importlib
 
             import sglang.srt.managers.rust_output_processor as mod
@@ -286,6 +301,88 @@ class TestFeatureGate(unittest.TestCase):
         finally:
             if old_val is not None:
                 os.environ["SGLANG_USE_RUST_OUTPUT_PROCESSOR"] = old_val
+
+
+class TestRustOutputProcessorE2E(CustomTestCase):
+    """End-to-end test: launch SRT engine with Rust output processor enabled."""
+
+    @classmethod
+    def setUpClass(cls):
+        env = os.environ.copy()
+        env["SGLANG_USE_RUST_OUTPUT_PROCESSOR"] = "1"
+        cls.process = popen_launch_server(
+            "Qwen/Qwen3-0.6B",
+            DEFAULT_URL_FOR_TEST,
+            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
+            other_args=["--skip-server-warmup"],
+            env=env,
+        )
+        cls.addClassCleanup(kill_process_tree, cls.process.pid)
+
+    def test_generate_basic(self):
+        """Basic non-streaming generate request."""
+        response = requests.post(
+            DEFAULT_URL_FOR_TEST + "/generate",
+            json={
+                "text": "The capital of France is",
+                "sampling_params": {"max_new_tokens": 16, "temperature": 0},
+            },
+            timeout=30,
+        )
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertIn("text", result)
+        self.assertGreater(len(result["text"]), 0)
+
+    def test_generate_streaming(self):
+        """Streaming generate request."""
+        response = requests.post(
+            DEFAULT_URL_FOR_TEST + "/generate",
+            json={
+                "text": "Once upon a time",
+                "sampling_params": {"max_new_tokens": 32, "temperature": 0},
+                "stream": True,
+            },
+            timeout=30,
+            stream=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        chunks = []
+        for line in response.iter_lines():
+            if line:
+                chunks.append(line)
+        self.assertGreater(len(chunks), 0)
+
+    def test_generate_multiple_requests(self):
+        """Multiple concurrent requests to verify stability."""
+        import concurrent.futures
+
+        prompts = [
+            "What is 2+2?",
+            "The sky is",
+            "Hello world",
+            "Python is a",
+        ]
+
+        def send_request(text):
+            resp = requests.post(
+                DEFAULT_URL_FOR_TEST + "/generate",
+                json={
+                    "text": text,
+                    "sampling_params": {"max_new_tokens": 16, "temperature": 0},
+                },
+                timeout=30,
+            )
+            return resp
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(send_request, p) for p in prompts]
+            for future in concurrent.futures.as_completed(futures):
+                resp = future.result()
+                self.assertEqual(resp.status_code, 200)
+                result = resp.json()
+                self.assertIn("text", result)
+                self.assertGreater(len(result["text"]), 0)
 
 
 if __name__ == "__main__":
