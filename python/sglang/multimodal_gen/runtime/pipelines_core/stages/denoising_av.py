@@ -120,16 +120,18 @@ class LTX2AVDenoisingStage(DenoisingStage):
             return
         return super()._maybe_enable_cache_dit(num_inference_steps, batch)
 
-    @staticmethod
     def _get_ltx2_stage1_guider_params(
-        batch: Req, server_args: ServerArgs, stage: str
+        self, batch: Req, server_args: ServerArgs, stage: str
     ) -> dict[str, object] | None:
-        if (
-            stage != "stage1"
-            or getattr(server_args, "pipeline_class_name", None)
-            != "LTX2TwoStagePipeline"
-        ):
+        if stage != "stage1":
             return None
+
+        pipeline_ref = getattr(self, "pipeline", None)
+        pipeline = pipeline_ref() if callable(pipeline_ref) else pipeline_ref
+        pipeline_name = getattr(pipeline, "pipeline_name", None)
+        if pipeline_name != "LTX2TwoStagePipeline":
+            return None
+
         return batch.extra.get(
             "ltx2_stage1_guider_params", LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS
         )
