@@ -780,20 +780,31 @@ class QwenImageTransformerBlock(nn.Module):
             self.img_mlp = NunchakuFeedForward(self.img_mlp, **nunchaku_kwargs)
             self.txt_mlp = NunchakuFeedForward(self.txt_mlp, **nunchaku_kwargs)
 
+        log_graph_events = prefix.endswith(".0") or prefix == ""
         self._enable_cuda_graph_capture = False
-        self._cuda_graphs = CudaGraphCallableCache()
+        self._cuda_graphs = CudaGraphCallableCache(
+            label=prefix or self.__class__.__name__,
+            log_capture_events=log_graph_events,
+        )
         self._cuda_graph_text_buckets: tuple[int, ...] | None = None
+        self._log_cuda_graph_events = log_graph_events
+        self._logged_text_bucket_selections: set[tuple[int, int]] = set()
+        self._logged_text_bucket_fallbacks: set[int] = set()
 
     def enable_cuda_graph_capture(self, enable: bool):
         self._enable_cuda_graph_capture = enable
         if not enable:
             self._cuda_graphs.clear()
+            self._logged_text_bucket_selections.clear()
+            self._logged_text_bucket_fallbacks.clear()
 
     def set_cuda_graph_text_buckets(
         self, lengths: list[int] | tuple[int, ...] | None
     ) -> None:
         self._cuda_graph_text_buckets = None if lengths is None else tuple(lengths)
         self._cuda_graphs.clear()
+        self._logged_text_bucket_selections.clear()
+        self._logged_text_bucket_fallbacks.clear()
 
     def _select_text_graph_bucket(self, seq_len: int) -> int | None:
         if self._cuda_graph_text_buckets is None:
@@ -1032,7 +1043,31 @@ class QwenImageTransformerBlock(nn.Module):
         seq_len_txt = encoder_hidden_states.shape[1]
         capture_seq_len = self._select_text_graph_bucket(seq_len_txt)
         if capture_seq_len is None:
+            if (
+                self._log_cuda_graph_events
+                and self._cuda_graph_text_buckets is not None
+                and seq_len_txt not in self._logged_text_bucket_fallbacks
+            ):
+                logger.info(
+                    "cuda graph text fallback to eager: block=%s seq_len=%d buckets=%s",
+                    self.prefix,
+                    seq_len_txt,
+                    self._cuda_graph_text_buckets,
+                )
+                self._logged_text_bucket_fallbacks.add(seq_len_txt)
             return self._txt_pre_attention_forward(encoder_hidden_states, temb_txt_silu)
+        if (
+            self._log_cuda_graph_events
+            and (seq_len_txt, capture_seq_len)
+            not in self._logged_text_bucket_selections
+        ):
+            logger.info(
+                "cuda graph text bucket selected: block=%s seq_len=%d bucket=%d",
+                self.prefix,
+                seq_len_txt,
+                capture_seq_len,
+            )
+            self._logged_text_bucket_selections.add((seq_len_txt, capture_seq_len))
 
         padded_encoder_hidden_states = pad_tensor_along_dim(
             encoder_hidden_states,
@@ -1102,9 +1137,33 @@ class QwenImageTransformerBlock(nn.Module):
         seq_len_txt = txt_attn_output.shape[1]
         capture_seq_len = self._select_text_graph_bucket(seq_len_txt)
         if capture_seq_len is None:
+            if (
+                self._log_cuda_graph_events
+                and self._cuda_graph_text_buckets is not None
+                and seq_len_txt not in self._logged_text_bucket_fallbacks
+            ):
+                logger.info(
+                    "cuda graph text fallback to eager: block=%s seq_len=%d buckets=%s",
+                    self.prefix,
+                    seq_len_txt,
+                    self._cuda_graph_text_buckets,
+                )
+                self._logged_text_bucket_fallbacks.add(seq_len_txt)
             return self._txt_post_attention_forward(
                 txt_attn_output, txt_mod2, txt_gate1, encoder_hidden_states
             )
+        if (
+            self._log_cuda_graph_events
+            and (seq_len_txt, capture_seq_len)
+            not in self._logged_text_bucket_selections
+        ):
+            logger.info(
+                "cuda graph text bucket selected: block=%s seq_len=%d bucket=%d",
+                self.prefix,
+                seq_len_txt,
+                capture_seq_len,
+            )
+            self._logged_text_bucket_selections.add((seq_len_txt, capture_seq_len))
 
         padded_txt_attn_output = pad_tensor_along_dim(
             txt_attn_output, dim=1, target_length=capture_seq_len

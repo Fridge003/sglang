@@ -6,7 +6,10 @@ from typing import Any, Hashable
 
 import torch
 
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.srt.utils.common import next_power_of_2
+
+logger = init_logger(__name__)
 
 
 def pad_tensor_along_dim(
@@ -45,10 +48,17 @@ def shape_with_next_power_of_2(shape: Sequence[int], dim: int) -> tuple[int, ...
 class CudaGraphCallableCache:
     """Small LRU cache for graphed callables to keep graph memory bounded."""
 
-    def __init__(self, max_entries: int = 32):
+    def __init__(
+        self,
+        max_entries: int = 32,
+        label: str | None = None,
+        log_capture_events: bool = False,
+    ):
         self._max_entries = max_entries
         self._cache: OrderedDict[Hashable, Callable[..., Any]] = OrderedDict()
         self._pool_handle = None
+        self._label = label or "cuda-graph-cache"
+        self._log_capture_events = log_capture_events
 
     def clear(self) -> None:
         self._cache.clear()
@@ -68,13 +78,26 @@ class CudaGraphCallableCache:
         module = self._cache.get(key)
         if module is None:
             if len(self._cache) >= self._max_entries:
-                self._cache.popitem(last=False)
+                evicted_key, _ = self._cache.popitem(last=False)
+                if self._log_capture_events:
+                    logger.info(
+                        "cuda graph cache evict: cache=%s key=%s",
+                        self._label,
+                        evicted_key,
+                    )
             module = torch.cuda.make_graphed_callables(
                 fn,
                 tuple(example_inputs),
                 pool=self._get_pool_handle(),
             )
             self._cache[key] = module
+            if self._log_capture_events:
+                logger.info(
+                    "cuda graph capture miss: cache=%s key=%s entries=%d",
+                    self._label,
+                    key,
+                    len(self._cache),
+                )
         else:
             self._cache.move_to_end(key)
 

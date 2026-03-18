@@ -146,6 +146,11 @@ class DenoisingStage(PipelineStage):
                 module.__class__.__name__,
             )
             return
+        logger.info(
+            "Enable CUDA graph capture on %s with text buckets=%s",
+            module.__class__.__name__,
+            server_args.cuda_graph_txt_lengths,
+        )
         module.enable_cuda_graph_capture(True)
 
     def _maybe_enable_torch_compile(self, module: object) -> None:
