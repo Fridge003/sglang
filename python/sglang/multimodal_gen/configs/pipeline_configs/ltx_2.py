@@ -536,40 +536,6 @@ class LTX2PipelineConfig(PipelineConfig):
         mel_compression_ratio = self.audio_vae_mel_compression_ratio
         latent_mel_bins = num_mel_bins // mel_compression_ratio
 
-        audio_latents_mean = getattr(audio_vae, "latents_mean", None)
-        audio_latents_std = getattr(audio_vae, "latents_std", None)
-        if (
-            isinstance(audio_latents_mean, torch.Tensor)
-            and isinstance(audio_latents_std, torch.Tensor)
-            and audio_latents_mean.numel() == audio_latents_std.numel()
-        ):
-            audio_latents_mean = audio_latents_mean.to(
-                device=audio_latents.device, dtype=audio_latents.dtype
-            )
-            audio_latents_std = audio_latents_std.to(
-                device=audio_latents.device, dtype=audio_latents.dtype
-            )
-            if audio_latents.ndim == 3:
-                if audio_latents.shape[-1] != audio_latents_mean.numel():
-                    raise ValueError(
-                        f"audio_latents last dim {audio_latents.shape[-1]} "
-                        f"does not match audio_vae stats {audio_latents_mean.numel()}"
-                    )
-                audio_latents = audio_latents * audio_latents_std.view(
-                    1, 1, -1
-                ) + audio_latents_mean.view(1, 1, -1)
-            elif audio_latents.ndim == 2:
-                if audio_latents.shape[-1] != audio_latents_mean.numel():
-                    raise ValueError(
-                        f"audio_latents last dim {audio_latents.shape[-1]} "
-                        f"does not match audio_vae stats {audio_latents_mean.numel()}"
-                    )
-                audio_latents = audio_latents * audio_latents_std.view(
-                    1, -1
-                ) + audio_latents_mean.view(1, -1)
-            else:
-                audio_latents = audio_latents * audio_latents_std + audio_latents_mean
-
         audio_latents = self._unpack_audio_latents(
             audio_latents, audio_num_frames, num_mel_bins=latent_mel_bins
         )

@@ -34,8 +34,35 @@ from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.tensor_trace import (
+    get_current_trace_context,
+    get_current_trace_writer,
+)
 
 logger = init_logger(__name__)
+
+
+def _trace_transformer_tensor(
+    event: str, tensor_name: str, tensor: torch.Tensor | None
+) -> None:
+    if tensor is None:
+        return
+    context = get_current_trace_context()
+    stage = context.get("stage")
+    step_index = context.get("step_index")
+    if stage is None or step_index != 0:
+        return
+    writer = get_current_trace_writer()
+    if not getattr(writer, "enabled", False) or not writer.is_stage_enabled(stage):
+        return
+    writer.trace_tensor(
+        event=f"{stage}.transformer.{event}",
+        stage=stage,
+        tensor_name=tensor_name,
+        tensor=tensor,
+        step_index=step_index,
+        metadata={"branch": context.get("branch")},
+    )
 
 
 def apply_interleaved_rotary_emb(
@@ -549,66 +576,77 @@ class LTX2Attention(nn.Module):
         mask: torch.Tensor | None = None,
         pe: tuple[torch.Tensor, torch.Tensor] | None = None,
         k_pe: tuple[torch.Tensor, torch.Tensor] | None = None,
+        perturbation_mask: torch.Tensor | None = None,
+        all_perturbed: bool = False,
     ) -> torch.Tensor:
-        q, _ = self.to_q(x)
         context_ = x if context is None else context
-        k, _ = self.to_k(context_)
         v, _ = self.to_v(context_)
+        use_attention = not all_perturbed
 
-        if self.qk_norm:
-            assert self.q_norm is not None and self.k_norm is not None
-            q = self.q_norm(q)
-            k = self.k_norm(k)
+        if use_attention:
+            q, _ = self.to_q(x)
+            k, _ = self.to_k(context_)
 
-        if pe is not None:
-            cos, sin = pe
-            k_cos, k_sin = pe if k_pe is None else k_pe
-            tp_size = get_tp_world_size()
-            if tp_size > 1:
-                tp_rank = get_tp_rank()
-                cos, sin = self._slice_rope_for_tp(
-                    cos, sin, tp_rank=tp_rank, tp_size=tp_size
-                )
-                k_cos, k_sin = self._slice_rope_for_tp(
-                    k_cos, k_sin, tp_rank=tp_rank, tp_size=tp_size
-                )
-            if cos.dim() == 3:
-                q = apply_interleaved_rotary_emb(q, (cos, sin))
-                k = apply_interleaved_rotary_emb(k, (k_cos, k_sin))
-            else:
-                q = apply_split_rotary_emb(q, (cos, sin))
-                k = apply_split_rotary_emb(k, (k_cos, k_sin))
+            if self.qk_norm:
+                assert self.q_norm is not None and self.k_norm is not None
+                q = self.q_norm(q)
+                k = self.k_norm(k)
 
-        q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
-        k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
+            if pe is not None:
+                cos, sin = pe
+                k_cos, k_sin = pe if k_pe is None else k_pe
+                tp_size = get_tp_world_size()
+                if tp_size > 1:
+                    tp_rank = get_tp_rank()
+                    cos, sin = self._slice_rope_for_tp(
+                        cos, sin, tp_rank=tp_rank, tp_size=tp_size
+                    )
+                    k_cos, k_sin = self._slice_rope_for_tp(
+                        k_cos, k_sin, tp_rank=tp_rank, tp_size=tp_size
+                    )
+                if cos.dim() == 3:
+                    q = apply_interleaved_rotary_emb(q, (cos, sin))
+                    k = apply_interleaved_rotary_emb(k, (k_cos, k_sin))
+                else:
+                    q = apply_split_rotary_emb(q, (cos, sin))
+                    k = apply_split_rotary_emb(k, (k_cos, k_sin))
+
         v = v.view(*v.shape[:-1], self.local_heads, self.dim_head)
+        if use_attention:
+            q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
+            k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
 
-        if mask is not None:
-            # Fallback to SDPA for masked attention
-            q_ = q.transpose(1, 2)
-            k_ = k.transpose(1, 2)
-            v_ = v.transpose(1, 2)
+            if mask is not None:
+                q_ = q.transpose(1, 2)
+                k_ = k.transpose(1, 2)
+                v_ = v.transpose(1, 2)
 
-            if torch.is_floating_point(mask):
-                m = mask
-                if m.dim() == 2:
-                    m = m[:, None, None, :]
-                elif m.dim() == 3:
-                    m = m[:, None, :, :]
-                sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
+                if torch.is_floating_point(mask):
+                    m = mask
+                    if m.dim() == 2:
+                        m = m[:, None, None, :]
+                    elif m.dim() == 3:
+                        m = m[:, None, :, :]
+                    sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
+                else:
+                    m = mask.to(dtype=q_.dtype, device=q_.device)
+                    if m.dim() == 2:
+                        m = m[:, None, None, :]
+                    elif m.dim() == 3:
+                        m = m[:, None, :, :]
+                    sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
+
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    q_, k_, v_, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=False
+                ).transpose(1, 2)
             else:
-                m = mask.to(dtype=q_.dtype, device=q_.device)
-                if m.dim() == 2:
-                    m = m[:, None, None, :]
-                elif m.dim() == 3:
-                    m = m[:, None, :, :]
-                sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
+                out = self.attn(q, k, v)
 
-            out = torch.nn.functional.scaled_dot_product_attention(
-                q_, k_, v_, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=False
-            ).transpose(1, 2)
-        else:
-            out = self.attn(q, k, v)
+            if perturbation_mask is not None:
+                out = out * perturbation_mask + v * (1 - perturbation_mask)
+
+        if not use_attention:
+            out = v
 
         out = out.flatten(2)
         out, _ = self.to_out[0](out)
@@ -822,6 +860,10 @@ class LTX2TransformerBlock(nn.Module):
         audio_encoder_attention_mask: Optional[torch.Tensor] = None,
         a2v_cross_attention_mask: Optional[torch.Tensor] = None,
         v2a_cross_attention_mask: Optional[torch.Tensor] = None,
+        skip_video_self_attn: bool = False,
+        skip_audio_self_attn: bool = False,
+        skip_a2v_cross_attn: bool = False,
+        skip_v2a_cross_attn: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
         batch_size = hidden_states.size(0)
@@ -833,7 +875,11 @@ class LTX2TransformerBlock(nn.Module):
         norm_hidden_states = (
             rms_norm(hidden_states, self.norm_eps) * (1 + vscale_msa) + vshift_msa
         )
-        attn_hidden_states = self.attn1(norm_hidden_states, pe=video_rotary_emb)
+        attn_hidden_states = self.attn1(
+            norm_hidden_states,
+            pe=video_rotary_emb,
+            all_perturbed=skip_video_self_attn,
+        )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
         ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
@@ -843,9 +889,22 @@ class LTX2TransformerBlock(nn.Module):
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
         )
         attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states, pe=audio_rotary_emb
+            norm_audio_hidden_states,
+            pe=audio_rotary_emb,
+            all_perturbed=skip_audio_self_attn,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        if self.idx == 0:
+            _trace_transformer_tensor(
+                "block0.video_after_self_attn",
+                "block0_video_after_self_attn",
+                hidden_states,
+            )
+            _trace_transformer_tensor(
+                "block0.audio_after_self_attn",
+                "block0_audio_after_self_attn",
+                audio_hidden_states,
+            )
 
         # 2. Prompt Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
@@ -863,6 +922,17 @@ class LTX2TransformerBlock(nn.Module):
             mask=audio_encoder_attention_mask,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+        if self.idx == 0:
+            _trace_transformer_tensor(
+                "block0.video_after_text_cross_attn",
+                "block0_video_after_text_cross_attn",
+                hidden_states,
+            )
+            _trace_transformer_tensor(
+                "block0.audio_after_text_cross_attn",
+                "block0_audio_after_text_cross_attn",
+                audio_hidden_states,
+            )
 
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
@@ -934,14 +1004,15 @@ class LTX2TransformerBlock(nn.Module):
             norm_audio_hidden_states * (1 + audio_a2v_ca_scale) + audio_a2v_ca_shift
         )
 
-        a2v_attn_hidden_states = self.audio_to_video_attn(
-            mod_norm_hidden_states,
-            context=mod_norm_audio_hidden_states,
-            pe=ca_video_rotary_emb,
-            k_pe=ca_audio_rotary_emb,
-            mask=a2v_cross_attention_mask,
-        )
-        hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
+        if not skip_a2v_cross_attn:
+            a2v_attn_hidden_states = self.audio_to_video_attn(
+                mod_norm_hidden_states,
+                context=mod_norm_audio_hidden_states,
+                pe=ca_video_rotary_emb,
+                k_pe=ca_audio_rotary_emb,
+                mask=a2v_cross_attention_mask,
+            )
+            hidden_states = hidden_states + a2v_gate * a2v_attn_hidden_states
 
         # V2A
         mod_norm_hidden_states = (
@@ -951,14 +1022,28 @@ class LTX2TransformerBlock(nn.Module):
             norm_audio_hidden_states * (1 + audio_v2a_ca_scale) + audio_v2a_ca_shift
         )
 
-        v2a_attn_hidden_states = self.video_to_audio_attn(
-            mod_norm_audio_hidden_states,
-            context=mod_norm_hidden_states,
-            pe=ca_audio_rotary_emb,
-            k_pe=ca_video_rotary_emb,
-            mask=v2a_cross_attention_mask,
-        )
-        audio_hidden_states = audio_hidden_states + v2a_gate * v2a_attn_hidden_states
+        if not skip_v2a_cross_attn:
+            v2a_attn_hidden_states = self.video_to_audio_attn(
+                mod_norm_audio_hidden_states,
+                context=mod_norm_hidden_states,
+                pe=ca_audio_rotary_emb,
+                k_pe=ca_video_rotary_emb,
+                mask=v2a_cross_attention_mask,
+            )
+            audio_hidden_states = (
+                audio_hidden_states + v2a_gate * v2a_attn_hidden_states
+            )
+        if self.idx == 0:
+            _trace_transformer_tensor(
+                "block0.video_after_av_cross_attn",
+                "block0_video_after_av_cross_attn",
+                hidden_states,
+            )
+            _trace_transformer_tensor(
+                "block0.audio_after_av_cross_attn",
+                "block0_audio_after_av_cross_attn",
+                audio_hidden_states,
+            )
 
         # 4. Feedforward
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
@@ -978,6 +1063,17 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
+        if self.idx == 0:
+            _trace_transformer_tensor(
+                "block0.video_after_ff",
+                "block0_video_after_ff",
+                hidden_states,
+            )
+            _trace_transformer_tensor(
+                "block0.audio_after_ff",
+                "block0_audio_after_ff",
+                audio_hidden_states,
+            )
 
         return hidden_states, audio_hidden_states
 
@@ -1275,6 +1371,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_num_frames: Optional[int] = None,
         video_coords: Optional[torch.Tensor] = None,
         audio_coords: Optional[torch.Tensor] = None,
+        skip_video_self_attn_blocks: Optional[tuple[int, ...]] = None,
+        skip_audio_self_attn_blocks: Optional[tuple[int, ...]] = None,
+        disable_a2v_cross_attn: bool = False,
+        disable_v2a_cross_attn: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
 
@@ -1333,6 +1433,16 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         # 2. Patchify input projections
         hidden_states, _ = self.patchify_proj(hidden_states)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
+        _trace_transformer_tensor(
+            "patchify.video",
+            "video_patchified",
+            hidden_states,
+        )
+        _trace_transformer_tensor(
+            "patchify.audio",
+            "audio_patchified",
+            audio_hidden_states,
+        )
 
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
@@ -1391,8 +1501,20 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_encoder_hidden_states = self.audio_caption_projection(
             audio_encoder_hidden_states
         )
+        _trace_transformer_tensor(
+            "context_proj.video",
+            "video_context_projected",
+            encoder_hidden_states,
+        )
+        _trace_transformer_tensor(
+            "context_proj.audio",
+            "audio_context_projected",
+            audio_encoder_hidden_states,
+        )
 
         # 5. Run blocks
+        skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
+        skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
         for block in self.transformer_blocks:
             hidden_states, audio_hidden_states = block(
                 hidden_states,
@@ -1414,6 +1536,10 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 ca_audio_rotary_emb=ca_audio_rotary_emb,
                 encoder_attention_mask=encoder_attention_mask,
                 audio_encoder_attention_mask=audio_encoder_attention_mask,
+                skip_video_self_attn=block.idx in skip_video_self_attn_blocks,
+                skip_audio_self_attn=block.idx in skip_audio_self_attn_blocks,
+                skip_a2v_cross_attn=disable_a2v_cross_attn,
+                skip_v2a_cross_attn=disable_v2a_cross_attn,
             )
 
         # 6. Output layers
@@ -1439,6 +1565,16 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
+        _trace_transformer_tensor(
+            "output_proj.video",
+            "video_output_projected",
+            hidden_states,
+        )
+        _trace_transformer_tensor(
+            "output_proj.audio",
+            "audio_output_projected",
+            audio_hidden_states,
+        )
 
         # Unpatchify if requested (default True for pipeline compatibility)
         return_latents = kwargs.get("return_latents", True)

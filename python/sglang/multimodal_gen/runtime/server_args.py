@@ -150,6 +150,7 @@ class ServerArgs:
     lora_path: str | None = None
     lora_nickname: str = "default"  # for swapping adapters in the pipeline
     lora_scale: float = 1.0  # LoRA scale for merging (e.g., 0.125 for Hyper-SD)
+    distilled_lora_scale: float = 1.0
 
     # Component path overrides (key = model_index.json component name, value = path)
     component_paths: dict[str, str] = field(default_factory=dict)
@@ -234,6 +235,11 @@ class ServerArgs:
     # Logging
     log_level: str = "info"
     uvicorn_access_log_exclude_prefixes: list[str] = field(default_factory=list)
+    trace_enabled: bool = False
+    trace_dir: str | None = None
+    trace_dump_tensors: bool = False
+    trace_sample_values: int = 8
+    trace_stage_filter: str | None = None
 
     @property
     def broker_port(self) -> int:
@@ -860,6 +866,12 @@ class ServerArgs:
             default=ServerArgs.lora_scale,
             help="LoRA scale for merging (e.g., 0.125 for Hyper-SD). Same as lora_scale in Diffusers",
         )
+        parser.add_argument(
+            "--distilled-lora-scale",
+            type=float,
+            default=ServerArgs.distilled_lora_scale,
+            help="Configured distilled LoRA scale for LTX-2 two-stage tracing and alignment workflows.",
+        )
         # Add pipeline configuration arguments
         PipelineConfig.add_cli_args(parser)
 
@@ -878,6 +890,36 @@ class ServerArgs:
             help="Exclude uvicorn access logs whose request path starts with any of these prefixes. "
             "Defaults to empty (disabled). "
             "Example: --uvicorn-access-log-exclude-prefixes /metrics /health",
+        )
+        parser.add_argument(
+            "--trace-enabled",
+            action=StoreBoolean,
+            default=ServerArgs.trace_enabled,
+            help="Enable structured LTX-2 tensor trace logging.",
+        )
+        parser.add_argument(
+            "--trace-dir",
+            type=str,
+            default=ServerArgs.trace_dir,
+            help="Root directory for structured LTX-2 trace outputs.",
+        )
+        parser.add_argument(
+            "--trace-dump-tensors",
+            action=StoreBoolean,
+            default=ServerArgs.trace_dump_tensors,
+            help="Dump traced tensors to .pt files in addition to JSONL summaries.",
+        )
+        parser.add_argument(
+            "--trace-sample-values",
+            type=int,
+            default=ServerArgs.trace_sample_values,
+            help="Number of flattened sample values to include in each tensor trace event.",
+        )
+        parser.add_argument(
+            "--trace-stage-filter",
+            type=str,
+            default=ServerArgs.trace_stage_filter,
+            help="Optional comma-separated stage filter for trace events, for example 'stage1,stage2'.",
         )
         parser.add_argument(
             "--backend",

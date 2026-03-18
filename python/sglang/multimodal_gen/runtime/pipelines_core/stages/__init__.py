@@ -67,6 +67,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.timestep_preparation im
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.upsampling import (
     LTX2HalveResolutionStage,
+    LTX2LoRASwitchStage,
     LTX2UpsampleStage,
 )
 
@@ -100,5 +101,6 @@ __all__ = [
     # LTX-2 two-stage
     "LTX2RefinementStage",
     "LTX2HalveResolutionStage",
+    "LTX2LoRASwitchStage",
     "LTX2UpsampleStage",
 ]
