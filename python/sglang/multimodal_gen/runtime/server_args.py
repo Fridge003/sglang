@@ -214,11 +214,6 @@ class ServerArgs:
 
     # Logging
     log_level: str = "info"
-    trace_enabled: bool = False
-    trace_dir: str | None = None
-    trace_dump_tensors: bool = False
-    trace_sample_values: int = 8
-    trace_stage_filter: str | None = None
 
     @property
     def broker_port(self) -> int:
@@ -825,36 +820,6 @@ class ServerArgs:
             type=str,
             default=ServerArgs.log_level,
             help="The logging level of all loggers.",
-        )
-        parser.add_argument(
-            "--trace-enabled",
-            action=StoreBoolean,
-            default=ServerArgs.trace_enabled,
-            help="Enable structured LTX-2 tensor trace logging.",
-        )
-        parser.add_argument(
-            "--trace-dir",
-            type=str,
-            default=ServerArgs.trace_dir,
-            help="Root directory for structured LTX-2 trace outputs.",
-        )
-        parser.add_argument(
-            "--trace-dump-tensors",
-            action=StoreBoolean,
-            default=ServerArgs.trace_dump_tensors,
-            help="Dump traced tensors to .pt files in addition to JSONL summaries.",
-        )
-        parser.add_argument(
-            "--trace-sample-values",
-            type=int,
-            default=ServerArgs.trace_sample_values,
-            help="Number of flattened sample values to include in each tensor trace event.",
-        )
-        parser.add_argument(
-            "--trace-stage-filter",
-            type=str,
-            default=ServerArgs.trace_stage_filter,
-            help="Optional comma-separated stage filter for trace events, for example 'stage1,stage2'.",
         )
         parser.add_argument(
             "--backend",

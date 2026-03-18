@@ -408,7 +408,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
         reserved_frames_mask = prepared_vars["reserved_frames_mask"]
         seq_len = prepared_vars["seq_len"]
         guidance = prepared_vars["guidance"]
-        stage = batch.extra.get("ltx2_trace_stage", "stage1")
+        stage = batch.extra.get("ltx2_phase", "stage1")
         audio_latents = batch.audio_latents
         audio_scheduler = copy.deepcopy(self.scheduler)
 
@@ -501,15 +501,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
 
                         latent_model_input = latents.to(target_dtype)
                         audio_latent_model_input = audio_latents.to(target_dtype)
-                        shared_metadata = {
-                            "sigma": float(sigma.item()),
-                            "sigma_next": float(sigma_next.item()),
-                            "dt": float(dt.item()),
-                            "height": batch.height,
-                            "width": batch.width,
-                            "guidance_scale": batch.guidance_scale,
-                            "do_cfg": batch.do_classifier_free_guidance,
-                        }
                         stage1_guider_params = self._get_ltx2_stage1_guider_params(
                             batch, server_args, stage
                         )
@@ -894,7 +885,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
         server_args: ServerArgs,
         is_warmup: bool = False,
     ):
-        stage = batch.extra.get("ltx2_trace_stage", "stage1")
         # 1. Handle Trajectory (Video) - Copy from base
         if trajectory_latents:
             trajectory_tensor = torch.stack(trajectory_latents, dim=1)
@@ -1045,7 +1035,7 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         )
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        batch.extra["ltx2_trace_stage"] = "stage2"
+        batch.extra["ltx2_phase"] = "stage2"
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
         video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = video_noise * noise_scale + batch.latents * (1 - noise_scale)
