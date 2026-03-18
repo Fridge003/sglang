@@ -34,35 +34,8 @@ from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.tensor_trace import (
-    get_current_trace_context,
-    get_current_trace_writer,
-)
 
 logger = init_logger(__name__)
-
-
-def _trace_transformer_tensor(
-    event: str, tensor_name: str, tensor: torch.Tensor | None
-) -> None:
-    if tensor is None:
-        return
-    context = get_current_trace_context()
-    stage = context.get("stage")
-    step_index = context.get("step_index")
-    if stage is None or step_index != 0:
-        return
-    writer = get_current_trace_writer()
-    if not getattr(writer, "enabled", False) or not writer.is_stage_enabled(stage):
-        return
-    writer.trace_tensor(
-        event=f"{stage}.transformer.{event}",
-        stage=stage,
-        tensor_name=tensor_name,
-        tensor=tensor,
-        step_index=step_index,
-        metadata={"branch": context.get("branch")},
-    )
 
 
 def apply_interleaved_rotary_emb(
@@ -894,18 +867,6 @@ class LTX2TransformerBlock(nn.Module):
             all_perturbed=skip_audio_self_attn,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
-        if self.idx == 0:
-            _trace_transformer_tensor(
-                "block0.video_after_self_attn",
-                "block0_video_after_self_attn",
-                hidden_states,
-            )
-            _trace_transformer_tensor(
-                "block0.audio_after_self_attn",
-                "block0_audio_after_self_attn",
-                audio_hidden_states,
-            )
-
         # 2. Prompt Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         attn_hidden_states = self.attn2(
@@ -922,18 +883,6 @@ class LTX2TransformerBlock(nn.Module):
             mask=audio_encoder_attention_mask,
         )
         audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
-        if self.idx == 0:
-            _trace_transformer_tensor(
-                "block0.video_after_text_cross_attn",
-                "block0_video_after_text_cross_attn",
-                hidden_states,
-            )
-            _trace_transformer_tensor(
-                "block0.audio_after_text_cross_attn",
-                "block0_audio_after_text_cross_attn",
-                audio_hidden_states,
-            )
-
         # 3. Audio-to-Video and Video-to-Audio Cross-Attention
         norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
         norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
@@ -1033,18 +982,6 @@ class LTX2TransformerBlock(nn.Module):
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
             )
-        if self.idx == 0:
-            _trace_transformer_tensor(
-                "block0.video_after_av_cross_attn",
-                "block0_video_after_av_cross_attn",
-                hidden_states,
-            )
-            _trace_transformer_tensor(
-                "block0.audio_after_av_cross_attn",
-                "block0_audio_after_av_cross_attn",
-                audio_hidden_states,
-            )
-
         # 4. Feedforward
         vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
             self.scale_shift_table, batch_size, temb, slice(3, None)
@@ -1063,18 +1000,6 @@ class LTX2TransformerBlock(nn.Module):
         )
         audio_ff_output = self.audio_ff(norm_audio_hidden_states)
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
-        if self.idx == 0:
-            _trace_transformer_tensor(
-                "block0.video_after_ff",
-                "block0_video_after_ff",
-                hidden_states,
-            )
-            _trace_transformer_tensor(
-                "block0.audio_after_ff",
-                "block0_audio_after_ff",
-                audio_hidden_states,
-            )
-
         return hidden_states, audio_hidden_states
 
 
@@ -1433,17 +1358,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         # 2. Patchify input projections
         hidden_states, _ = self.patchify_proj(hidden_states)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
-        _trace_transformer_tensor(
-            "patchify.video",
-            "video_patchified",
-            hidden_states,
-        )
-        _trace_transformer_tensor(
-            "patchify.audio",
-            "audio_patchified",
-            audio_hidden_states,
-        )
-
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
         temb, embedded_timestep = self.adaln_single(
@@ -1501,17 +1415,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_encoder_hidden_states = self.audio_caption_projection(
             audio_encoder_hidden_states
         )
-        _trace_transformer_tensor(
-            "context_proj.video",
-            "video_context_projected",
-            encoder_hidden_states,
-        )
-        _trace_transformer_tensor(
-            "context_proj.audio",
-            "audio_context_projected",
-            audio_encoder_hidden_states,
-        )
-
         # 5. Run blocks
         skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
         skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
@@ -1565,17 +1468,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             audio_hidden_states = self.audio_norm_out(audio_hidden_states)
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
-        _trace_transformer_tensor(
-            "output_proj.video",
-            "video_output_projected",
-            hidden_states,
-        )
-        _trace_transformer_tensor(
-            "output_proj.audio",
-            "audio_output_projected",
-            audio_hidden_states,
-        )
-
         # Unpatchify if requested (default True for pipeline compatibility)
         return_latents = kwargs.get("return_latents", True)
 
