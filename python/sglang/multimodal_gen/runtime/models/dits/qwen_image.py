@@ -1043,7 +1043,9 @@ class QwenImageTransformerBlock(nn.Module):
 
         key = ("img_post_attention_forward", tuple(img_attn_output.shape))
         if modulate_index is None:
-            fn = functools.partial(self._img_post_attention_forward, modulate_index=None)
+            fn = functools.partial(
+                self._img_post_attention_forward, modulate_index=None
+            )
             example_inputs = (img_attn_output, img_mod2, img_gate1, hidden_states)
             call_inputs = example_inputs
         else:
