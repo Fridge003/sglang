@@ -141,11 +141,37 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             ]
         )
 
+    def _recv_from_scheduler(self):
+        """Receive a message from the scheduler, supporting both pickle and msgpack formats.
+
+        When the Rust output processor is active, messages arrive as raw bytes with a
+        1-byte format prefix:
+          0x00 = pickle (legacy)
+          0x01 = msgpack BatchTokenIDOutput
+          0x02 = msgpack BatchEmbeddingOutput
+
+        Legacy pickle messages (from recv_pyobj) don't have this prefix — they start
+        with pickle opcodes (0x80 for protocol 2+).
+        """
+        data = self.recv_from_scheduler.recv()
+        if len(data) > 0 and data[0] in (0x01, 0x02):
+            # Msgpack format from Rust sender
+            from sglang.srt.managers.rust_output_processor import (
+                deserialize_rust_output,
+            )
+
+            return deserialize_rust_output(data)
+        else:
+            # Legacy pickle format
+            import pickle
+
+            return pickle.loads(data)
+
     def event_loop(self):
         """The event loop that handles requests"""
         while True:
             with self.soft_watchdog.disable():
-                recv_obj = self.recv_from_scheduler.recv_pyobj()
+                recv_obj = self._recv_from_scheduler()
             output = self._request_dispatcher(recv_obj)
             if output is not None:
                 self.send_to_tokenizer.send_pyobj(output)

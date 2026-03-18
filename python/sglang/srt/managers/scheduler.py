@@ -469,7 +469,25 @@ class Scheduler(
                 )
 
             self.send_to_tokenizer = SenderWrapper(send_to_tokenizer)
-            self.send_to_detokenizer = SenderWrapper(send_to_detokenizer)
+
+            # Use Rust background ZMQ sender if enabled
+            from sglang.srt.managers.rust_output_processor import (
+                RustSenderWrapper,
+                is_rust_output_enabled,
+            )
+
+            if is_rust_output_enabled():
+                detok_endpoint = (
+                    port_args.tokenizer_ipc_name
+                    if self.server_args.skip_tokenizer_init
+                    else port_args.detokenizer_ipc_name
+                )
+                # Close the Python-side ZMQ socket since Rust will create its own
+                send_to_detokenizer.close()
+                self.send_to_detokenizer = RustSenderWrapper(detok_endpoint)
+                logger.info("Using Rust output processor for detokenizer sends")
+            else:
+                self.send_to_detokenizer = SenderWrapper(send_to_detokenizer)
 
             if self.server_args.sleep_on_idle:
                 self.idle_sleeper = IdleSleeper(

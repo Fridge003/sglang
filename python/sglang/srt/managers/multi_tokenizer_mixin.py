@@ -309,7 +309,7 @@ class MultiHttpWorkerDetokenizerMixin:
         """The event loop that handles requests, for multi multi-http-worker mode"""
         self.socket_mapping = SocketMapping()
         while True:
-            recv_obj = self.recv_from_scheduler.recv_pyobj()
+            recv_obj = self._recv_from_scheduler()
             output = self._request_dispatcher(recv_obj)
             if output is None:
                 continue
