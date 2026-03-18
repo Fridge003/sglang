@@ -161,6 +161,7 @@ class ServerArgs:
     enable_torch_compile: bool = False
     # CUDA graph capture
     enable_cuda_graph: bool = False
+    cuda_graph_txt_lengths: list[int] | None = None
 
     # warmup
     warmup: bool = False
@@ -237,6 +238,7 @@ class ServerArgs:
         self._adjust_offload()
         self._adjust_path()
         self._adjust_quant_config()
+        self._adjust_cuda_graph_capture()
         self._adjust_warmup()
         self._adjust_network_ports()
         # adjust parallelism before attention backend
@@ -281,6 +283,25 @@ class ServerArgs:
                 rank=self.nunchaku_config.quantization_rank,
                 act_unsigned=self.nunchaku_config.quantization_act_unsigned,
                 transformer_weights_path=self.nunchaku_config.transformer_weights_path,
+            )
+
+    def _adjust_cuda_graph_capture(self):
+        if self.cuda_graph_txt_lengths is None:
+            return
+
+        if isinstance(self.cuda_graph_txt_lengths, str):
+            self.cuda_graph_txt_lengths = [
+                int(length.strip())
+                for length in self.cuda_graph_txt_lengths.split(",")
+                if length.strip()
+            ]
+
+        self.cuda_graph_txt_lengths = sorted(
+            {int(length) for length in self.cuda_graph_txt_lengths}
+        )
+        if any(length <= 0 for length in self.cuda_graph_txt_lengths):
+            raise ValueError(
+                "cuda_graph_txt_lengths must contain only positive integers"
             )
 
     def adjust_pipeline_config(self):
@@ -746,6 +767,16 @@ class ServerArgs:
             action=StoreBoolean,
             default=ServerArgs.enable_cuda_graph,
             help="Enable CUDA graph capture for the model.",
+        )
+        parser.add_argument(
+            "--cuda-graph-txt-lengths",
+            type=str,
+            default=ServerArgs.cuda_graph_txt_lengths,
+            help=(
+                "Optional comma-separated padded text lengths used for CUDA graph capture, "
+                "for example '64,128,256'. Requests larger than the largest configured "
+                "length will fall back to eager execution for the text graph path."
+            ),
         )
         parser.add_argument(
             "--host",

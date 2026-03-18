@@ -9,12 +9,16 @@ import torch
 from sglang.srt.utils.common import next_power_of_2
 
 
-def pad_tensor_to_power_of_2(tensor: torch.Tensor, dim: int) -> torch.Tensor:
-    seq_length = tensor.shape[dim]
-    padded_length = next_power_of_2(seq_length)
-    padding_length = padded_length - seq_length
+def pad_tensor_to_length(
+    tensor: torch.Tensor, dim: int, padded_length: int
+) -> torch.Tensor:
+    padding_length = padded_length - tensor.shape[dim]
     if padding_length == 0:
         return tensor
+    if padding_length < 0:
+        raise ValueError(
+            f"Target padded_length={padded_length} is smaller than current length={tensor.shape[dim]}"
+        )
 
     padding_shape = list(tensor.shape)
     padding_shape[dim] = padding_length
@@ -22,10 +26,20 @@ def pad_tensor_to_power_of_2(tensor: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.cat([tensor, padding], dim=dim)
 
 
-def power_of_2_shape(shape: Sequence[int], dim: int) -> tuple[int, ...]:
+def pad_tensor_to_power_of_2(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+    seq_length = tensor.shape[dim]
+    padded_length = next_power_of_2(seq_length)
+    return pad_tensor_to_length(tensor, dim=dim, padded_length=padded_length)
+
+
+def shape_with_dim(shape: Sequence[int], dim: int, value: int) -> tuple[int, ...]:
     padded_shape = list(shape)
-    padded_shape[dim] = next_power_of_2(padded_shape[dim])
+    padded_shape[dim] = value
     return tuple(padded_shape)
+
+
+def power_of_2_shape(shape: Sequence[int], dim: int) -> tuple[int, ...]:
+    return shape_with_dim(shape, dim=dim, value=next_power_of_2(shape[dim]))
 
 
 class CudaGraphCallableCache:
