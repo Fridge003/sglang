@@ -5,7 +5,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.tensor_trace import get_trace_writer
 
 logger = init_logger(__name__)
 
@@ -52,12 +51,6 @@ class LTX2LoRASwitchStage(PipelineStage):
             )
         switch_fn(self.phase)
         batch.extra["ltx2_trace_stage"] = self.phase
-        writer = get_trace_writer(batch, server_args)
-        writer.trace_metadata(
-            event="stage_transition.lora_state",
-            stage=self.phase,
-            metadata=getattr(self.pipeline, "get_ltx2_trace_lora_state", lambda: {})(),
-        )
         return batch
 
 
@@ -119,21 +112,7 @@ class LTX2UpsampleStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         device = get_local_torch_device()
-        writer = get_trace_writer(batch, server_args)
-        writer.trace_tensor(
-            event="stage_transition.upsample.video_input",
-            stage="stage2",
-            tensor_name="stage1_video_output",
-            tensor=batch.latents,
-            metadata={"height": batch.height, "width": batch.width},
-        )
         latents = self._upsample_video_latents(batch.latents, server_args, device)
-        writer.trace_tensor(
-            event="stage_transition.upsample.video_output",
-            stage="stage2",
-            tensor_name="upsampled_video_latent",
-            tensor=latents,
-        )
         logger.info("Upsampled video latents: %s", list(latents.shape))
         self._restore_full_resolution(batch)
         self._pack_video_latents(batch, latents, server_args)
@@ -143,19 +122,5 @@ class LTX2UpsampleStage(PipelineStage):
             batch.height,
             batch.width,
         )
-        writer.trace_tensor(
-            event="stage_transition.stage2_video_packed",
-            stage="stage2",
-            tensor_name="stage2_video_packed",
-            tensor=batch.latents,
-            metadata={"height": batch.height, "width": batch.width},
-        )
         self._repack_audio_latents(batch, server_args)
-        if isinstance(batch.audio_latents, torch.Tensor):
-            writer.trace_tensor(
-                event="stage_transition.stage2_audio_packed",
-                stage="stage2",
-                tensor_name="stage2_audio_packed",
-                tensor=batch.audio_latents,
-            )
         return batch
