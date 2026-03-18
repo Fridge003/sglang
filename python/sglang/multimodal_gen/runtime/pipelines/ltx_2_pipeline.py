@@ -27,7 +27,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.tensor_trace import get_trace_writer
 
 logger = init_logger(__name__)
 
@@ -121,70 +120,6 @@ class LTX2SigmaPreparationStage(PipelineStage):
         batch.extra["ltx2_trace_stage"] = "stage1"
         sigmas = build_ltx2_native_sigmas(batch, server_args)
         batch.sigmas = sigmas[:-1].tolist()
-        writer = get_trace_writer(batch, server_args)
-        writer.trace_tensor(
-            event="stage1.schedule.sigmas",
-            stage="stage1",
-            tensor_name="sigmas",
-            tensor=sigmas,
-            metadata={"num_inference_steps": batch.num_inference_steps},
-        )
-        return batch
-
-
-class LTX2RequestTraceStage(PipelineStage):
-    """Emit request-level trace metadata for LTX-2 alignment."""
-
-    def __init__(self, pipeline: ComposedPipelineBase):
-        super().__init__()
-        self.pipeline = pipeline
-
-    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        writer = get_trace_writer(batch, server_args)
-        request_metadata = {
-            "prompt": batch.prompt,
-            "negative_prompt": batch.negative_prompt,
-            "seed": getattr(batch, "seed", None),
-            "height": batch.height,
-            "width": batch.width,
-            "num_frames": batch.num_frames,
-            "fps": getattr(batch, "fps", None),
-            "num_inference_steps": batch.num_inference_steps,
-            "guidance_scale": batch.guidance_scale,
-            "do_cfg": batch.do_classifier_free_guidance,
-            "images": getattr(batch, "image_path", None)
-            or getattr(batch, "images", None),
-            "base_lora_path": server_args.lora_path,
-            "base_lora_scale": server_args.lora_scale,
-            "distilled_lora_path": server_args.component_paths.get("distilled_lora"),
-            "distilled_lora_scale_configured": getattr(
-                server_args, "distilled_lora_scale", 1.0
-            ),
-            "spatial_upsampler_path": server_args.component_paths.get(
-                "spatial_upsampler"
-            ),
-            "pipeline_name": getattr(self.pipeline, "pipeline_name", None),
-        }
-        writer.trace_metadata(
-            event="request.inputs",
-            stage="stage1",
-            metadata=request_metadata,
-        )
-        return batch
-
-
-class LTX2TimestepTraceStage(PipelineStage):
-    """Emit timestep trace metadata after scheduler setup."""
-
-    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        writer = get_trace_writer(batch, server_args)
-        if isinstance(batch.timesteps, torch.Tensor):
-            writer.trace_tensor(
-                event="stage1.schedule.timesteps",
-                stage="stage1",
-                tensor_name="timesteps",
-                tensor=batch.timesteps,
-            )
         return batch
 
 
@@ -192,7 +127,6 @@ def _add_ltx2_front_stages(pipeline: ComposedPipelineBase):
     pipeline.add_stages(
         [
             InputValidationStage(),
-            LTX2RequestTraceStage(pipeline=pipeline),
             TextEncodingStage(
                 text_encoders=[pipeline.get_module("text_encoder")],
                 tokenizers=[pipeline.get_module("tokenizer")],
@@ -205,7 +139,6 @@ def _add_ltx2_front_stages(pipeline: ComposedPipelineBase):
 def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
     pipeline.add_stage(LTX2SigmaPreparationStage())
     pipeline.add_standard_timestep_preparation_stage()
-    pipeline.add_stage(LTX2TimestepTraceStage())
     pipeline.add_stages(
         [
             LTX2AVLatentPreparationStage(

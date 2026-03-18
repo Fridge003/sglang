@@ -4,7 +4,6 @@ from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_c
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
-from sglang.multimodal_gen.runtime.utils.tensor_trace import get_trace_writer
 
 
 class LTX2TextConnectorStage(PipelineStage):
@@ -90,32 +89,4 @@ class LTX2TextConnectorStage(PipelineStage):
             batch.audio_prompt_embeds = [connector_audio_prompt_embeds]
             batch.prompt_attention_mask = connector_mask
 
-        writer = get_trace_writer(batch, server_args)
-        writer.trace_tensor(
-            event="text.video_context",
-            stage="stage1",
-            tensor_name="video_context",
-            tensor=batch.prompt_embeds[0],
-            metadata={"do_cfg": batch.do_classifier_free_guidance},
-        )
-        writer.trace_tensor(
-            event="text.audio_context",
-            stage="stage1",
-            tensor_name="audio_context",
-            tensor=batch.audio_prompt_embeds[0],
-            metadata={"do_cfg": batch.do_classifier_free_guidance},
-        )
-        if batch.do_classifier_free_guidance:
-            writer.trace_tensor(
-                event="text.video_context_neg",
-                stage="stage1",
-                tensor_name="video_context_neg",
-                tensor=batch.negative_prompt_embeds[0],
-            )
-            writer.trace_tensor(
-                event="text.audio_context_neg",
-                stage="stage1",
-                tensor_name="audio_context_neg",
-                tensor=batch.negative_audio_prompt_embeds[0],
-            )
         return batch
