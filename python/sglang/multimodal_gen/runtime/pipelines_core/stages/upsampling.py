@@ -5,6 +5,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.tensor_trace import get_trace_writer
 
 logger = init_logger(__name__)
 
@@ -31,6 +32,31 @@ class LTX2HalveResolutionStage(PipelineStage):
             original_w,
             batch.height,
             batch.width,
+        )
+        return batch
+
+
+class LTX2LoRASwitchStage(PipelineStage):
+    """Switch LoRA configuration for the requested two-stage phase."""
+
+    def __init__(self, pipeline, phase: str):
+        super().__init__()
+        self.pipeline = pipeline
+        self.phase = phase
+
+    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        switch_fn = getattr(self.pipeline, "switch_lora_phase", None)
+        if not callable(switch_fn):
+            raise ValueError(
+                "LTX2LoRASwitchStage requires pipeline.switch_lora_phase()"
+            )
+        switch_fn(self.phase)
+        batch.extra["ltx2_trace_stage"] = self.phase
+        writer = get_trace_writer(batch, server_args)
+        writer.trace_metadata(
+            event="stage_transition.lora_state",
+            stage=self.phase,
+            metadata=getattr(self.pipeline, "get_ltx2_trace_lora_state", lambda: {})(),
         )
         return batch
 
@@ -79,31 +105,12 @@ class LTX2UpsampleStage(PipelineStage):
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
 
-    def _pack_and_normalize_audio_latents(
-        self, batch: Req, server_args: ServerArgs
-    ) -> None:
+    def _repack_audio_latents(self, batch: Req, server_args: ServerArgs) -> None:
         if batch.audio_latents is None or self.audio_vae is None:
             return
         audio_latents = server_args.pipeline_config.maybe_pack_audio_latents(
             batch.audio_latents, batch.audio_latents.shape[0], batch
         )
-        audio_mean = getattr(self.audio_vae, "latents_mean", None)
-        audio_std = getattr(self.audio_vae, "latents_std", None)
-        if isinstance(audio_mean, torch.Tensor) and isinstance(audio_std, torch.Tensor):
-            audio_mean = audio_mean.to(
-                device=audio_latents.device, dtype=audio_latents.dtype
-            )
-            audio_std = audio_std.to(
-                device=audio_latents.device, dtype=audio_latents.dtype
-            )
-            if audio_latents.ndim == 3:
-                audio_latents = (audio_latents - audio_mean.view(1, 1, -1)) / (
-                    audio_std.view(1, 1, -1)
-                )
-            elif audio_latents.ndim == 2:
-                audio_latents = (audio_latents - audio_mean.view(1, -1)) / (
-                    audio_std.view(1, -1)
-                )
         batch.audio_latents = audio_latents
         batch.raw_audio_latent_shape = audio_latents.shape
         logger.info(
@@ -112,7 +119,21 @@ class LTX2UpsampleStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         device = get_local_torch_device()
+        writer = get_trace_writer(batch, server_args)
+        writer.trace_tensor(
+            event="stage_transition.upsample.video_input",
+            stage="stage2",
+            tensor_name="stage1_video_output",
+            tensor=batch.latents,
+            metadata={"height": batch.height, "width": batch.width},
+        )
         latents = self._upsample_video_latents(batch.latents, server_args, device)
+        writer.trace_tensor(
+            event="stage_transition.upsample.video_output",
+            stage="stage2",
+            tensor_name="upsampled_video_latent",
+            tensor=latents,
+        )
         logger.info("Upsampled video latents: %s", list(latents.shape))
         self._restore_full_resolution(batch)
         self._pack_video_latents(batch, latents, server_args)
@@ -122,5 +143,19 @@ class LTX2UpsampleStage(PipelineStage):
             batch.height,
             batch.width,
         )
-        self._pack_and_normalize_audio_latents(batch, server_args)
+        writer.trace_tensor(
+            event="stage_transition.stage2_video_packed",
+            stage="stage2",
+            tensor_name="stage2_video_packed",
+            tensor=batch.latents,
+            metadata={"height": batch.height, "width": batch.width},
+        )
+        self._repack_audio_latents(batch, server_args)
+        if isinstance(batch.audio_latents, torch.Tensor):
+            writer.trace_tensor(
+                event="stage_transition.stage2_audio_packed",
+                stage="stage2",
+                tensor_name="stage2_audio_packed",
+                tensor=batch.audio_latents,
+            )
         return batch
