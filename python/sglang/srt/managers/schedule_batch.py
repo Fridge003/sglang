@@ -1101,6 +1101,7 @@ class Req(ReqDllmMixin):
         self.prefix_indices = torch.empty((0,), dtype=torch.int64)
         self.routed_experts = None
         self.last_node = None
+        self.cache_protected_len = 0
         self.swa_uuid_for_lock = None
         self.extend_input_len = 0
         self.is_retracted = True
