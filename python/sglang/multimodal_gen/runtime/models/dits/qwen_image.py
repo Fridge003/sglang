@@ -47,9 +47,9 @@ from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.cuda_graph import (
     CudaGraphCallableCache,
-    pad_tensor_to_length,
-    power_of_2_shape,
-    shape_with_dim,
+    pad_tensor_along_dim,
+    replace_shape_dim,
+    shape_with_next_power_of_2,
 )
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -782,24 +782,24 @@ class QwenImageTransformerBlock(nn.Module):
 
         self._enable_cuda_graph_capture = False
         self._cuda_graphs = CudaGraphCallableCache()
-        self._cuda_graph_txt_lengths: tuple[int, ...] | None = None
+        self._cuda_graph_text_buckets: tuple[int, ...] | None = None
 
     def enable_cuda_graph_capture(self, enable: bool):
         self._enable_cuda_graph_capture = enable
         if not enable:
             self._cuda_graphs.clear()
 
-    def set_cuda_graph_capture_txt_lengths(
+    def set_cuda_graph_text_buckets(
         self, lengths: list[int] | tuple[int, ...] | None
     ) -> None:
-        self._cuda_graph_txt_lengths = None if lengths is None else tuple(lengths)
+        self._cuda_graph_text_buckets = None if lengths is None else tuple(lengths)
         self._cuda_graphs.clear()
 
-    def _resolve_txt_graph_length(self, seq_len: int) -> int | None:
-        if self._cuda_graph_txt_lengths is None:
-            return power_of_2_shape((seq_len,), dim=0)[0]
+    def _select_text_graph_bucket(self, seq_len: int) -> int | None:
+        if self._cuda_graph_text_buckets is None:
+            return shape_with_next_power_of_2((seq_len,), dim=0)[0]
 
-        for capture_length in self._cuda_graph_txt_lengths:
+        for capture_length in self._cuda_graph_text_buckets:
             if capture_length >= seq_len:
                 return capture_length
         return None
@@ -997,7 +997,7 @@ class QwenImageTransformerBlock(nn.Module):
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
         return encoder_hidden_states
 
-    def _run_img_pre_attention(
+    def _maybe_graph_img_pre_attention(
         self,
         hidden_states: torch.Tensor,
         temb_img_silu: torch.Tensor,
@@ -1019,9 +1019,9 @@ class QwenImageTransformerBlock(nn.Module):
             example_inputs = (hidden_states, temb_img_silu, modulate_index)
             call_inputs = example_inputs
 
-        return self._cuda_graphs.run(key, fn, example_inputs, call_inputs)
+        return self._cuda_graphs.capture_or_replay(key, fn, example_inputs, call_inputs)
 
-    def _run_txt_pre_attention(
+    def _maybe_graph_txt_pre_attention(
         self,
         encoder_hidden_states: torch.Tensor,
         temb_txt_silu: torch.Tensor,
@@ -1030,20 +1030,22 @@ class QwenImageTransformerBlock(nn.Module):
             return self._txt_pre_attention_forward(encoder_hidden_states, temb_txt_silu)
 
         seq_len_txt = encoder_hidden_states.shape[1]
-        capture_seq_len = self._resolve_txt_graph_length(seq_len_txt)
+        capture_seq_len = self._select_text_graph_bucket(seq_len_txt)
         if capture_seq_len is None:
             return self._txt_pre_attention_forward(encoder_hidden_states, temb_txt_silu)
 
-        padded_encoder_hidden_states = pad_tensor_to_length(
+        padded_encoder_hidden_states = pad_tensor_along_dim(
             encoder_hidden_states,
             dim=1,
-            padded_length=capture_seq_len,
+            target_length=capture_seq_len,
         )
         key = (
             "txt_pre_attention_forward",
-            shape_with_dim(encoder_hidden_states.shape, dim=1, value=capture_seq_len),
+            replace_shape_dim(
+                encoder_hidden_states.shape, dim=1, value=capture_seq_len
+            ),
         )
-        padded_txt_modulated, txt_gate1, txt_mod2 = self._cuda_graphs.run(
+        padded_txt_modulated, txt_gate1, txt_mod2 = self._cuda_graphs.capture_or_replay(
             key,
             self._txt_pre_attention_forward,
             (padded_encoder_hidden_states, temb_txt_silu),
@@ -1051,7 +1053,7 @@ class QwenImageTransformerBlock(nn.Module):
         txt_modulated = padded_txt_modulated[:, :seq_len_txt]
         return txt_modulated, txt_gate1, txt_mod2
 
-    def _run_img_post_attention(
+    def _maybe_graph_img_post_attention(
         self,
         img_attn_output: torch.Tensor,
         img_mod2: torch.Tensor,
@@ -1083,9 +1085,9 @@ class QwenImageTransformerBlock(nn.Module):
             )
             call_inputs = example_inputs
 
-        return self._cuda_graphs.run(key, fn, example_inputs, call_inputs)
+        return self._cuda_graphs.capture_or_replay(key, fn, example_inputs, call_inputs)
 
-    def _run_txt_post_attention(
+    def _maybe_graph_txt_post_attention(
         self,
         txt_attn_output: torch.Tensor,
         txt_mod2: torch.Tensor,
@@ -1098,25 +1100,25 @@ class QwenImageTransformerBlock(nn.Module):
             )
 
         seq_len_txt = txt_attn_output.shape[1]
-        capture_seq_len = self._resolve_txt_graph_length(seq_len_txt)
+        capture_seq_len = self._select_text_graph_bucket(seq_len_txt)
         if capture_seq_len is None:
             return self._txt_post_attention_forward(
                 txt_attn_output, txt_mod2, txt_gate1, encoder_hidden_states
             )
 
-        padded_txt_attn_output = pad_tensor_to_length(
-            txt_attn_output, dim=1, padded_length=capture_seq_len
+        padded_txt_attn_output = pad_tensor_along_dim(
+            txt_attn_output, dim=1, target_length=capture_seq_len
         )
-        padded_encoder_hidden_states = pad_tensor_to_length(
+        padded_encoder_hidden_states = pad_tensor_along_dim(
             encoder_hidden_states,
             dim=1,
-            padded_length=capture_seq_len,
+            target_length=capture_seq_len,
         )
         key = (
             "txt_post_attention_forward",
-            shape_with_dim(txt_attn_output.shape, dim=1, value=capture_seq_len),
+            replace_shape_dim(txt_attn_output.shape, dim=1, value=capture_seq_len),
         )
-        padded_encoder_hidden_states = self._cuda_graphs.run(
+        padded_encoder_hidden_states = self._cuda_graphs.capture_or_replay(
             key,
             self._txt_post_attention_forward,
             (
@@ -1139,10 +1141,10 @@ class QwenImageTransformerBlock(nn.Module):
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         modulate_index: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        img_modulated, img_gate1, img_mod2 = self._run_img_pre_attention(
+        img_modulated, img_gate1, img_mod2 = self._maybe_graph_img_pre_attention(
             hidden_states, temb_img_silu, modulate_index
         )
-        txt_modulated, txt_gate1, txt_mod2 = self._run_txt_pre_attention(
+        txt_modulated, txt_gate1, txt_mod2 = self._maybe_graph_txt_pre_attention(
             encoder_hidden_states, temb_txt_silu
         )
 
@@ -1166,14 +1168,14 @@ class QwenImageTransformerBlock(nn.Module):
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
         img_attn_output, txt_attn_output = attn_output
 
-        hidden_states = self._run_img_post_attention(
+        hidden_states = self._maybe_graph_img_post_attention(
             img_attn_output,
             img_mod2,
             img_gate1,
             hidden_states,
             modulate_index,
         )
-        encoder_hidden_states = self._run_txt_post_attention(
+        encoder_hidden_states = self._maybe_graph_txt_post_attention(
             txt_attn_output,
             txt_mod2,
             txt_gate1,
@@ -1313,11 +1315,11 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         for block in self.transformer_blocks:
             block.enable_cuda_graph_capture(enable)
 
-    def set_cuda_graph_capture_txt_lengths(
+    def set_cuda_graph_text_buckets(
         self, lengths: list[int] | tuple[int, ...] | None
     ) -> None:
         for block in self.transformer_blocks:
-            block.set_cuda_graph_capture_txt_lengths(lengths)
+            block.set_cuda_graph_text_buckets(lengths)
 
     def forward(
         self,

@@ -9,15 +9,15 @@ import torch
 from sglang.srt.utils.common import next_power_of_2
 
 
-def pad_tensor_to_length(
-    tensor: torch.Tensor, dim: int, padded_length: int
+def pad_tensor_along_dim(
+    tensor: torch.Tensor, dim: int, target_length: int
 ) -> torch.Tensor:
-    padding_length = padded_length - tensor.shape[dim]
+    padding_length = target_length - tensor.shape[dim]
     if padding_length == 0:
         return tensor
     if padding_length < 0:
         raise ValueError(
-            f"Target padded_length={padded_length} is smaller than current length={tensor.shape[dim]}"
+            f"Target length={target_length} is smaller than current length={tensor.shape[dim]}"
         )
 
     padding_shape = list(tensor.shape)
@@ -26,20 +26,20 @@ def pad_tensor_to_length(
     return torch.cat([tensor, padding], dim=dim)
 
 
-def pad_tensor_to_power_of_2(tensor: torch.Tensor, dim: int) -> torch.Tensor:
+def pad_tensor_to_next_power_of_2(tensor: torch.Tensor, dim: int) -> torch.Tensor:
     seq_length = tensor.shape[dim]
-    padded_length = next_power_of_2(seq_length)
-    return pad_tensor_to_length(tensor, dim=dim, padded_length=padded_length)
+    target_length = next_power_of_2(seq_length)
+    return pad_tensor_along_dim(tensor, dim=dim, target_length=target_length)
 
 
-def shape_with_dim(shape: Sequence[int], dim: int, value: int) -> tuple[int, ...]:
-    padded_shape = list(shape)
-    padded_shape[dim] = value
-    return tuple(padded_shape)
+def replace_shape_dim(shape: Sequence[int], dim: int, value: int) -> tuple[int, ...]:
+    updated_shape = list(shape)
+    updated_shape[dim] = value
+    return tuple(updated_shape)
 
 
-def power_of_2_shape(shape: Sequence[int], dim: int) -> tuple[int, ...]:
-    return shape_with_dim(shape, dim=dim, value=next_power_of_2(shape[dim]))
+def shape_with_next_power_of_2(shape: Sequence[int], dim: int) -> tuple[int, ...]:
+    return replace_shape_dim(shape, dim=dim, value=next_power_of_2(shape[dim]))
 
 
 class CudaGraphCallableCache:
@@ -58,7 +58,7 @@ class CudaGraphCallableCache:
             self._pool_handle = torch.cuda.graphs.graph_pool_handle()
         return self._pool_handle
 
-    def run(
+    def capture_or_replay(
         self,
         key: Hashable,
         fn: Callable[..., Any],
