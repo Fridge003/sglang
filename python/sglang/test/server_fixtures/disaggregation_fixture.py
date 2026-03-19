@@ -11,6 +11,7 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    find_available_port,
     is_in_ci,
     popen_with_error_check,
 )
@@ -28,13 +29,20 @@ class PDDisaggregationServerBase(CustomTestCase):
         cls.lb_port = base_port
         cls.prefill_port = f"{int(base_port) + 100}"
         cls.decode_port = f"{int(base_port) + 200}"
+        cls.bootstrap_port = str(find_available_port(8998))
         cls.prefill_url = f"http://{cls.base_host}:{cls.prefill_port}"
         cls.decode_url = f"http://{cls.base_host}:{cls.decode_port}"
         cls.lb_url = f"http://{cls.base_host}:{cls.lb_port}"
-        print(f"{cls.base_host=} {cls.lb_port=} {cls.prefill_port=} {cls.decode_port=}")
+        print(
+            f"{cls.base_host=} {cls.lb_port=} {cls.prefill_port=} {cls.decode_port=} {cls.bootstrap_port=}"
+        )
         cls.process_lb, cls.process_decode, cls.process_prefill = None, None, None
 
         # config transfer backend and rdma devices
+        cls.bootstrap_port_args = [
+            "--disaggregation-bootstrap-port",
+            cls.bootstrap_port,
+        ]
         if is_in_ci():
             cls.transfer_backend = ["--disaggregation-transfer-backend", "mooncake"]
             cls.rdma_devices = ["--disaggregation-ib-device", get_rdma_devices_args()]

@@ -62,7 +62,7 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -87,7 +87,7 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         print("Debug")
         print(decode_args)
         cls.process_decode = popen_launch_pd_server(
@@ -261,7 +261,7 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -286,7 +286,7 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,
@@ -369,7 +369,7 @@ class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -394,7 +394,7 @@ class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,
