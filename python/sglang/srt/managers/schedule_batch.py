@@ -1062,6 +1062,15 @@ class Req(ReqDllmMixin):
         return False
 
     def check_finished(self, new_accepted_len: int = 1):
+        from sglang.srt.managers.rust_output_processor import (
+            apply_check_finished_rust,
+            is_rust_output_enabled,
+        )
+
+        if is_rust_output_enabled():
+            apply_check_finished_rust(self, new_accepted_len)
+            return
+
         if self.finished():
             return
 

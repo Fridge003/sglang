@@ -21,7 +21,10 @@ _rust_mod = None
 
 if _USE_RUST:
     try:
-        from sglang.srt.sgl_scheduler import RustOutputSender
+        from sglang.srt.sgl_scheduler import (
+            RustOutputSender,
+            check_finished_rust,
+        )
 
         _rust_mod = True
         logger.info("Rust output processor loaded successfully")
@@ -568,3 +571,116 @@ def stream_output_generation_rust(
             "token_steps": None,
         }
         scheduler.send_to_detokenizer.send_token_output_dict(output_dict)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: check_finished in Rust
+# ---------------------------------------------------------------------------
+
+
+def _gather_all_stop_token_ids(req):
+    """Collect all stop token IDs into a single list for the Rust check."""
+    ids = set()
+    if req.sampling_params.stop_token_ids:
+        ids.update(req.sampling_params.stop_token_ids)
+    if req.eos_token_ids:
+        ids.update(req.eos_token_ids)
+    if req.tokenizer is not None:
+        if req.tokenizer.eos_token_id is not None:
+            ids.add(req.tokenizer.eos_token_id)
+        if getattr(req.tokenizer, "additional_stop_token_ids", None):
+            ids.update(req.tokenizer.additional_stop_token_ids)
+    return list(ids)
+
+
+def _get_first_stop_token_id(req):
+    """Get a fallback token ID for vocab boundary replacement."""
+    if req.sampling_params.stop_token_ids:
+        return next(iter(req.sampling_params.stop_token_ids))
+    if req.eos_token_ids:
+        return next(iter(req.eos_token_ids))
+    return 0
+
+
+def apply_check_finished_rust(req, new_accepted_len=1):
+    """Rust-accelerated check_finished for a single Req.
+
+    Handles the fast paths (max_new_tokens, stop tokens, stop strings,
+    vocab boundary) in Rust. Falls back to Python for grammar and regex.
+    """
+    import re
+
+    from sglang.srt.managers.schedule_batch import (
+        FINISH_LENGTH,
+        FINISH_MATCHED_STR,
+        FINISH_MATCHED_TOKEN,
+        FINISHED_MATCHED_REGEX,
+    )
+
+    if req.finished():
+        return
+
+    # Handle to_finish in Python (it's a Python object)
+    if req.to_finish:
+        req.finished_reason = req.to_finish
+        req.to_finish = None
+        return
+
+    # Grammar check in Python (requires Python grammar object)
+    if req.grammar is not None:
+        if req.grammar.is_terminated():
+            req.finished_reason = FINISH_MATCHED_TOKEN(matched=req.output_ids[-1])
+            return
+
+    has_stop_regex = len(req.sampling_params.stop_regex_strs) > 0
+
+    # Pre-compute tail_str for stop string checking
+    tail_str = ""
+    if req.sampling_params.stop_strs or has_stop_regex:
+        tail_str = req.tail_str()
+
+    new_accepted_tokens = req.output_ids[-new_accepted_len:]
+
+    result = check_finished_rust(
+        output_ids_len=len(req.output_ids),
+        max_new_tokens=req.sampling_params.max_new_tokens,
+        new_accepted_tokens=new_accepted_tokens,
+        ignore_eos=req.sampling_params.ignore_eos,
+        stop_token_ids=_gather_all_stop_token_ids(req),
+        vocab_size=req.vocab_size,
+        first_stop_token_id=_get_first_stop_token_id(req),
+        stop_strs=list(req.sampling_params.stop_strs),
+        tail_str=tail_str,
+        decoded_text=req.decoded_text or "",
+        has_grammar=False,  # Already checked above
+        has_to_finish=False,  # Already checked above
+        has_stop_regex=has_stop_regex,
+    )
+
+    if result.finish_type == "none":
+        # Rust didn't find a finish condition.
+        # Check stop regex in Python (requires re module).
+        if has_stop_regex and tail_str:
+            for stop_regex_str in req.sampling_params.stop_regex_strs:
+                if re.search(stop_regex_str, tail_str):
+                    req.finished_reason = FINISHED_MATCHED_REGEX(matched=stop_regex_str)
+                    return
+        return
+
+    if result.finish_type == "length":
+        req.finished_reason = FINISH_LENGTH(length=int(result.match_int))
+        req.finished_len = int(result.finished_len)
+    elif result.finish_type == "matched_token":
+        req.finished_reason = FINISH_MATCHED_TOKEN(matched=int(result.match_int))
+        if result.finished_len >= 0:
+            req.finished_len = int(result.finished_len)
+    elif result.finish_type == "matched_str":
+        req.finished_reason = FINISH_MATCHED_STR(matched=result.match_str)
+    elif result.finish_type == "vocab_boundary":
+        if result.modified_output_id_offset >= 0:
+            req.output_ids[int(result.modified_output_id_offset)] = int(
+                result.modified_output_id_value
+            )
+        req.finished_reason = FINISH_MATCHED_STR(matched=result.match_str)
+        if result.finished_len >= 0:
+            req.finished_len = int(result.finished_len)
