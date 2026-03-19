@@ -358,6 +358,15 @@ class SchedulerOutputProcessorMixin:
         batch: ScheduleBatch,
         result: GenerationBatchResult,
     ):
+        from sglang.srt.managers.rust_output_processor import (
+            is_rust_output_enabled,
+            process_batch_result_decode_rust,
+        )
+
+        if is_rust_output_enabled():
+            process_batch_result_decode_rust(self, batch, result)
+            return
+
         if result.copy_done is not None:
             result.copy_done.synchronize()
 

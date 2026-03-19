@@ -22,8 +22,10 @@ _rust_mod = None
 if _USE_RUST:
     try:
         from sglang.srt.sgl_scheduler import (
+            DecodeReqInput,
             RustOutputSender,
             check_finished_rust,
+            process_decode_loop_rust,
         )
 
         _rust_mod = True
@@ -684,3 +686,308 @@ def apply_check_finished_rust(req, new_accepted_len=1):
         req.finished_reason = FINISH_MATCHED_STR(matched=result.match_str)
         if result.finished_len >= 0:
             req.finished_len = int(result.finished_len)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: process_batch_result_decode with Rust decode loop
+# ---------------------------------------------------------------------------
+
+
+def _apply_finish_result(req, action):
+    """Apply a Rust check_finished result to a Req object."""
+    import re
+
+    from sglang.srt.managers.schedule_batch import (
+        FINISH_LENGTH,
+        FINISH_MATCHED_STR,
+        FINISH_MATCHED_TOKEN,
+        FINISHED_MATCHED_REGEX,
+    )
+
+    ft = action.finish_type
+    if ft == "none":
+        # Rust didn't find a finish — check stop regex in Python
+        if req.sampling_params.stop_regex_strs:
+            tail_str = req.tail_str()
+            if tail_str:
+                for stop_regex_str in req.sampling_params.stop_regex_strs:
+                    if re.search(stop_regex_str, tail_str):
+                        req.finished_reason = FINISHED_MATCHED_REGEX(
+                            matched=stop_regex_str
+                        )
+                        return
+        # Also check grammar in Python
+        if req.grammar is not None and req.grammar.is_terminated():
+            req.finished_reason = FINISH_MATCHED_TOKEN(matched=req.output_ids[-1])
+        return
+
+    if ft == "length":
+        req.finished_reason = FINISH_LENGTH(length=int(action.finish_match_int))
+        req.finished_len = int(action.finish_finished_len)
+    elif ft == "matched_token":
+        req.finished_reason = FINISH_MATCHED_TOKEN(matched=int(action.finish_match_int))
+        if action.finish_finished_len >= 0:
+            req.finished_len = int(action.finish_finished_len)
+    elif ft == "matched_str":
+        req.finished_reason = FINISH_MATCHED_STR(matched=action.finish_match_str)
+    elif ft == "vocab_boundary":
+        if action.finish_modified_offset >= 0:
+            req.output_ids[int(action.finish_modified_offset)] = int(
+                action.finish_modified_value
+            )
+        req.finished_reason = FINISH_MATCHED_STR(matched=action.finish_match_str)
+        if action.finish_finished_len >= 0:
+            req.finished_len = int(action.finish_finished_len)
+
+
+def process_batch_result_decode_rust(scheduler, batch, result):
+    """Phase 4: Rust-accelerated process_batch_result_decode.
+
+    The inner for-loop is split:
+    1. Python pre-extracts lightweight DecodeReqInput for each req
+    2. Rust processes all requests: determines skip/finish, runs check_finished
+    3. Python applies actions: output_ids append, finish callbacks, logprobs, grammar
+    """
+    import torch
+
+    from sglang.srt.managers.io_struct import AbortReq
+    from sglang.srt.mem_cache.common import release_kv_cache
+
+    if result.copy_done is not None:
+        result.copy_done.synchronize()
+
+    logits_output, next_token_ids, can_run_cuda_graph = (
+        result.logits_output,
+        result.next_token_ids,
+        result.can_run_cuda_graph,
+    )
+
+    is_spec_none = batch.spec_algorithm.is_none()
+    is_spec_v2 = batch.is_spec_v2
+
+    if is_spec_none or is_spec_v2:
+        if is_spec_v2:
+            next_token_ids = scheduler._resolve_spec_overlap_token_ids(result, batch)
+        else:
+            next_token_ids = next_token_ids.tolist()
+
+        if batch.return_logprob:
+            next_token_logprobs = logits_output.next_token_logprobs.tolist()
+            if is_spec_v2 and logits_output.next_token_top_logprobs_val:
+                logits_output.next_token_top_logprobs_val = [
+                    v.tolist() for v in logits_output.next_token_top_logprobs_val
+                ]
+                logits_output.next_token_top_logprobs_idx = [
+                    x.tolist() for x in logits_output.next_token_top_logprobs_idx
+                ]
+            if is_spec_v2 and logits_output.next_token_token_ids_logprobs_val:
+                logits_output.next_token_token_ids_logprobs_val = [
+                    v.tolist() for v in logits_output.next_token_token_ids_logprobs_val
+                ]
+
+    scheduler.num_generated_tokens += len(batch.reqs)
+    if not is_spec_none:
+        scheduler.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
+    if scheduler.enable_metrics:
+        scheduler.metrics_collector.increment_decode_cuda_graph_pass(
+            value=can_run_cuda_graph
+        )
+
+    scheduler.token_to_kv_pool_allocator.free_group_begin()
+
+    # --- Phase 4: Pre-extract data and run Rust loop ---
+
+    # Build next_token_ids as list-of-lists (uniform interface for spec/non-spec)
+    next_token_ids_flat = []
+    for i, req in enumerate(batch.reqs):
+        if is_spec_v2:
+            next_token_ids_flat.append(next_token_ids[i])
+        else:
+            next_token_ids_flat.append([next_token_ids[i]])
+
+    # Pre-extract DecodeReqInput for each request
+    req_inputs = []
+    for i, req in enumerate(batch.reqs):
+        # Pre-compute tail_str for stop string/regex checking
+        tail_str = ""
+        has_stop_strs = bool(req.sampling_params.stop_strs)
+        has_stop_regex = bool(req.sampling_params.stop_regex_strs)
+
+        # Append output_ids BEFORE extracting (since check_finished needs updated length)
+        if is_spec_none:
+            req.output_ids.append(next_token_ids[i])
+        elif is_spec_v2:
+            req.output_ids.extend(next_token_ids[i])
+
+        if has_stop_strs or has_stop_regex:
+            tail_str = req.tail_str()
+
+        req_inputs.append(
+            DecodeReqInput(
+                already_finished=req.finished(),
+                is_retracted=req.is_retracted,
+                output_ids_len=len(req.output_ids),
+                max_new_tokens=req.sampling_params.max_new_tokens,
+                ignore_eos=req.sampling_params.ignore_eos,
+                stop_token_ids=_gather_all_stop_token_ids(req),
+                vocab_size=req.vocab_size,
+                first_stop_token_id=_get_first_stop_token_id(req),
+                stop_strs=list(req.sampling_params.stop_strs),
+                tail_str=tail_str,
+                decoded_text=req.decoded_text or "",
+                has_grammar=req.grammar is not None,
+                has_to_finish=bool(req.to_finish),
+                has_stop_regex=has_stop_regex,
+                return_logprob=req.return_logprob,
+                top_logprobs_num=(
+                    req.top_logprobs_num if hasattr(req, "top_logprobs_num") else 0
+                ),
+                has_token_ids_logprob=req.token_ids_logprob is not None,
+            )
+        )
+
+    # Run the Rust decode loop
+    actions = process_decode_loop_rust(
+        req_inputs,
+        next_token_ids_flat,
+        scheduler.enable_overlap,
+        is_spec_none,
+        is_spec_v2,
+        batch.return_logprob,
+    )
+
+    # --- Apply actions back to Python objects ---
+    for action in actions:
+        i = action.req_idx
+        req = batch.reqs[i]
+
+        if action.action == "skip":
+            continue
+
+        # Mamba update (Python-only — requires batch/result state)
+        scheduler._mamba_prefix_cache_update(req, batch, result, i)
+
+        req.time_stats.set_last_decode_finish_time()
+
+        # Apply finish result
+        # Handle to_finish in Python first
+        if req.to_finish:
+            req.finished_reason = req.to_finish
+            req.to_finish = None
+        elif action.finish_type != "none":
+            _apply_finish_result(req, action)
+        else:
+            # Rust returned "none" — check grammar and regex in Python
+            if req.grammar is not None and req.grammar.is_terminated():
+                from sglang.srt.managers.schedule_batch import FINISH_MATCHED_TOKEN
+
+                req.finished_reason = FINISH_MATCHED_TOKEN(matched=req.output_ids[-1])
+            elif req.sampling_params.stop_regex_strs:
+                import re
+
+                from sglang.srt.managers.schedule_batch import FINISHED_MATCHED_REGEX
+
+                tail_str = req_inputs[i].tail_str
+                if tail_str:
+                    for stop_regex_str in req.sampling_params.stop_regex_strs:
+                        if re.search(stop_regex_str, tail_str):
+                            req.finished_reason = FINISHED_MATCHED_REGEX(
+                                matched=stop_regex_str
+                            )
+                            break
+
+        # KV cache offload (not finished)
+        if (
+            scheduler.server_args.disaggregation_decode_enable_offload_kvcache
+            and not req.finished()
+        ):
+            scheduler.decode_offload_manager.offload_kv_cache(req)
+
+        # Finished actions
+        if req.finished():
+            # Delete multimodal features to save memory
+            if req.multimodal_inputs is not None:
+                for mm_item in req.multimodal_inputs.mm_items:
+                    pixel_values = mm_item.feature
+                    if isinstance(pixel_values, torch.Tensor):
+                        mm_item.feature = None
+                        del pixel_values
+            scheduler.maybe_collect_routed_experts(req)
+
+            if scheduler.server_args.disaggregation_decode_enable_offload_kvcache:
+                if not scheduler.decode_offload_manager.offload_kv_cache(req):
+                    scheduler.decode_offload_manager.finalize_release_on_finish(req)
+            else:
+                release_kv_cache(req, scheduler.tree_cache)
+
+            req.time_stats.set_completion_time()
+
+        scheduler.maybe_collect_customized_info(i, req, logits_output)
+
+        # Logprobs
+        if req.return_logprob and (is_spec_none or is_spec_v2):
+            next_token_id = next_token_ids[i]
+            if is_spec_v2:
+                accepted_logprobs = next_token_logprobs[i]
+                accepted_ids = next_token_id
+                max_accept = len(accepted_logprobs)
+            else:
+                accepted_logprobs = [next_token_logprobs[i]]
+                accepted_ids = [next_token_id]
+                max_accept = 1
+
+            for j, tok_id in enumerate(accepted_ids):
+                req.output_token_logprobs_val.append(accepted_logprobs[j])
+                req.output_token_logprobs_idx.append(tok_id)
+                if req.top_logprobs_num > 0:
+                    flat_idx = i * max_accept + j
+                    req.output_top_logprobs_val.append(
+                        logits_output.next_token_top_logprobs_val[flat_idx]
+                    )
+                    req.output_top_logprobs_idx.append(
+                        logits_output.next_token_top_logprobs_idx[flat_idx]
+                    )
+                if req.token_ids_logprob is not None:
+                    flat_idx = i * max_accept + j
+                    req.output_token_ids_logprobs_val.append(
+                        logits_output.next_token_token_ids_logprobs_val[flat_idx]
+                    )
+                    req.output_token_ids_logprobs_idx.append(
+                        logits_output.next_token_token_ids_logprobs_idx[flat_idx]
+                    )
+
+        # Hidden states
+        if req.return_hidden_states and logits_output.hidden_states is not None:
+            req.hidden_states.append(
+                logits_output.hidden_states[i].cpu().clone().tolist()
+            )
+
+        # Grammar accept
+        if req.grammar is not None:
+            try:
+                next_token_id = next_token_ids[i]
+                if is_spec_none:
+                    req.grammar.accept_token(next_token_id)
+                elif is_spec_v2:
+                    for token_id in next_token_id:
+                        req.grammar.accept_token(token_id)
+            except ValueError as e:
+                import logging
+
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    f"Grammar accept_token failed for req {req.rid} "
+                    f"with token {next_token_ids[i]}: {e}"
+                )
+                scheduler.abort_request(AbortReq(rid=req.rid))
+            req.grammar.finished = req.finished()
+
+    scheduler.stream_output(batch.reqs, batch.return_logprob)
+    scheduler.token_to_kv_pool_allocator.free_group_end()
+
+    scheduler.forward_ct_decode = (scheduler.forward_ct_decode + 1) % (1 << 30)
+    scheduler.report_decode_stats(
+        can_run_cuda_graph,
+        running_batch=batch,
+        num_accepted_tokens=result.num_accepted_tokens,
+    )
