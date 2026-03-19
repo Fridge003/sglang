@@ -1,7 +1,9 @@
+use crate::stream_output::serialize_and_enqueue_token_output;
 use crate::types::OutputMessage;
 use crate::zmq_sender::zmq_sender_loop;
 use crossbeam_channel::{bounded, Sender};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::thread;
 
 /// RustOutputSender sends serialized output batches to the detokenizer
@@ -72,6 +74,15 @@ impl RustOutputSender {
                     e
                 ))
             })
+    }
+
+    /// Phase 2: Serialize a batch token output dict directly in Rust and send.
+    ///
+    /// Takes a Python dict with the same structure as BatchTokenIDOutput,
+    /// serializes it to msgpack using rmp-serde (bypassing Python msgspec),
+    /// and enqueues for background ZMQ send.
+    fn serialize_and_send_token_output(&self, data: &Bound<'_, PyDict>) -> PyResult<()> {
+        serialize_and_enqueue_token_output(&self.tx, data)
     }
 
     /// Shut down the background sender thread.

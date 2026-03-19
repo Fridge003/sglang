@@ -886,6 +886,17 @@ class SchedulerOutputProcessorMixin:
         skip_req: Optional[Req] = None,
         is_idle_batch: bool = False,
     ):
+        from sglang.srt.managers.rust_output_processor import (
+            is_rust_output_enabled,
+            stream_output_generation_rust,
+        )
+
+        if is_rust_output_enabled():
+            stream_output_generation_rust(
+                self, reqs, return_logprob, skip_req, is_idle_batch
+            )
+            return
+
         rids = []
         http_worker_ipcs = []
         finished_reasons: List[BaseFinishReason] = []

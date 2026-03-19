@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod output_sender;
 mod serialization;
+mod stream_output;
 mod types;
 mod zmq_sender;
 

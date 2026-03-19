@@ -35,6 +35,12 @@ pub fn zmq_sender_loop(rx: Receiver<OutputMessage>, endpoint: String, sndbuf_siz
                     eprintln!("ZMQ send error (embedding batch): {}", e);
                 }
             }
+            Ok(OutputMessage::RawMessage(data)) => {
+                // Phase 2: message already has prefix, send as-is
+                if let Err(e) = socket.send(&data, 0) {
+                    eprintln!("ZMQ send error (raw message): {}", e);
+                }
+            }
             Ok(OutputMessage::Shutdown) | Err(_) => {
                 break;
             }

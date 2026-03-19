@@ -10,6 +10,8 @@ Usage:
     python3 test/registered/scheduler/test_rust_output_processor.py
 """
 
+import concurrent.futures
+import importlib
 import os
 import pickle
 import unittest
@@ -292,8 +294,6 @@ class TestFeatureGate(unittest.TestCase):
         # Save and clear the env var
         old_val = os.environ.pop("SGLANG_USE_RUST_OUTPUT_PROCESSOR", None)
         try:
-            import importlib
-
             import sglang.srt.managers.rust_output_processor as mod
 
             importlib.reload(mod)
@@ -355,8 +355,6 @@ class TestRustOutputProcessorE2E(CustomTestCase):
 
     def test_generate_multiple_requests(self):
         """Multiple concurrent requests to verify stability."""
-        import concurrent.futures
-
         prompts = [
             "What is 2+2?",
             "The sky is",
