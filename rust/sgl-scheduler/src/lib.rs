@@ -1,3 +1,12 @@
+//! Fast output processor for SGLang decode loop.
+//!
+//! Uses direct CPython C API (ffi) for the hot inner loop to bypass PyO3's
+//! safe wrapper overhead. Key techniques:
+//!   - `tp_dictoffset` for zero-cost `__dict__` access
+//!   - `PyDict_GetItem` with interned keys (borrowed ref, no refcount ops)
+//!   - `PyList_Append` / `PyList_GET_SIZE` instead of method dispatch
+//!   - Batch-level flags to skip per-req checks when unnecessary
+
 use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -90,10 +99,14 @@ unsafe fn dict_set(dict: *mut ffi::PyObject, key: *mut ffi::PyObject, val: *mut 
 }
 
 #[inline(always)]
-unsafe fn is_none(obj: *mut ffi::PyObject) -> bool { obj == ffi::Py_None() }
+unsafe fn is_none(p: *mut ffi::PyObject) -> bool { p == ffi::Py_None() }
 
 #[inline(always)]
-unsafe fn is_true(obj: *mut ffi::PyObject) -> bool { obj == ffi::Py_True() }
+unsafe fn is_true(p: *mut ffi::PyObject) -> bool { p == ffi::Py_True() }
+
+/// Check if a dict value is "set" (non-null AND not None).
+#[inline(always)]
+unsafe fn is_set(p: *mut ffi::PyObject) -> bool { !p.is_null() && p != ffi::Py_None() }
 
 // ============================================================================
 // Helpers
@@ -245,9 +258,9 @@ fn process_batch_result_decode_fast(
         // Skip finished/retracted — only when there are pre-finished reqs
         if check_skip {
             let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
-            if !fr.is_null() && !unsafe { is_none(fr) } { continue; }
+            if unsafe { is_set(fr) } { continue; }
             let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
-            if !ir.is_null() && unsafe { is_true(ir) } { continue; }
+            if unsafe { is_true(ir) } { continue; }
         }
 
         // Append token + get size
@@ -290,7 +303,7 @@ fn process_batch_result_decode_fast(
 
         // to_finish (abort) — 1 dict lookup, always checked
         let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
-        if !tf.is_null() && !unsafe { is_none(tf) } {
+        if unsafe { is_set(tf) } {
             result.newly_finished_indices.push(i);
             result.finish_types.push(1);
             result.finish_matched_token_ids.push(0);
@@ -301,7 +314,7 @@ fn process_batch_result_decode_fast(
         // grammar: only check if batch has any grammar reqs (saves 1 lookup per req)
         if has_grammar {
             let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
-            if !gr.is_null() && !unsafe { is_none(gr) } {
+            if unsafe { is_set(gr) } {
                 result.grammar_indices.push(i);
                 req_state[i] = 1;
                 continue;
@@ -365,11 +378,11 @@ fn process_batch_result_decode_fast(
         let rd = req_dicts[i];
 
         let fr_ptr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
-        let is_fin = !fr_ptr.is_null() && !unsafe { is_none(fr_ptr) };
+        let is_fin = unsafe { is_set(fr_ptr) };
 
         if is_fin {
             let fin_out = unsafe { dict_get(rd, k_finished_output.as_ptr()) };
-            if !fin_out.is_null() && !unsafe { is_none(fin_out) } {
+            if unsafe { is_set(fin_out) } {
                 if enable_request_time_stats_logging { result.log_time_stats_indices.push(i); }
                 continue;
             }
@@ -383,7 +396,7 @@ fn process_batch_result_decode_fast(
             let olen = output_ids_lens[i] as i32;
             if olen == 0 { continue; }
             let stream_ptr = unsafe { dict_get(rd, k_stream.as_ptr()) };
-            let is_stream = !stream_ptr.is_null() && unsafe { is_true(stream_ptr) };
+            let is_stream = unsafe { is_true(stream_ptr) };
             if is_stream {
                 let req = reqs.get_item(i)?;
                 let sp = req.getattr(intern!(py, "sampling_params"))?;
