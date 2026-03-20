@@ -172,7 +172,7 @@ NSA_CHOICES = [
     "trtllm",
 ]
 
-RADIX_EVICTION_POLICY_CHOICES = ["lru", "lfu", "slru"]
+RADIX_EVICTION_POLICY_CHOICES = ["lru", "lfu", "slru", "priority"]
 
 RL_ON_POLICY_TARGET_CHOICES = ["fsdp"]
 
