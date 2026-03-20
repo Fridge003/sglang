@@ -234,11 +234,12 @@ fn process_batch_result_decode_fast(
         }
     }
 
-    // Pre-extract req dicts, output_ids ptrs, and time_stats dicts in one pass.
-    // This avoids repeated dict_get in the hot loop.
+    // Pre-extract per-req pointers in one pass.
+    // Also handles skip checks here (free since we already have rd).
     let mut req_dicts: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
     let mut oids_ptrs: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
     let mut ts_dict_ptrs: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
+    let mut skipped: Vec<bool> = vec![false; n];
     let reqs_ptr = reqs.as_ptr();
 
     for i in 0..n {
@@ -248,8 +249,17 @@ fn process_batch_result_decode_fast(
         } else {
             unsafe { obj_dict(req_ptr) }
         };
-        if rd.is_null() { continue; }
+        if rd.is_null() { skipped[i] = true; continue; }
         req_dicts[i] = rd;
+
+        // Check skip conditions during extraction (free — we already have rd)
+        if check_skip {
+            let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
+            if unsafe { is_set(fr) } { skipped[i] = true; continue; }
+            let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
+            if unsafe { is_true(ir) } { skipped[i] = true; continue; }
+        }
+
         oids_ptrs[i] = unsafe { dict_get(rd, k_output_ids.as_ptr()) };
         let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
         if !ts_obj.is_null() {
@@ -265,24 +275,15 @@ fn process_batch_result_decode_fast(
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Main loop: append token + check finish
+    // Hot loop: append token + check finish
     // ========================================================================
-    // Per-req ops (common case, no pre-finished, no grammar, no abort):
-    //   1 PyList_Append + 1 PyList_GET_SIZE + 1 PyDict_SetItem = ~0.3us/req
+    // Per-req: 1 PyList_Append + 1 PyList_GET_SIZE + 1 PyDict_SetItem
+    //        + 1 PyDict_GetItem (to_finish) = 4 C API calls
     let mut output_ids_lens: Vec<i64> = vec![0; n];
     let mut req_state: Vec<u8> = vec![0; n]; // 0=skip, 1=active, 2=newly_finished
 
     for i in 0..n {
-        let rd = req_dicts[i];
-        if rd.is_null() { continue; }
-
-        // Skip finished/retracted
-        if check_skip {
-            let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
-            if unsafe { is_set(fr) } { continue; }
-            let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
-            if unsafe { is_true(ir) } { continue; }
-        }
+        if skipped[i] { continue; }
 
         // Append token (pre-cached output_ids pointer)
         let oids = oids_ptrs[i];
@@ -297,7 +298,7 @@ fn process_batch_result_decode_fast(
             unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
         }
 
-        // --- Finish checks ---
+        // Finish checks
         let next_token_id = next_token_ids[i];
 
         if olen >= shared.max_new_tokens {
@@ -315,8 +316,9 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish (abort) — only check when abort was requested (very rare)
+        // to_finish (abort) — 1 dict lookup
         if has_abort {
+            let rd = req_dicts[i];
             let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
             if unsafe { is_set(tf) } {
                 result.newly_finished_indices.push(i);
@@ -327,8 +329,9 @@ fn process_batch_result_decode_fast(
             }
         }
 
-        // grammar: only check if batch has any grammar reqs (saves 1 lookup per req)
+        // grammar
         if has_grammar {
+            let rd = req_dicts[i];
             let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
             if unsafe { is_set(gr) } {
                 result.grammar_indices.push(i);
