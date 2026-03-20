@@ -439,14 +439,7 @@ class SchedulerOutputProcessorMixin:
                 batch, result, next_token_ids, can_run_cuda_graph
             )
             _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            logger.info(
-                "use fast: %.1fms (py_preloop=%.1fus rust: setup=%.1fus loop1=%.1fus loop2=%.1fus)",
-                _elapsed_ms,
-                self._fast_prof_preloop,
-                self._fast_prof_setup,
-                self._fast_prof_loop1,
-                self._fast_prof_loop2,
-            )
+            logger.info("use fast: %.1fms", _elapsed_ms)
             return
 
         # Check finish condition
@@ -595,39 +588,9 @@ class SchedulerOutputProcessorMixin:
         overlap scheduling, no speculative decoding."""
         logits_output = result.logits_output
 
-        # Pre-Rust: append tokens, set timestamps, and extract flags in Python
-        # (native attribute access is faster than PyO3 FFI).
-        import time as _t
-
-        _ts = _t.perf_counter()
-        reqs = batch.reqs
-        n = len(reqs)
-        output_ids_lens = [0] * n
-        req_flags = [0] * n
-
-        _t_preloop_start = _t.perf_counter()
-        for i in range(n):
-            req = reqs[i]
-            if req.finished_reason is not None or req.is_retracted:
-                continue
-            oids = req.output_ids
-            oids.append(next_token_ids[i])
-            output_ids_lens[i] = len(oids)
-            req.time_stats.last_decode_finish_time = _ts
-            f = 0
-            if req.to_finish is not None:
-                f |= 1
-            if req.grammar is not None:
-                f |= 2
-            req_flags[i] = f
-        _t_preloop_end = _t.perf_counter()
-        self._fast_prof_preloop = (_t_preloop_end - _t_preloop_start) * 1e6
-
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
             next_token_ids=next_token_ids,
-            output_ids_lens=output_ids_lens,
-            req_flags=req_flags,
             is_multimodal_gen=self.model_config.is_multimodal_gen,
             stream_interval=self.stream_interval,
             default_force_stream_interval=DEFAULT_FORCE_STREAM_INTERVAL,
@@ -637,9 +600,6 @@ class SchedulerOutputProcessorMixin:
             ),
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
         )
-        self._fast_prof_setup = fast_result.prof_cache_setup_us
-        self._fast_prof_loop1 = fast_result.prof_loop1_us
-        self._fast_prof_loop2 = fast_result.prof_loop2_us
 
         # Python fallback: handle newly finished requests (from Rust fast-path)
         for idx in fast_result.newly_finished_indices:
