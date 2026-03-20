@@ -599,6 +599,8 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ),
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
+            has_grammar_any=True,
+            has_to_finish_any=True,
         )
 
         # Python fallback: handle newly finished requests (from Rust fast-path)
