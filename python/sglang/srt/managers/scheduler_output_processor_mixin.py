@@ -599,9 +599,13 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ),
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
-            has_grammar_any=True,
-            has_to_finish_any=True,
+            num_pre_finished=(
+                self._num_pre_finished if hasattr(self, "_num_pre_finished") else 1
+            ),
         )
+
+        # Track pre-finished count for the next decode step
+        self._num_pre_finished = len(fast_result.newly_finished_indices)
 
         # Python fallback: handle newly finished requests (from Rust fast-path)
         for idx in fast_result.newly_finished_indices:

@@ -148,7 +148,7 @@ impl BatchSharedState {
     reqs, next_token_ids,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
-    has_grammar_any, has_to_finish_any,
+    num_pre_finished,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
@@ -159,8 +159,7 @@ fn process_batch_result_decode_fast(
     default_force_stream_interval: i32,
     enable_request_time_stats_logging: bool,
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
-    has_grammar_any: bool,
-    has_to_finish_any: bool,
+    num_pre_finished: i32,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
@@ -168,7 +167,7 @@ fn process_batch_result_decode_fast(
     let t_start = Instant::now();
     let shared = BatchSharedState::from_first_active_req(py, reqs)?;
 
-    // Pre-intern attribute name strings
+    // Pre-intern all attribute names
     let k_finished_reason = intern!(py, "finished_reason");
     let k_is_retracted = intern!(py, "is_retracted");
     let k_output_ids = intern!(py, "output_ids");
@@ -184,67 +183,59 @@ fn process_batch_result_decode_fast(
     let batch_ts = time_mod.call_method0(intern!(py, "perf_counter"))?;
     let batch_ts_ptr = batch_ts.as_ptr();
 
-    // Pre-convert next_token_ids to Python ints
+    // Pre-convert all token ids to Python ints in bulk
     let mut token_py_objs: Vec<*mut ffi::PyObject> = Vec::with_capacity(n);
     for i in 0..n {
         token_py_objs.push(unsafe { ffi::PyLong_FromLongLong(next_token_ids[i]) });
     }
 
-    // Pre-extract req dicts and time_stats dicts (amortize obj_dict cost)
-    let mut req_dicts: Vec<*mut ffi::PyObject> = Vec::with_capacity(n);
-    let mut ts_dicts: Vec<*mut ffi::PyObject> = Vec::with_capacity(n);
-    for i in 0..n {
-        let req_ptr = unsafe { ffi::PyList_GET_ITEM(reqs.as_ptr(), i as ffi::Py_ssize_t) };
-        let rd = unsafe { obj_dict(req_ptr) };
-        req_dicts.push(rd);
-        if !rd.is_null() {
-            let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
-            if !ts_obj.is_null() {
-                ts_dicts.push(unsafe { obj_dict(ts_obj) });
-            } else {
-                ts_dicts.push(std::ptr::null_mut());
-            }
-        } else {
-            ts_dicts.push(std::ptr::null_mut());
-        }
-    }
+    // Whether we need to check finished_reason/is_retracted at all
+    let check_skip = num_pre_finished > 0;
 
     result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Main loop: append token + finish check
+    // Single-pass main loop: extract dict, append, timestamp, finish check
     // ========================================================================
     let mut output_ids_lens: Vec<i64> = vec![0; n];
+    let mut req_dicts: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
     let mut req_state: Vec<u8> = vec![0; n]; // 0=skip, 1=active, 2=newly_finished
+    let reqs_ptr = reqs.as_ptr();
 
     for i in 0..n {
-        let rd = req_dicts[i];
+        let req_ptr = unsafe { ffi::PyList_GET_ITEM(reqs_ptr, i as ffi::Py_ssize_t) };
+        let rd = unsafe { obj_dict(req_ptr) };
         if rd.is_null() { continue; }
+        req_dicts[i] = rd;
 
-        // Skip finished/retracted (2 dict lookups)
-        let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
-        if !fr.is_null() && !unsafe { is_none(fr) } { continue; }
-        let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
-        if !ir.is_null() && unsafe { is_true(ir) } { continue; }
+        // Skip finished/retracted — only when there are pre-finished reqs
+        if check_skip {
+            let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
+            if !fr.is_null() && !unsafe { is_none(fr) } { continue; }
+            let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
+            if !ir.is_null() && unsafe { is_true(ir) } { continue; }
+        }
 
-        // Append token + get size (1 dict lookup + 1 list append)
+        // Append token + get size
         let oids = unsafe { dict_get(rd, k_output_ids.as_ptr()) };
         if oids.is_null() { continue; }
         unsafe { ffi::PyList_Append(oids, token_py_objs[i]); }
         let olen = unsafe { ffi::PyList_GET_SIZE(oids) } as i64;
         output_ids_lens[i] = olen;
 
-        // Set timestamp (0 dict lookups — pre-cached ts_dicts)
-        let td = ts_dicts[i];
-        if !td.is_null() {
-            unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
+        // Set timestamp via cached path: req.__dict__["time_stats"].__dict__["last_decode_finish_time"]
+        let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
+        if !ts_obj.is_null() {
+            let td = unsafe { obj_dict(ts_obj) };
+            if !td.is_null() {
+                unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
+            }
         }
 
         // --- Finish checks ---
         let next_token_id = next_token_ids[i];
 
-        // Length (pure Rust, 0 lookups)
         if olen >= shared.max_new_tokens {
             result.newly_finished_indices.push(i);
             result.finish_types.push(2);
@@ -252,8 +243,6 @@ fn process_batch_result_decode_fast(
             req_state[i] = 2;
             continue;
         }
-
-        // EOS token (pure Rust, 0 lookups)
         if !shared.ignore_eos && shared.all_eos.contains(&next_token_id) {
             result.newly_finished_indices.push(i);
             result.finish_types.push(4);
@@ -262,26 +251,20 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish — only check if any req in batch has it (batch-level flag)
-        if has_to_finish_any {
-            let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
-            if !tf.is_null() && !unsafe { is_none(tf) } {
-                result.newly_finished_indices.push(i);
-                result.finish_types.push(1);
-                result.finish_matched_token_ids.push(0);
-                req_state[i] = 2;
-                continue;
-            }
+        // to_finish / grammar (direct dict lookup)
+        let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
+        if !tf.is_null() && !unsafe { is_none(tf) } {
+            result.newly_finished_indices.push(i);
+            result.finish_types.push(1);
+            result.finish_matched_token_ids.push(0);
+            req_state[i] = 2;
+            continue;
         }
-
-        // Grammar — only check if any req in batch has it
-        if has_grammar_any {
-            let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
-            if !gr.is_null() && !unsafe { is_none(gr) } {
-                result.grammar_indices.push(i);
-                req_state[i] = 1;
-                continue;
-            }
+        let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
+        if !gr.is_null() && !unsafe { is_none(gr) } {
+            result.grammar_indices.push(i);
+            req_state[i] = 1;
+            continue;
         }
 
         if shared.has_stop_strs {
@@ -334,12 +317,12 @@ fn process_batch_result_decode_fast(
     }
 
     // ========================================================================
-    // Stream output collection — ffi fast-path skip
+    // Stream output — ffi fast-skip, PyO3 only for output reqs
     // ========================================================================
     for i in 0..n {
         if req_state[i] == 0 { continue; }
-
         let rd = req_dicts[i];
+
         let fr_ptr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
         let is_fin = !fr_ptr.is_null() && !unsafe { is_none(fr_ptr) };
 
@@ -352,18 +335,14 @@ fn process_batch_result_decode_fast(
             unsafe { dict_set(rd, k_finished_output.as_ptr(), ffi::Py_True()); }
             let fl = unsafe { dict_get(rd, k_finished_len.as_ptr()) };
             if fl.is_null() || unsafe { is_none(fl) } {
-                let len_obj = unsafe { ffi::PyLong_FromLongLong(output_ids_lens[i]) };
-                unsafe { dict_set(rd, k_finished_len.as_ptr(), len_obj); }
-                unsafe { ffi::Py_DECREF(len_obj); }
+                let lo = unsafe { ffi::PyLong_FromLongLong(output_ids_lens[i]) };
+                unsafe { dict_set(rd, k_finished_len.as_ptr(), lo); ffi::Py_DECREF(lo); }
             }
-            // should_output = true
         } else {
             let olen = output_ids_lens[i] as i32;
             if olen == 0 { continue; }
-
             let stream_ptr = unsafe { dict_get(rd, k_stream.as_ptr()) };
             let is_stream = !stream_ptr.is_null() && unsafe { is_true(stream_ptr) };
-
             if is_stream {
                 let req = reqs.get_item(i)?;
                 let sp = req.getattr(intern!(py, "sampling_params"))?;
@@ -380,11 +359,10 @@ fn process_batch_result_decode_fast(
             }
         }
 
-        // Collect output (PyO3)
+        // Collect output (PyO3 — only reached by reqs that should_output)
         let req = reqs.get_item(i)?;
         let fr = req.getattr(intern!(py, "finished_reason"))?;
         let is_fin_safe = !fr.is_none();
-
         let sto: i64 = req.getattr(intern!(py, "send_token_offset"))?.extract()?;
         result.output_rids.push(req.getattr(intern!(py, "rid"))?.unbind());
         result.output_http_worker_ipcs.push(req.getattr(intern!(py, "http_worker_ipc"))?.unbind());
