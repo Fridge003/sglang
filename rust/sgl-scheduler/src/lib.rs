@@ -59,6 +59,7 @@ impl FastDecodeResult {
 // Direct CPython C API helpers
 // ============================================================================
 
+/// Get __dict__ from a Python object. Tries tp_dictoffset first (fast path).
 #[inline(always)]
 unsafe fn obj_dict(obj: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let tp = ffi::Py_TYPE(obj);
@@ -70,6 +71,12 @@ unsafe fn obj_dict(obj: *mut ffi::PyObject) -> *mut ffi::PyObject {
     let d = ffi::PyObject_GenericGetDict(obj, std::ptr::null_mut());
     if !d.is_null() { ffi::Py_DECREF(d); }
     d
+}
+
+/// Get __dict__ using a pre-cached tp_dictoffset (no type lookup).
+#[inline(always)]
+unsafe fn dict_at_offset(obj: *mut ffi::PyObject, offset: isize) -> *mut ffi::PyObject {
+    *((obj as *const u8).offset(offset) as *const *mut ffi::PyObject)
 }
 
 #[inline(always)]
@@ -192,11 +199,31 @@ fn process_batch_result_decode_fast(
     // Whether we need to check finished_reason/is_retracted at all
     let check_skip = num_pre_finished > 0;
 
+    // Cache tp_dictoffset for Req type and TimeStats type from first req
+    let mut req_dict_offset: isize = 0;
+    let mut ts_dict_offset: isize = 0;
+    if n > 0 {
+        let first_req = unsafe { ffi::PyList_GET_ITEM(reqs.as_ptr(), 0) };
+        let tp = unsafe { ffi::Py_TYPE(first_req) };
+        req_dict_offset = unsafe { (*tp).tp_dictoffset } as isize;
+
+        if req_dict_offset > 0 {
+            let rd = unsafe { dict_at_offset(first_req, req_dict_offset) };
+            if !rd.is_null() {
+                let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
+                if !ts_obj.is_null() {
+                    let ts_tp = unsafe { ffi::Py_TYPE(ts_obj) };
+                    ts_dict_offset = unsafe { (*ts_tp).tp_dictoffset } as isize;
+                }
+            }
+        }
+    }
+
     result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Single-pass main loop: extract dict, append, timestamp, finish check
+    // Single-pass main loop
     // ========================================================================
     let mut output_ids_lens: Vec<i64> = vec![0; n];
     let mut req_dicts: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
@@ -205,7 +232,12 @@ fn process_batch_result_decode_fast(
 
     for i in 0..n {
         let req_ptr = unsafe { ffi::PyList_GET_ITEM(reqs_ptr, i as ffi::Py_ssize_t) };
-        let rd = unsafe { obj_dict(req_ptr) };
+        // Use cached offset instead of obj_dict() which does type lookup each time
+        let rd = if req_dict_offset > 0 {
+            unsafe { dict_at_offset(req_ptr, req_dict_offset) }
+        } else {
+            unsafe { obj_dict(req_ptr) }
+        };
         if rd.is_null() { continue; }
         req_dicts[i] = rd;
 
@@ -224,10 +256,14 @@ fn process_batch_result_decode_fast(
         let olen = unsafe { ffi::PyList_GET_SIZE(oids) } as i64;
         output_ids_lens[i] = olen;
 
-        // Set timestamp via cached path: req.__dict__["time_stats"].__dict__["last_decode_finish_time"]
+        // Set timestamp using cached dict offsets
         let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
         if !ts_obj.is_null() {
-            let td = unsafe { obj_dict(ts_obj) };
+            let td = if ts_dict_offset > 0 {
+                unsafe { dict_at_offset(ts_obj, ts_dict_offset) }
+            } else {
+                unsafe { obj_dict(ts_obj) }
+            };
             if !td.is_null() {
                 unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
             }
