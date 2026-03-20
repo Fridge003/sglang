@@ -62,7 +62,9 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -261,7 +263,9 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -369,7 +373,9 @@ class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
             "--log-level",
             "debug",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,

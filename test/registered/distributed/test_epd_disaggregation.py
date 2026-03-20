@@ -101,7 +101,9 @@ class TestEPDDisaggregationOneEncoder(PDDisaggregationServerBase):
             "--port",
             cls.prefill_port,
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_server(
             cls.model,
             base_url=cls.prefill_url,
@@ -316,7 +318,9 @@ class TestEPDDisaggregationMultiEncoders(PDDisaggregationServerBase):
             "--port",
             cls.prefill_port,
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_server(
             cls.model,
             base_url=cls.prefill_url,
@@ -508,7 +512,9 @@ class TestEPDDisaggregationGrpcEncoderMMMU(PDDisaggregationServerBase):
             "--port",
             cls.prefill_port,
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         prefill_env = os.environ.copy()
         prefill_env["SGLANG_ENCODER_MM_RECEIVER_MODE"] = "grpc"
         cls.process_prefill = popen_launch_server(

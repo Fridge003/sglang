@@ -59,7 +59,9 @@ class TestDisaggregationPrefillPPAccuracy(PDDisaggregationServerBase):
             "--attention-backend",
             "aiter",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -149,7 +151,9 @@ class TestDisaggregationPrefillPPDynamicChunkAccuracy(PDDisaggregationServerBase
             "--attention-backend",
             "aiter",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -238,7 +242,9 @@ class TestDisaggregationDecodePPAccuracy(PDDisaggregationServerBase):
             "--attention-backend",
             "aiter",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,

@@ -83,7 +83,9 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "--hicache-ratio",
             "2",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,

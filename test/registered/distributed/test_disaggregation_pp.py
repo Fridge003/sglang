@@ -45,7 +45,9 @@ class TestDisaggregationPrefillPPAccuracy(PDDisaggregationServerBase):
             "2",
             "--disable-overlap-schedule",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -119,7 +121,9 @@ class TestDisaggregationPrefillPPDynamicChunkAccuracy(PDDisaggregationServerBase
             "--disable-overlap-schedule",
             "--enable-dynamic-chunking",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -192,7 +196,9 @@ class TestDisaggregationDecodePPAccuracy(PDDisaggregationServerBase):
             "2",
             "--disable-overlap-schedule",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,

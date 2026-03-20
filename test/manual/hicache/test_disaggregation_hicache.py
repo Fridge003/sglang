@@ -63,7 +63,9 @@ class DisaggregationHiCacheBase(PDDisaggregationServerBase):
             "--mem-fraction-static",
             "0.8",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        prefill_args += (
+            cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
+        )
         env = {
             **os.environ,
             "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR": cls.temp_dir,
