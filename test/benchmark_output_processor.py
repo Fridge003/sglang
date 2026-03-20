@@ -400,6 +400,7 @@ class MockScheduleBatch:
         self.spec_algorithm = MockSpecAlgorithm()
         self.is_spec_v2 = False
         self.decoding_reqs = None
+        self.has_grammar = any(r.grammar is not None for r in reqs)
         self.prefill_stats = None
         self.dp_cooperation_info = None
 

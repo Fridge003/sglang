@@ -155,7 +155,7 @@ impl BatchSharedState {
     reqs, next_token_ids,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
-    num_pre_finished,
+    num_pre_finished, has_grammar,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
@@ -167,6 +167,7 @@ fn process_batch_result_decode_fast(
     enable_request_time_stats_logging: bool,
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
     num_pre_finished: i32,
+    has_grammar: bool,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
@@ -287,7 +288,7 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish / grammar (direct dict lookup)
+        // to_finish (abort) — 1 dict lookup, always checked
         let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
         if !tf.is_null() && !unsafe { is_none(tf) } {
             result.newly_finished_indices.push(i);
@@ -296,11 +297,15 @@ fn process_batch_result_decode_fast(
             req_state[i] = 2;
             continue;
         }
-        let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
-        if !gr.is_null() && !unsafe { is_none(gr) } {
-            result.grammar_indices.push(i);
-            req_state[i] = 1;
-            continue;
+
+        // grammar: only check if batch has any grammar reqs (saves 1 lookup per req)
+        if has_grammar {
+            let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
+            if !gr.is_null() && !unsafe { is_none(gr) } {
+                result.grammar_indices.push(i);
+                req_state[i] = 1;
+                continue;
+            }
         }
 
         if shared.has_stop_strs {

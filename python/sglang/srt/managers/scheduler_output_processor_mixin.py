@@ -588,6 +588,10 @@ class SchedulerOutputProcessorMixin:
         overlap scheduling, no speculative decoding."""
         logits_output = result.logits_output
 
+        # Batch-level flags to skip unnecessary per-req checks.
+        # On first call, assume worst case (1 = check needed).
+        _npf = getattr(self, "_num_pre_finished", 1)
+
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
             next_token_ids=next_token_ids,
@@ -599,12 +603,11 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ),
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
-            num_pre_finished=(
-                self._num_pre_finished if hasattr(self, "_num_pre_finished") else 1
-            ),
+            num_pre_finished=_npf,
+            has_grammar=batch.has_grammar,
         )
 
-        # Track pre-finished count for the next decode step
+        # Track state for the next decode step
         self._num_pre_finished = len(fast_result.newly_finished_indices)
 
         # Python fallback: handle newly finished requests (from Rust fast-path)
