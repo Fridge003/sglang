@@ -168,7 +168,7 @@ impl BatchSharedState {
     reqs, next_token_ids,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
-    num_pre_finished, has_grammar,
+    num_pre_finished, has_grammar, has_abort,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
@@ -181,6 +181,7 @@ fn process_batch_result_decode_fast(
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
     num_pre_finished: i32,
     has_grammar: bool,
+    has_abort: bool,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
@@ -233,20 +234,15 @@ fn process_batch_result_decode_fast(
         }
     }
 
-    result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
-    let t_loop1 = Instant::now();
-
-    // ========================================================================
-    // Single-pass main loop
-    // ========================================================================
-    let mut output_ids_lens: Vec<i64> = vec![0; n];
+    // Pre-extract req dicts, output_ids ptrs, and time_stats dicts in one pass.
+    // This avoids repeated dict_get in the hot loop.
     let mut req_dicts: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
-    let mut req_state: Vec<u8> = vec![0; n]; // 0=skip, 1=active, 2=newly_finished
+    let mut oids_ptrs: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
+    let mut ts_dict_ptrs: Vec<*mut ffi::PyObject> = vec![std::ptr::null_mut(); n];
     let reqs_ptr = reqs.as_ptr();
 
     for i in 0..n {
         let req_ptr = unsafe { ffi::PyList_GET_ITEM(reqs_ptr, i as ffi::Py_ssize_t) };
-        // Use cached offset instead of obj_dict() which does type lookup each time
         let rd = if req_dict_offset > 0 {
             unsafe { dict_at_offset(req_ptr, req_dict_offset) }
         } else {
@@ -254,8 +250,33 @@ fn process_batch_result_decode_fast(
         };
         if rd.is_null() { continue; }
         req_dicts[i] = rd;
+        oids_ptrs[i] = unsafe { dict_get(rd, k_output_ids.as_ptr()) };
+        let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
+        if !ts_obj.is_null() {
+            ts_dict_ptrs[i] = if ts_dict_offset > 0 {
+                unsafe { dict_at_offset(ts_obj, ts_dict_offset) }
+            } else {
+                unsafe { obj_dict(ts_obj) }
+            };
+        }
+    }
 
-        // Skip finished/retracted — only when there are pre-finished reqs
+    result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
+    let t_loop1 = Instant::now();
+
+    // ========================================================================
+    // Main loop: append token + check finish
+    // ========================================================================
+    // Per-req ops (common case, no pre-finished, no grammar, no abort):
+    //   1 PyList_Append + 1 PyList_GET_SIZE + 1 PyDict_SetItem = ~0.3us/req
+    let mut output_ids_lens: Vec<i64> = vec![0; n];
+    let mut req_state: Vec<u8> = vec![0; n]; // 0=skip, 1=active, 2=newly_finished
+
+    for i in 0..n {
+        let rd = req_dicts[i];
+        if rd.is_null() { continue; }
+
+        // Skip finished/retracted
         if check_skip {
             let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
             if unsafe { is_set(fr) } { continue; }
@@ -263,24 +284,17 @@ fn process_batch_result_decode_fast(
             if unsafe { is_true(ir) } { continue; }
         }
 
-        // Append token + get size
-        let oids = unsafe { dict_get(rd, k_output_ids.as_ptr()) };
+        // Append token (pre-cached output_ids pointer)
+        let oids = oids_ptrs[i];
         if oids.is_null() { continue; }
         unsafe { ffi::PyList_Append(oids, token_py_objs[i]); }
         let olen = unsafe { ffi::PyList_GET_SIZE(oids) } as i64;
         output_ids_lens[i] = olen;
 
-        // Set timestamp using cached dict offsets
-        let ts_obj = unsafe { dict_get(rd, k_time_stats.as_ptr()) };
-        if !ts_obj.is_null() {
-            let td = if ts_dict_offset > 0 {
-                unsafe { dict_at_offset(ts_obj, ts_dict_offset) }
-            } else {
-                unsafe { obj_dict(ts_obj) }
-            };
-            if !td.is_null() {
-                unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
-            }
+        // Set timestamp (pre-cached time_stats.__dict__ pointer)
+        let td = ts_dict_ptrs[i];
+        if !td.is_null() {
+            unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
         }
 
         // --- Finish checks ---
@@ -301,14 +315,16 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish (abort) — 1 dict lookup, always checked
-        let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
-        if unsafe { is_set(tf) } {
-            result.newly_finished_indices.push(i);
-            result.finish_types.push(1);
-            result.finish_matched_token_ids.push(0);
-            req_state[i] = 2;
-            continue;
+        // to_finish (abort) — only check when abort was requested (very rare)
+        if has_abort {
+            let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
+            if unsafe { is_set(tf) } {
+                result.newly_finished_indices.push(i);
+                result.finish_types.push(1);
+                result.finish_matched_token_ids.push(0);
+                req_state[i] = 2;
+                continue;
+            }
         }
 
         // grammar: only check if batch has any grammar reqs (saves 1 lookup per req)
