@@ -423,11 +423,7 @@ class SchedulerOutputProcessorMixin:
         # NOTE: in any case, we should check finish here
         # if finished, also clean up committed kv cache and over-allocated kv cache here
 
-        import time as _time
-
-        _t0 = _time.perf_counter()
-
-        # Fast path: use Rust-accelerated decode loop when available and applicable
+        # Fast path: Rust-accelerated decode loop (overlap, non-speculative)
         if (
             _has_fast_output_processor
             and envs.SGLANG_USE_FAST_OUTPUT_PROCESSOR.get()
@@ -435,11 +431,13 @@ class SchedulerOutputProcessorMixin:
             and batch.spec_algorithm.is_none()
             and not batch.is_spec_v2
         ):
+            import time as _time
+
+            _t0 = _time.perf_counter()
             self._process_batch_result_decode_fast(
                 batch, result, next_token_ids, can_run_cuda_graph
             )
-            _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            logger.info("use fast: %.1fms", _elapsed_ms)
+            logger.info("use fast: %.1fms", (_time.perf_counter() - _t0) * 1000)
             return
 
         # Check finish condition
@@ -551,8 +549,6 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.stream_output(batch.reqs, batch.return_logprob)
-        _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-        logger.info("use normal: %.1fms", _elapsed_ms)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
@@ -588,12 +584,6 @@ class SchedulerOutputProcessorMixin:
         overlap scheduling, no speculative decoding."""
         logits_output = result.logits_output
 
-        # Batch-level flags to skip unnecessary per-req dict lookups in Rust.
-        _npf = getattr(self, "_num_pre_finished", 1)
-        # has_abort: for now always True (conservative). When wired to
-        # abort_request, set to True only when abort is pending.
-        _has_abort = True
-
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
             next_token_ids=next_token_ids,
@@ -605,11 +595,9 @@ class SchedulerOutputProcessorMixin:
                 and self.server_args.enable_request_time_stats_logging
             ),
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
-            num_pre_finished=_npf,
+            num_pre_finished=getattr(self, "_num_pre_finished", 1),
             has_grammar=batch.has_grammar,
-            has_abort=_has_abort,
         )
-        self._has_pending_abort = False
 
         # Track state for the next decode step
         self._num_pre_finished = len(fast_result.newly_finished_indices)

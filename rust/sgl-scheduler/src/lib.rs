@@ -46,9 +46,10 @@ struct FastDecodeResult {
     output_time_stats: Vec<Py<PyAny>>,
     log_time_stats_indices: Vec<usize>,
 
-    prof_cache_setup_us: f64,
-    prof_loop1_us: f64,
-    prof_loop2_us: f64,
+    // Profiling (microseconds) — set when SGLANG_LOG_FAST_PROCESSOR_PROFILE is enabled
+    prof_setup_us: f64,
+    prof_main_loop_us: f64,
+    prof_output_us: f64,
 }
 
 #[pymethods]
@@ -168,7 +169,7 @@ impl BatchSharedState {
     reqs, next_token_ids,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
-    num_pre_finished, has_grammar, has_abort,
+    num_pre_finished, has_grammar,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
@@ -181,7 +182,6 @@ fn process_batch_result_decode_fast(
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
     num_pre_finished: i32,
     has_grammar: bool,
-    has_abort: bool,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
@@ -271,7 +271,7 @@ fn process_batch_result_decode_fast(
         }
     }
 
-    result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
+    result.prof_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
     let t_loop1 = Instant::now();
 
     // ========================================================================
@@ -316,22 +316,18 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish (abort) — 1 dict lookup
-        if has_abort {
-            let rd = req_dicts[i];
-            let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
-            if unsafe { is_set(tf) } {
-                result.newly_finished_indices.push(i);
-                result.finish_types.push(1);
-                result.finish_matched_token_ids.push(0);
-                req_state[i] = 2;
-                continue;
-            }
+        // to_finish (abort) + grammar — use cached req_dicts
+        let rd = req_dicts[i];
+        let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
+        if unsafe { is_set(tf) } {
+            result.newly_finished_indices.push(i);
+            result.finish_types.push(1);
+            result.finish_matched_token_ids.push(0);
+            req_state[i] = 2;
+            continue;
         }
 
-        // grammar
         if has_grammar {
-            let rd = req_dicts[i];
             let gr = unsafe { dict_get(rd, k_grammar.as_ptr()) };
             if unsafe { is_set(gr) } {
                 result.grammar_indices.push(i);
@@ -346,7 +342,7 @@ fn process_batch_result_decode_fast(
         req_state[i] = 1;
     }
 
-    result.prof_loop1_us = t_loop1.elapsed().as_secs_f64() * 1e6;
+    result.prof_main_loop_us = t_loop1.elapsed().as_secs_f64() * 1e6;
     let t_loop2 = Instant::now();
 
     // ========================================================================
@@ -480,7 +476,7 @@ fn process_batch_result_decode_fast(
 
     for obj in &token_py_objs { unsafe { ffi::Py_DECREF(*obj); } }
 
-    result.prof_loop2_us = t_loop2.elapsed().as_secs_f64() * 1e6;
+    result.prof_output_us = t_loop2.elapsed().as_secs_f64() * 1e6;
     Ok(result)
 }
 
