@@ -980,6 +980,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 routed_dp_rank=obj.routed_dp_rank,
                 disagg_prefill_dp_rank=obj.disagg_prefill_dp_rank,
                 priority=obj.priority,
+                retention_seconds=obj.retention_seconds,
                 extra_key=obj.extra_key,
                 routing_key=obj.routing_key,
                 need_wait_for_mm_inputs=obj.need_wait_for_mm_inputs,

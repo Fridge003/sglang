@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Tuple, Union
 
@@ -39,11 +40,21 @@ class FILOStrategy(EvictionStrategy):
 
 
 class PriorityStrategy(EvictionStrategy):
-    """Priority-aware eviction: lower priority values evicted first, then LRU within same priority."""
+    """Priority-aware eviction with optional time-based decay.
+
+    If a node has retention_duration > 0 and its priority > 0, the effective
+    priority decays to 0 once elapsed time since last access exceeds
+    retention_duration.  This gives soft retention semantics: active
+    conversations auto-extend via last_access_time refresh on cache hits.
+    """
 
     def get_priority(self, node: "TreeNode") -> Tuple[int, float]:
-        # Return (priority, last_access_time) so lower priority nodes are evicted first
-        return (node.priority, node.last_access_time)
+        priority = node.priority
+        if node.retention_duration > 0 and priority > 0:
+            elapsed = time.monotonic() - node.last_access_time
+            if elapsed >= node.retention_duration:
+                priority = 0
+        return (priority, node.last_access_time)
 
 
 class SLRUStrategy(EvictionStrategy):
