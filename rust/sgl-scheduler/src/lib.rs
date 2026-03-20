@@ -11,18 +11,14 @@ use std::time::Instant;
 #[pyclass(get_all)]
 #[derive(Default)]
 struct FastDecodeResult {
-    /// Indices of reqs that finished, with their finish type and matched token.
-    /// finish_type: 1=to_finish, 2=length, 4=matched_token, 5=vocab_boundary
+    /// finish_type: 1=to_finish, 2=length, 4=matched_token
     newly_finished_indices: Vec<usize>,
     finish_types: Vec<i32>,
     finish_matched_token_ids: Vec<i64>,
-
-    /// Indices of reqs with grammar (need Python accept_token)
     grammar_indices: Vec<usize>,
-    /// Indices of reqs needing str-based finish check
     str_stop_check_indices: Vec<usize>,
 
-    // Stream output fields for BatchTokenIDOutput
+    // Stream output fields
     output_rids: Vec<Py<PyAny>>,
     output_http_worker_ipcs: Vec<Py<PyAny>>,
     output_finished_reasons: Vec<Py<PyAny>>,
@@ -66,17 +62,11 @@ impl FastDecodeResult {
 
 fn py_set_to_hashset(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<i64>> {
     let mut hs = HashSet::new();
-    if obj.is_none() {
-        return Ok(hs);
-    }
+    if obj.is_none() { return Ok(hs); }
     if let Ok(set) = obj.downcast::<PySet>() {
-        for item in set.iter() {
-            hs.insert(item.extract::<i64>()?);
-        }
+        for item in set.iter() { hs.insert(item.extract::<i64>()?); }
     } else {
-        for item in obj.try_iter()? {
-            hs.insert(item?.extract::<i64>()?);
-        }
+        for item in obj.try_iter()? { hs.insert(item?.extract::<i64>()?); }
     }
     Ok(hs)
 }
@@ -91,50 +81,32 @@ struct BatchSharedState {
 
 impl BatchSharedState {
     fn from_first_active_req(
-        py: Python<'_>,
-        reqs: &Bound<'_, PyList>,
-        output_ids_lens: &[i64],
+        py: Python<'_>, reqs: &Bound<'_, PyList>, output_ids_lens: &[i64],
     ) -> PyResult<Self> {
         for i in 0..reqs.len() {
-            if output_ids_lens[i] == 0 {
-                continue; // skipped (finished/retracted)
-            }
+            if output_ids_lens[i] == 0 { continue; }
             let req = reqs.get_item(i)?;
-
-            // Tokenizer EOS
             let mut all_eos = HashSet::new();
             let tokenizer = req.getattr(intern!(py, "tokenizer"))?;
             if !tokenizer.is_none() {
                 all_eos.insert(tokenizer.getattr(intern!(py, "eos_token_id"))?.extract()?);
                 let additional = tokenizer.getattr(intern!(py, "additional_stop_token_ids"))?;
                 if !additional.is_none() {
-                    for id in &py_set_to_hashset(&additional)? {
-                        all_eos.insert(*id);
-                    }
+                    for id in &py_set_to_hashset(&additional)? { all_eos.insert(*id); }
                 }
             }
-
-            // Sampling params
             let sp = req.getattr(intern!(py, "sampling_params"))?;
             let max_new_tokens: i64 = sp.getattr(intern!(py, "max_new_tokens"))?.extract()?;
             let ignore_eos: bool = sp.getattr(intern!(py, "ignore_eos"))?.extract()?;
             let stop_ids = sp.getattr(intern!(py, "stop_token_ids"))?;
             if !stop_ids.is_none() {
-                for id in &py_set_to_hashset(&stop_ids)? {
-                    all_eos.insert(*id);
-                }
+                for id in &py_set_to_hashset(&stop_ids)? { all_eos.insert(*id); }
             }
             let has_stop_strs = sp.getattr(intern!(py, "stop_strs"))?.len()? > 0
                 || sp.getattr(intern!(py, "stop_regex_strs"))?.len()? > 0;
-
             return Ok(Self { all_eos, max_new_tokens, ignore_eos, has_stop_strs });
         }
-        Ok(Self {
-            all_eos: HashSet::new(),
-            max_new_tokens: i64::MAX,
-            ignore_eos: false,
-            has_stop_strs: false,
-        })
+        Ok(Self { all_eos: HashSet::new(), max_new_tokens: i64::MAX, ignore_eos: false, has_stop_strs: false })
     }
 }
 
@@ -142,17 +114,6 @@ impl BatchSharedState {
 // Main function
 // ============================================================================
 
-/// Rust-accelerated decode output processing.
-///
-/// Python pre-loop has already:
-///   - Appended next_token_ids[i] to each active req.output_ids
-///   - Set req.time_stats.last_decode_finish_time
-///   - Built output_ids_lens (0 for skipped reqs)
-///
-/// This function handles:
-///   1. Finish checking (length, EOS, to_finish, grammar detection)
-///   2. Applying finish reasons to Python objects
-///   3. Stream output data collection
 #[pyfunction]
 #[pyo3(signature = (
     reqs, next_token_ids, output_ids_lens, req_flags,
@@ -182,15 +143,11 @@ fn process_batch_result_decode_fast(
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Finish checking — pure Rust, zero Python calls for common case
+    // Finish checking — pure Rust for common case, zero Python calls
     // ========================================================================
-    // Token append, timestamp, and flag extraction done in Python pre-loop.
-    // req_flags: 0=normal, 1=has_to_finish, 2=has_grammar
     for i in 0..n {
         let olen = output_ids_lens[i];
-        if olen == 0 {
-            continue; // skipped (finished/retracted)
-        }
+        if olen == 0 { continue; }
         let next_token_id = next_token_ids[i];
         let flags = req_flags[i];
 
@@ -201,7 +158,6 @@ fn process_batch_result_decode_fast(
             result.finish_matched_token_ids.push(0);
             continue;
         }
-
         // EOS token check (pure Rust)
         if !shared.ignore_eos && shared.all_eos.contains(&next_token_id) {
             result.newly_finished_indices.push(i);
@@ -209,21 +165,18 @@ fn process_batch_result_decode_fast(
             result.finish_matched_token_ids.push(next_token_id);
             continue;
         }
-
-        // to_finish (flag from Python, no getattr needed)
+        // to_finish (flag from Python)
         if flags & 1 != 0 {
             result.newly_finished_indices.push(i);
             result.finish_types.push(1);
             result.finish_matched_token_ids.push(0);
             continue;
         }
-
-        // Grammar (flag from Python, no getattr needed)
+        // Grammar (flag from Python)
         if flags & 2 != 0 {
             result.grammar_indices.push(i);
             continue;
         }
-
         if shared.has_stop_strs {
             result.str_stop_check_indices.push(i);
         }
@@ -298,8 +251,7 @@ fn process_batch_result_decode_fast(
             true
         } else {
             let olen = output_ids_lens[i] as i32;
-            if olen == 0 { continue; } // skipped
-
+            if olen == 0 { continue; }
             let stream: bool = req.getattr(intern!(py, "stream"))?.extract()?;
             if stream {
                 let sp = req.getattr(intern!(py, "sampling_params"))?;

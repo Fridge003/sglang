@@ -440,8 +440,9 @@ class SchedulerOutputProcessorMixin:
             )
             _elapsed_ms = (_time.perf_counter() - _t0) * 1000
             logger.info(
-                "use fast: %.1fms (rust: setup=%.1fus loop1=%.1fus loop2=%.1fus)",
+                "use fast: %.1fms (py_preloop=%.1fus rust: setup=%.1fus loop1=%.1fus loop2=%.1fus)",
                 _elapsed_ms,
+                self._fast_prof_preloop,
                 self._fast_prof_setup,
                 self._fast_prof_loop1,
                 self._fast_prof_loop2,
@@ -603,6 +604,8 @@ class SchedulerOutputProcessorMixin:
         n = len(reqs)
         output_ids_lens = [0] * n
         req_flags = [0] * n
+
+        _t_preloop_start = _t.perf_counter()
         for i in range(n):
             req = reqs[i]
             if req.finished_reason is not None or req.is_retracted:
@@ -617,6 +620,8 @@ class SchedulerOutputProcessorMixin:
             if req.grammar is not None:
                 f |= 2
             req_flags[i] = f
+        _t_preloop_end = _t.perf_counter()
+        self._fast_prof_preloop = (_t_preloop_end - _t_preloop_start) * 1e6
 
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
