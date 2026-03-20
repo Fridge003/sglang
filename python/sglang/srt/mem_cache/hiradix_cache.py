@@ -8,11 +8,10 @@ import os
 import threading
 import time
 from queue import Empty
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from sglang.srt.environ import envs
 from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefParams,
@@ -26,6 +25,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
+from sglang.srt.mem_cache.evict_policy import PriorityStrategy
 from sglang.srt.mem_cache.memory_pool import (
     MHATokenToKVPool,
     MLATokenToKVPool,
@@ -36,7 +36,6 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MLATokenToKVPoolHost,
     NSATokenToKVPoolHost,
 )
-from sglang.srt.mem_cache.evict_policy import PriorityStrategy
 from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
     RadixKey,
