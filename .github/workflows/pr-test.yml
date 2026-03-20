@@ -913,7 +913,7 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 20
         run: |
-          source /etc/profile.d/sglang-ci.sh
+          [ -f /etc/profile.d/sglang-ci.sh ] && source /etc/profile.d/sglang-ci.sh || true
           CUSTOM_BUILD_SGL_KERNEL=${{needs.check-changes.outputs.sgl_kernel}} bash scripts/ci/cuda/ci_install_dependency.sh
           git clone https://github.com/merrymercy/human-eval.git
           cd human-eval
@@ -922,7 +922,7 @@ jobs:
       - name: Run test
         timeout-minutes: 30
         run: |
-          source /etc/profile.d/sglang-ci.sh
+          [ -f /etc/profile.d/sglang-ci.sh ] && source /etc/profile.d/sglang-ci.sh || true
           cd test/
           CONTINUE_ON_ERROR_FLAG=""
           if [[ "${{ needs.check-changes.outputs.continue_on_error }}" == "true" ]]; then

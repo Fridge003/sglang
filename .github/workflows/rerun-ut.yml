@@ -59,9 +59,7 @@ jobs:
       - name: Install dependencies
         timeout-minutes: 20
         run: |
-          if [[ "${{ inputs.runner_label }}" == "1-gpu-5090" ]]; then
-            source /etc/profile.d/sglang-ci.sh
-          fi
+          [ -f /etc/profile.d/sglang-ci.sh ] && source /etc/profile.d/sglang-ci.sh || true
           if [[ "${{ inputs.use_deepep }}" == "true" ]]; then
             bash scripts/ci/cuda/ci_install_deepep.sh
           else
@@ -71,9 +69,7 @@ jobs:
       - name: Run test
         timeout-minutes: 60
         run: |
-          if [[ "${{ inputs.runner_label }}" == "1-gpu-5090" ]]; then
-            source /etc/profile.d/sglang-ci.sh
-          fi
+          [ -f /etc/profile.d/sglang-ci.sh ] && source /etc/profile.d/sglang-ci.sh || true
           cd test/
           python3 ${{ inputs.test_command }}
 
