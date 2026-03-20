@@ -599,23 +599,24 @@ class SchedulerOutputProcessorMixin:
         import time as _t
 
         _ts = _t.perf_counter()
-        output_ids_lens = []
-        # flags: 0=normal, 1=has_to_finish, 2=has_grammar
-        req_flags = []
-        for req, next_token_id in zip(batch.reqs, next_token_ids):
+        reqs = batch.reqs
+        n = len(reqs)
+        output_ids_lens = [0] * n
+        req_flags = [0] * n
+        for i in range(n):
+            req = reqs[i]
             if req.finished_reason is not None or req.is_retracted:
-                output_ids_lens.append(0)
-                req_flags.append(0)
                 continue
-            req.output_ids.append(next_token_id)
-            output_ids_lens.append(len(req.output_ids))
+            oids = req.output_ids
+            oids.append(next_token_ids[i])
+            output_ids_lens[i] = len(oids)
             req.time_stats.last_decode_finish_time = _ts
             f = 0
             if req.to_finish is not None:
                 f |= 1
             if req.grammar is not None:
                 f |= 2
-            req_flags.append(f)
+            req_flags[i] = f
 
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
