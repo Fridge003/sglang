@@ -203,6 +203,9 @@ class GenerateReqInput(BaseReq):
     # Priority for the request
     priority: Optional[int] = None
 
+    # Retention duration in seconds for priority decay (0 or None = permanent)
+    retention_seconds: Optional[float] = None
+
     # Extra key for classifying the request (e.g. cache_salt)
     extra_key: Optional[Union[List[str], str]] = None
 
@@ -716,6 +719,9 @@ class TokenizedGenerateReqInput(BaseReq):
     # Priority for the request
     priority: Optional[int] = None
 
+    # Retention duration in seconds for priority decay (0 or None = permanent)
+    retention_seconds: Optional[float] = None
+
     # Extra key for classifying the request (e.g. cache_salt)
     extra_key: Optional[str] = None
 
@@ -1225,21 +1231,6 @@ class DetachHiCacheStorageReqInput(BaseReq):
 @dataclass
 class DetachHiCacheStorageReqOutput(BaseReq):
     success: bool
-    message: str = ""
-
-
-@dataclass
-class PinPrefixReqInput(BaseReq):
-    """Pin a prefix by token_ids to resist eviction."""
-
-    token_ids: List[int] = field(default_factory=list)
-    ttl_seconds: int = 300  # TTL in seconds, default 5 minutes
-
-
-@dataclass
-class PinPrefixReqOutput(BaseReq):
-    success: bool
-    nodes_pinned: int = 0
     message: str = ""
 
 

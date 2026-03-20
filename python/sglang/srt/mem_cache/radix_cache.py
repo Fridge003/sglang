@@ -128,10 +128,6 @@ class TreeNode:
         self.key: RadixKey = None
         self.value: Optional[torch.Tensor] = None
         self.lock_ref = 0
-        self.pin_expiry: float = (
-            0.0  # absolute expiry time (time.monotonic()), 0 = not pinned
-        )
-        self.pin_ttl: int = 0  # original TTL in seconds, for refresh-on-hit
         self.last_access_time = time.monotonic()
         self.creation_time = time.monotonic()
 
@@ -145,6 +141,8 @@ class TreeNode:
         self.hash_value: Optional[List[str]] = None
         # priority for priority-aware eviction
         self.priority = priority
+        # retention duration in seconds for time-decayed priority (0 = permanent)
+        self.retention_duration: float = 0.0
 
         self.id = TreeNode.counter if id is None else id
         TreeNode.counter += 1
@@ -455,13 +453,16 @@ class RadixCache(BasePrefixCache):
         value = params.value
         priority = params.priority
         chunked = params.chunked
+        retention_duration = params.retention_duration
 
         if value is None:
             value = torch.tensor(key.token_ids, dtype=torch.int64)
 
         key, value = self.maybe_bigram_convert(key, value)
 
-        prefix_len = self._insert_helper(self.root_node, key, value, priority, chunked)
+        prefix_len = self._insert_helper(
+            self.root_node, key, value, priority, chunked, retention_duration
+        )
         return InsertResult(prefix_len=prefix_len)
 
     def cache_finished_req(self, req: Req, is_insert: bool = True):
@@ -492,8 +493,14 @@ class RadixCache(BasePrefixCache):
         # Radix Cache takes one ref in memory pool
         if is_insert:
             priority = getattr(req, "priority", 0) or 0
+            retention_seconds = getattr(req, "retention_seconds", 0.0) or 0.0
             result = self.insert(
-                InsertParams(key=radix_key, value=values, priority=priority)
+                InsertParams(
+                    key=radix_key,
+                    value=values,
+                    priority=priority,
+                    retention_duration=retention_seconds,
+                )
             )
             new_prefix_len = result.prefix_len
             # Free the duplicates that were already in the tree
@@ -534,6 +541,7 @@ class RadixCache(BasePrefixCache):
                 value=values,
                 chunked=chunked,
                 priority=getattr(req, "priority", 0) or 0,
+                retention_duration=getattr(req, "retention_seconds", 0.0) or 0.0,
             )
         )
         new_prefix_len = result.prefix_len
@@ -698,6 +706,7 @@ class RadixCache(BasePrefixCache):
         # new_node -> child
         # New node inherits child's priority (represents shared prefix)
         new_node = TreeNode(priority=child.priority)
+        new_node.retention_duration = child.retention_duration
         new_node.hit_count = child.hit_count
         new_node.children = {self.get_child_key_fn(key[split_len:]): child}
         new_node.parent = child.parent
@@ -731,6 +740,7 @@ class RadixCache(BasePrefixCache):
         value,
         priority: int = 0,
         chunked: bool = False,
+        retention_duration: float = 0.0,
     ):
         # Convert None priority to 0
         if priority is None:
@@ -739,6 +749,7 @@ class RadixCache(BasePrefixCache):
         node.last_access_time = access_time
         # Update priority along the path (take max to propagate higher priority)
         node.priority = max(node.priority, priority)
+        node.retention_duration = max(node.retention_duration, retention_duration)
         if len(key) == 0:
             return 0
 
@@ -756,16 +767,23 @@ class RadixCache(BasePrefixCache):
             if prefix_len < len(node.key):
                 new_node = self._split_node(node.key, node, prefix_len)
                 new_node.priority = max(new_node.priority, priority)
+                new_node.retention_duration = max(
+                    new_node.retention_duration, retention_duration
+                )
                 self._inc_hit_count(new_node, chunked)
                 node = new_node
             else:
                 node.priority = max(node.priority, priority)
+                node.retention_duration = max(
+                    node.retention_duration, retention_duration
+                )
                 self._inc_hit_count(node, chunked)
             if len(key):
                 child_key = self.get_child_key_fn(key)
 
         if len(key):
             new_node = TreeNode(priority=priority)
+            new_node.retention_duration = retention_duration
             new_node.parent = node
             new_node.key = key
             new_node.value = value.clone()
@@ -865,6 +883,7 @@ class RadixCache(BasePrefixCache):
                         block_size=len(page_tokens),
                         lora_id=None,
                         medium=MEDIUM_GPU,
+                        priority=node.priority,
                     )
                 )
 
