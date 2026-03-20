@@ -93,20 +93,7 @@ def _get_nvfp4_cuda_arch_list() -> str:
         )
     # NVFP4 kernels use architecture-family-specific instructions and must be
     # compiled for `sm_*a` targets (e.g. sm_100a), not plain sm_100.
-    archs = [f"{major}.{minor}a"]
-    cuda_major, _cuda_minor = _parse_cuda_version()
-    if cuda_major >= 13 and "10.3a" not in archs:
-        # Match sgl-kernel AOT fatbin behavior on CUDA 13+ for Blackwell.
-        archs.append("10.3a")
-    # Preserve order while de-duplicating.
-    seen = set()
-    ordered_archs: list[str] = []
-    for arch in archs:
-        if arch in seen:
-            continue
-        seen.add(arch)
-        ordered_archs.append(arch)
-    return " ".join(ordered_archs)
+    return f"{major}.{minor}a"
 
 
 @contextmanager
