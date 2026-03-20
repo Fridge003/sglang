@@ -81,10 +81,8 @@ fn py_set_to_hashset(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<i64>> {
     Ok(hs)
 }
 
-/// Read shared state from the first active req's tokenizer and sampling_params.
-/// All reqs in a batch share the same tokenizer and typically the same sampling_params.
+/// Batch-wide shared state cached from the first active req.
 struct BatchSharedState {
-    /// Combined set of all EOS-like token IDs (tokenizer + stop_token_ids)
     all_eos: HashSet<i64>,
     max_new_tokens: i64,
     ignore_eos: bool,
@@ -92,20 +90,22 @@ struct BatchSharedState {
 }
 
 impl BatchSharedState {
-    fn from_first_active_req(py: Python<'_>, reqs: &Bound<'_, PyList>, enable_overlap: bool) -> PyResult<Self> {
+    fn from_first_active_req(
+        py: Python<'_>,
+        reqs: &Bound<'_, PyList>,
+        output_ids_lens: &[i64],
+    ) -> PyResult<Self> {
         for i in 0..reqs.len() {
-            let req = reqs.get_item(i)?;
-            if enable_overlap {
-                let fr = req.getattr(intern!(py, "finished_reason"))?;
-                if !fr.is_none() { continue; }
+            if output_ids_lens[i] == 0 {
+                continue; // skipped (finished/retracted)
             }
+            let req = reqs.get_item(i)?;
 
             // Tokenizer EOS
             let mut all_eos = HashSet::new();
             let tokenizer = req.getattr(intern!(py, "tokenizer"))?;
             if !tokenizer.is_none() {
-                let eos_id: i64 = tokenizer.getattr(intern!(py, "eos_token_id"))?.extract()?;
-                all_eos.insert(eos_id);
+                all_eos.insert(tokenizer.getattr(intern!(py, "eos_token_id"))?.extract()?);
                 let additional = tokenizer.getattr(intern!(py, "additional_stop_token_ids"))?;
                 if !additional.is_none() {
                     for id in &py_set_to_hashset(&additional)? {
@@ -118,14 +118,12 @@ impl BatchSharedState {
             let sp = req.getattr(intern!(py, "sampling_params"))?;
             let max_new_tokens: i64 = sp.getattr(intern!(py, "max_new_tokens"))?.extract()?;
             let ignore_eos: bool = sp.getattr(intern!(py, "ignore_eos"))?.extract()?;
-
-            let stop_ids_obj = sp.getattr(intern!(py, "stop_token_ids"))?;
-            if !stop_ids_obj.is_none() {
-                for id in &py_set_to_hashset(&stop_ids_obj)? {
+            let stop_ids = sp.getattr(intern!(py, "stop_token_ids"))?;
+            if !stop_ids.is_none() {
+                for id in &py_set_to_hashset(&stop_ids)? {
                     all_eos.insert(*id);
                 }
             }
-
             let has_stop_strs = sp.getattr(intern!(py, "stop_strs"))?.len()? > 0
                 || sp.getattr(intern!(py, "stop_regex_strs"))?.len()? > 0;
 
@@ -144,76 +142,58 @@ impl BatchSharedState {
 // Main function
 // ============================================================================
 
+/// Rust-accelerated decode output processing.
+///
+/// Python pre-loop has already:
+///   - Appended next_token_ids[i] to each active req.output_ids
+///   - Set req.time_stats.last_decode_finish_time
+///   - Built output_ids_lens (0 for skipped reqs)
+///
+/// This function handles:
+///   1. Finish checking (length, EOS, to_finish, grammar detection)
+///   2. Applying finish reasons to Python objects
+///   3. Stream output data collection
 #[pyfunction]
 #[pyo3(signature = (
-    reqs, next_token_ids, enable_overlap, is_multimodal_gen,
-    stream_interval, default_force_stream_interval,
-    enable_request_time_stats_logging, disagg_decode_offload,
-    get_cached_tokens_details_fn,
+    reqs, next_token_ids, output_ids_lens,
+    is_multimodal_gen, stream_interval, default_force_stream_interval,
+    enable_request_time_stats_logging, get_cached_tokens_details_fn,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
     reqs: &Bound<'_, PyList>,
     next_token_ids: Vec<i64>,
-    enable_overlap: bool,
+    output_ids_lens: Vec<i64>,
     is_multimodal_gen: bool,
     stream_interval: i32,
     default_force_stream_interval: i32,
     enable_request_time_stats_logging: bool,
-    disagg_decode_offload: bool,
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
-    let _ = disagg_decode_offload;
 
     let t_start = Instant::now();
-
-    // Pre-loop: cache batch-wide shared state and a single timestamp
-    let shared = BatchSharedState::from_first_active_req(py, reqs, enable_overlap)?;
+    let shared = BatchSharedState::from_first_active_req(py, reqs, &output_ids_lens)?;
     let time_mod = py.import(intern!(py, "time"))?;
-    let batch_ts = time_mod.call_method0(intern!(py, "perf_counter"))?;
-
     result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
+
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Main loop: append token, set timestamp, check finish — single pass
+    // Finish checking — single pass over reqs
     // ========================================================================
-    // Per-req Python ops (common case, no finish):
-    //   getattr(finished_reason), getattr(is_retracted),     [overlap skip]
-    //   getattr(output_ids), call(append), len(),            [append token]
-    //   getattr(time_stats), setattr(last_decode_finish_time), [timestamp]
-    //   getattr(to_finish), getattr(grammar)                 [rare checks]
-    // = 9 Python ops per req ≈ 1us/req ≈ 3ms for 3072 reqs
-
-    let mut output_ids_lens: Vec<i64> = vec![0; n];
-
+    // Token append and timestamp already done in Python.
+    // Per-req: 2 getattrs (to_finish, grammar) for common case (both None).
+    // Fast-path length/EOS checks are pure Rust (0 Python calls).
     for i in 0..n {
-        let req = reqs.get_item(i)?;
+        let olen = output_ids_lens[i];
+        if olen == 0 {
+            continue; // skipped (finished/retracted)
+        }
         let next_token_id = next_token_ids[i];
 
-        // Skip finished/retracted (overlap mode)
-        if enable_overlap {
-            let fr = req.getattr(intern!(py, "finished_reason"))?;
-            if !fr.is_none() { continue; }
-            let retracted: bool = req.getattr(intern!(py, "is_retracted"))?.extract()?;
-            if retracted { continue; }
-        }
-
-        // Append token + get length
-        let output_ids = req.getattr(intern!(py, "output_ids"))?;
-        output_ids.call_method1(intern!(py, "append"), (next_token_id,))?;
-        let olen = output_ids.len()? as i64;
-        output_ids_lens[i] = olen;
-
-        // Set decode timestamp (batched: one perf_counter for all reqs)
-        req.getattr(intern!(py, "time_stats"))?
-            .setattr(intern!(py, "last_decode_finish_time"), &batch_ts)?;
-
-        // --- Finish checks ---
-
-        // 1. Length (pure Rust, no Python call)
+        // Fast-path: length check (pure Rust)
         if olen >= shared.max_new_tokens {
             result.newly_finished_indices.push(i);
             result.finish_types.push(2);
@@ -221,7 +201,7 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // 2. EOS token (pure Rust, no Python call)
+        // Fast-path: EOS token check (pure Rust)
         if !shared.ignore_eos && shared.all_eos.contains(&next_token_id) {
             result.newly_finished_indices.push(i);
             result.finish_types.push(4);
@@ -229,7 +209,9 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // 3. to_finish (1 getattr, almost always None)
+        // Slow-path: per-req Python checks (2 getattrs, almost always None)
+        let req = reqs.get_item(i)?;
+
         let to_finish = req.getattr(intern!(py, "to_finish"))?;
         if !to_finish.is_none() {
             result.newly_finished_indices.push(i);
@@ -238,14 +220,12 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // 4. Grammar (1 getattr, almost always None)
         let grammar = req.getattr(intern!(py, "grammar"))?;
         if !grammar.is_none() {
             result.grammar_indices.push(i);
             continue;
         }
 
-        // 5. Stop strings (shared flag, no per-req Python call)
         if shared.has_stop_strs {
             result.str_stop_check_indices.push(i);
         }
@@ -255,7 +235,7 @@ fn process_batch_result_decode_fast(
     let t_loop2 = Instant::now();
 
     // ========================================================================
-    // Apply finish reasons to Python objects (only for finished reqs)
+    // Apply finish reasons (only for finished reqs — small count)
     // ========================================================================
     if !result.newly_finished_indices.is_empty() {
         let sb = py.import(intern!(py, "sglang.srt.managers.schedule_batch"))?;
@@ -266,28 +246,27 @@ fn process_batch_result_decode_fast(
         for (j, &idx) in result.newly_finished_indices.iter().enumerate() {
             let req = reqs.get_item(idx)?;
             match result.finish_types[j] {
-                1 => { // to_finish
+                1 => {
                     let tf = req.getattr(intern!(py, "to_finish"))?;
                     req.setattr(intern!(py, "finished_reason"), &tf)?;
                     req.setattr(intern!(py, "to_finish"), py.None())?;
                 }
-                2 => { // FINISH_LENGTH
+                2 => {
                     let sp = req.getattr(intern!(py, "sampling_params"))?;
                     let mnt: i64 = sp.getattr(intern!(py, "max_new_tokens"))?.extract()?;
                     req.setattr(intern!(py, "finished_reason"), cls_length.call1((mnt,))?)?;
                     req.setattr(intern!(py, "finished_len"), mnt)?;
                 }
-                4 => { // FINISH_MATCHED_TOKEN
+                4 => {
                     let tid = result.finish_matched_token_ids[j];
                     req.setattr(intern!(py, "finished_reason"), cls_token.call1((tid,))?)?;
                     req.setattr(intern!(py, "finished_len"), output_ids_lens[idx])?;
                 }
-                5 => { // vocab boundary
+                5 => {
                     req.setattr(intern!(py, "finished_reason"), cls_str.call1(("NaN happened",))?)?;
                 }
                 _ => {}
             }
-            // Inline set_completion_time
             let ts = req.getattr(intern!(py, "time_stats"))?;
             let ct = time_mod.call_method0(intern!(py, "perf_counter"))?;
             ts.setattr(intern!(py, "completion_time"), &ct)?;
@@ -321,7 +300,7 @@ fn process_batch_result_decode_fast(
             true
         } else {
             let olen = output_ids_lens[i] as i32;
-            if olen == 0 { continue; } // skipped req
+            if olen == 0 { continue; } // skipped
 
             let stream: bool = req.getattr(intern!(py, "stream"))?.extract()?;
             if stream {
