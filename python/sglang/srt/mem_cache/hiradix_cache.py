@@ -36,6 +36,7 @@ from sglang.srt.mem_cache.memory_pool_host import (
     MLATokenToKVPoolHost,
     NSATokenToKVPoolHost,
 )
+from sglang.srt.mem_cache.evict_policy import PriorityStrategy
 from sglang.srt.mem_cache.radix_cache import (
     RadixCache,
     RadixKey,
@@ -1340,6 +1341,7 @@ class HiRadixCache(RadixCache):
 
         if priority is None:
             priority = 0
+        priority = PriorityStrategy.clamp_priority(priority)
         key, value = self.maybe_bigram_convert(key, value)
 
         if len(key) == 0:

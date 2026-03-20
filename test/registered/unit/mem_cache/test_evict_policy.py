@@ -24,6 +24,7 @@ def _make_node(**kwargs):
     node.hit_count = kwargs.get("hit_count", 0)
     node.creation_time = kwargs.get("creation_time", 0.0)
     node.priority = kwargs.get("priority", 0)
+    node.retention_duration = kwargs.get("retention_duration", 0.0)
     return node
 
 
@@ -137,6 +138,22 @@ class TestPriorityStrategy(unittest.TestCase):
         self.assertLess(
             self.strategy.get_priority(old), self.strategy.get_priority(new)
         )
+
+    def test_priority_clamped_to_max(self):
+        node = _make_node(priority=500, last_access_time=1.0)
+        pri, _ = self.strategy.get_priority(node)
+        self.assertEqual(pri, 99)
+
+    def test_priority_clamped_to_min(self):
+        node = _make_node(priority=-10, last_access_time=1.0)
+        pri, _ = self.strategy.get_priority(node)
+        self.assertEqual(pri, 0)
+
+    def test_clamp_static_method(self):
+        self.assertEqual(PriorityStrategy.clamp_priority(0), 0)
+        self.assertEqual(PriorityStrategy.clamp_priority(99), 99)
+        self.assertEqual(PriorityStrategy.clamp_priority(100), 99)
+        self.assertEqual(PriorityStrategy.clamp_priority(-1), 0)
 
 
 class TestSLRUStrategy(unittest.TestCase):

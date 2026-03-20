@@ -742,9 +742,10 @@ class RadixCache(BasePrefixCache):
         chunked: bool = False,
         retention_duration: float = 0.0,
     ):
-        # Convert None priority to 0
+        # Convert None priority to 0 and clamp to [0, 99]
         if priority is None:
             priority = 0
+        priority = PriorityStrategy.clamp_priority(priority)
         access_time = time.monotonic()
         node.last_access_time = access_time
         # Update priority along the path (take max to propagate higher priority)
@@ -883,7 +884,6 @@ class RadixCache(BasePrefixCache):
                         block_size=len(page_tokens),
                         lora_id=None,
                         medium=MEDIUM_GPU,
-                        priority=node.priority,
                     )
                 )
 

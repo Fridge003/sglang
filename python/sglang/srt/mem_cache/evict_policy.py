@@ -42,14 +42,25 @@ class FILOStrategy(EvictionStrategy):
 class PriorityStrategy(EvictionStrategy):
     """Priority-aware eviction with optional time-based decay.
 
-    If a node has retention_duration > 0 and its priority > 0, the effective
-    priority decays to 0 once elapsed time since last access exceeds
+    Priority is clamped to [0, 99] (100 discrete levels). If a node has
+    retention_duration > 0 and its priority > 0, the effective priority
+    decays to 0 once elapsed time since last access exceeds
     retention_duration.  This gives soft retention semantics: active
     conversations auto-extend via last_access_time refresh on cache hits.
     """
 
+    MIN_PRIORITY = 0
+    MAX_PRIORITY = 99
+
+    @staticmethod
+    def clamp_priority(priority: int) -> int:
+        return max(
+            PriorityStrategy.MIN_PRIORITY,
+            min(PriorityStrategy.MAX_PRIORITY, priority),
+        )
+
     def get_priority(self, node: "TreeNode") -> Tuple[int, float]:
-        priority = node.priority
+        priority = self.clamp_priority(node.priority)
         if node.retention_duration > 0 and priority > 0:
             elapsed = time.monotonic() - node.last_access_time
             if elapsed >= node.retention_duration:
