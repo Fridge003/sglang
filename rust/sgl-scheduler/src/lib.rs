@@ -155,7 +155,7 @@ impl BatchSharedState {
 ///   3. Stream output data collection
 #[pyfunction]
 #[pyo3(signature = (
-    reqs, next_token_ids, output_ids_lens,
+    reqs, next_token_ids, output_ids_lens, req_flags,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
 ))]
@@ -164,6 +164,7 @@ fn process_batch_result_decode_fast(
     reqs: &Bound<'_, PyList>,
     next_token_ids: Vec<i64>,
     output_ids_lens: Vec<i64>,
+    req_flags: Vec<i32>,
     is_multimodal_gen: bool,
     stream_interval: i32,
     default_force_stream_interval: i32,
@@ -181,19 +182,19 @@ fn process_batch_result_decode_fast(
     let t_loop1 = Instant::now();
 
     // ========================================================================
-    // Finish checking — single pass over reqs
+    // Finish checking — pure Rust, zero Python calls for common case
     // ========================================================================
-    // Token append and timestamp already done in Python.
-    // Per-req: 2 getattrs (to_finish, grammar) for common case (both None).
-    // Fast-path length/EOS checks are pure Rust (0 Python calls).
+    // Token append, timestamp, and flag extraction done in Python pre-loop.
+    // req_flags: 0=normal, 1=has_to_finish, 2=has_grammar
     for i in 0..n {
         let olen = output_ids_lens[i];
         if olen == 0 {
             continue; // skipped (finished/retracted)
         }
         let next_token_id = next_token_ids[i];
+        let flags = req_flags[i];
 
-        // Fast-path: length check (pure Rust)
+        // Length check (pure Rust)
         if olen >= shared.max_new_tokens {
             result.newly_finished_indices.push(i);
             result.finish_types.push(2);
@@ -201,7 +202,7 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // Fast-path: EOS token check (pure Rust)
+        // EOS token check (pure Rust)
         if !shared.ignore_eos && shared.all_eos.contains(&next_token_id) {
             result.newly_finished_indices.push(i);
             result.finish_types.push(4);
@@ -209,19 +210,16 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // Slow-path: per-req Python checks (2 getattrs, almost always None)
-        let req = reqs.get_item(i)?;
-
-        let to_finish = req.getattr(intern!(py, "to_finish"))?;
-        if !to_finish.is_none() {
+        // to_finish (flag from Python, no getattr needed)
+        if flags & 1 != 0 {
             result.newly_finished_indices.push(i);
             result.finish_types.push(1);
             result.finish_matched_token_ids.push(0);
             continue;
         }
 
-        let grammar = req.getattr(intern!(py, "grammar"))?;
-        if !grammar.is_none() {
+        // Grammar (flag from Python, no getattr needed)
+        if flags & 2 != 0 {
             result.grammar_indices.push(i);
             continue;
         }

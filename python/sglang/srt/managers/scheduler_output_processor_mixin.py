@@ -594,24 +594,34 @@ class SchedulerOutputProcessorMixin:
         overlap scheduling, no speculative decoding."""
         logits_output = result.logits_output
 
-        # Pre-Rust: append tokens and set timestamps in Python (faster than
-        # doing it through PyO3 FFI). Build output_ids_lens for Rust.
+        # Pre-Rust: append tokens, set timestamps, and extract flags in Python
+        # (native attribute access is faster than PyO3 FFI).
         import time as _t
 
         _ts = _t.perf_counter()
         output_ids_lens = []
+        # flags: 0=normal, 1=has_to_finish, 2=has_grammar
+        req_flags = []
         for req, next_token_id in zip(batch.reqs, next_token_ids):
             if req.finished_reason is not None or req.is_retracted:
                 output_ids_lens.append(0)
+                req_flags.append(0)
                 continue
             req.output_ids.append(next_token_id)
             output_ids_lens.append(len(req.output_ids))
             req.time_stats.last_decode_finish_time = _ts
+            f = 0
+            if req.to_finish is not None:
+                f |= 1
+            if req.grammar is not None:
+                f |= 2
+            req_flags.append(f)
 
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
             next_token_ids=next_token_ids,
             output_ids_lens=output_ids_lens,
+            req_flags=req_flags,
             is_multimodal_gen=self.model_config.is_multimodal_gen,
             stream_interval=self.stream_interval,
             default_force_stream_interval=DEFAULT_FORCE_STREAM_INTERVAL,
