@@ -2,18 +2,27 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PySet};
 use std::collections::HashSet;
+use std::time::Instant;
 
-/// Result of the fast decode processing loop.
-/// Contains indices for Python fallback and pre-collected stream output data.
+// ============================================================================
+// Result struct returned to Python
+// ============================================================================
+
 #[pyclass(get_all)]
 #[derive(Default)]
 struct FastDecodeResult {
-    // Check-finish results — indices for Python fallback
+    /// Indices of reqs that finished, with their finish type and matched token.
+    /// finish_type: 1=to_finish, 2=length, 4=matched_token, 5=vocab_boundary
     newly_finished_indices: Vec<usize>,
+    finish_types: Vec<i32>,
+    finish_matched_token_ids: Vec<i64>,
+
+    /// Indices of reqs with grammar (need Python accept_token)
     grammar_indices: Vec<usize>,
+    /// Indices of reqs needing str-based finish check
     str_stop_check_indices: Vec<usize>,
 
-    // Stream output — pre-collected lists for BatchTokenIDOutput
+    // Stream output fields for BatchTokenIDOutput
     output_rids: Vec<Py<PyAny>>,
     output_http_worker_ipcs: Vec<Py<PyAny>>,
     output_finished_reasons: Vec<Py<PyAny>>,
@@ -31,6 +40,11 @@ struct FastDecodeResult {
     output_retraction_counts: Vec<i64>,
     output_time_stats: Vec<Py<PyAny>>,
     log_time_stats_indices: Vec<usize>,
+
+    // Profiling (microseconds)
+    prof_cache_setup_us: f64,
+    prof_loop1_us: f64,
+    prof_loop2_us: f64,
 }
 
 #[pymethods]
@@ -46,79 +60,95 @@ impl FastDecodeResult {
     }
 }
 
-/// Helper to extract a Python set of ints into a HashSet<i64>.
+// ============================================================================
+// Helpers
+// ============================================================================
+
 fn py_set_to_hashset(obj: &Bound<'_, PyAny>) -> PyResult<HashSet<i64>> {
-    let mut result = HashSet::new();
+    let mut hs = HashSet::new();
     if obj.is_none() {
-        return Ok(result);
+        return Ok(hs);
     }
     if let Ok(set) = obj.downcast::<PySet>() {
         for item in set.iter() {
-            result.insert(item.extract::<i64>()?);
+            hs.insert(item.extract::<i64>()?);
         }
     } else {
-        let iter = obj.try_iter()?;
-        for item in iter {
-            let item: Bound<'_, PyAny> = item?;
-            result.insert(item.extract::<i64>()?);
+        for item in obj.try_iter()? {
+            hs.insert(item?.extract::<i64>()?);
         }
     }
-    Ok(result)
+    Ok(hs)
 }
 
-/// Cached tokenizer fields that are the same for all reqs in a batch.
-struct CachedTokenizer {
-    has_tokenizer: bool,
-    eos_token_id: i64,
-    additional_stop_token_ids: HashSet<i64>,
+/// Read shared state from the first active req's tokenizer and sampling_params.
+/// All reqs in a batch share the same tokenizer and typically the same sampling_params.
+struct BatchSharedState {
+    /// Combined set of all EOS-like token IDs (tokenizer + stop_token_ids)
+    all_eos: HashSet<i64>,
+    max_new_tokens: i64,
+    ignore_eos: bool,
+    has_stop_strs: bool,
 }
 
-impl CachedTokenizer {
-    /// Read tokenizer fields once from the first req that has a non-None tokenizer.
-    fn from_reqs(py: Python<'_>, reqs: &Bound<'_, PyList>) -> PyResult<Self> {
+impl BatchSharedState {
+    fn from_first_active_req(py: Python<'_>, reqs: &Bound<'_, PyList>, enable_overlap: bool) -> PyResult<Self> {
         for i in 0..reqs.len() {
             let req = reqs.get_item(i)?;
+            if enable_overlap {
+                let fr = req.getattr(intern!(py, "finished_reason"))?;
+                if !fr.is_none() { continue; }
+            }
+
+            // Tokenizer EOS
+            let mut all_eos = HashSet::new();
             let tokenizer = req.getattr(intern!(py, "tokenizer"))?;
             if !tokenizer.is_none() {
-                let eos_token_id: i64 =
-                    tokenizer.getattr(intern!(py, "eos_token_id"))?.extract()?;
-                let additional_obj =
-                    tokenizer.getattr(intern!(py, "additional_stop_token_ids"))?;
-                let additional_stop_token_ids = py_set_to_hashset(&additional_obj)?;
-                return Ok(CachedTokenizer {
-                    has_tokenizer: true,
-                    eos_token_id,
-                    additional_stop_token_ids,
-                });
+                let eos_id: i64 = tokenizer.getattr(intern!(py, "eos_token_id"))?.extract()?;
+                all_eos.insert(eos_id);
+                let additional = tokenizer.getattr(intern!(py, "additional_stop_token_ids"))?;
+                if !additional.is_none() {
+                    for id in &py_set_to_hashset(&additional)? {
+                        all_eos.insert(*id);
+                    }
+                }
             }
-        }
-        Ok(CachedTokenizer {
-            has_tokenizer: false,
-            eos_token_id: -1,
-            additional_stop_token_ids: HashSet::new(),
-        })
-    }
 
-    fn matches(&self, token_id: i64) -> bool {
-        if !self.has_tokenizer {
-            return false;
+            // Sampling params
+            let sp = req.getattr(intern!(py, "sampling_params"))?;
+            let max_new_tokens: i64 = sp.getattr(intern!(py, "max_new_tokens"))?.extract()?;
+            let ignore_eos: bool = sp.getattr(intern!(py, "ignore_eos"))?.extract()?;
+
+            let stop_ids_obj = sp.getattr(intern!(py, "stop_token_ids"))?;
+            if !stop_ids_obj.is_none() {
+                for id in &py_set_to_hashset(&stop_ids_obj)? {
+                    all_eos.insert(*id);
+                }
+            }
+
+            let has_stop_strs = sp.getattr(intern!(py, "stop_strs"))?.len()? > 0
+                || sp.getattr(intern!(py, "stop_regex_strs"))?.len()? > 0;
+
+            return Ok(Self { all_eos, max_new_tokens, ignore_eos, has_stop_strs });
         }
-        token_id == self.eos_token_id || self.additional_stop_token_ids.contains(&token_id)
+        Ok(Self {
+            all_eos: HashSet::new(),
+            max_new_tokens: i64::MAX,
+            ignore_eos: false,
+            has_stop_strs: false,
+        })
     }
 }
 
-/// Fast Rust implementation of the check-finish + stream-output loops
-/// in process_batch_result_decode.
+// ============================================================================
+// Main function
+// ============================================================================
+
 #[pyfunction]
 #[pyo3(signature = (
-    reqs,
-    next_token_ids,
-    enable_overlap,
-    is_multimodal_gen,
-    stream_interval,
-    default_force_stream_interval,
-    enable_request_time_stats_logging,
-    disagg_decode_offload,
+    reqs, next_token_ids, enable_overlap, is_multimodal_gen,
+    stream_interval, default_force_stream_interval,
+    enable_request_time_stats_logging, disagg_decode_offload,
     get_cached_tokens_details_fn,
 ))]
 fn process_batch_result_decode_fast(
@@ -135,365 +165,223 @@ fn process_batch_result_decode_fast(
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
-    let _ = disagg_decode_offload; // handled in Python fallback
+    let _ = disagg_decode_offload;
 
-    // === Pre-loop caching ===
+    let t_start = Instant::now();
 
-    // Cache tokenizer fields (same for all reqs)
-    let cached_tok = CachedTokenizer::from_reqs(py, reqs)?;
-
-    // Cache schedule_batch module import (used only on finish, but import is cheap when cached)
-    let schedule_batch = py.import(intern!(py, "sglang.srt.managers.schedule_batch"))?;
-    let finish_length_cls = schedule_batch.getattr(intern!(py, "FINISH_LENGTH"))?;
-    let finish_matched_token_cls = schedule_batch.getattr(intern!(py, "FINISH_MATCHED_TOKEN"))?;
-    let finish_matched_str_cls = schedule_batch.getattr(intern!(py, "FINISH_MATCHED_STR"))?;
-
-    // Take a single timestamp for all set_last_decode_finish_time calls in this batch.
-    // The Python method just does: if ts is None: ts = time.perf_counter(); self.last_decode_finish_time = ts
-    // We do the perf_counter() once and set the attribute directly.
+    // Pre-loop: cache batch-wide shared state and a single timestamp
+    let shared = BatchSharedState::from_first_active_req(py, reqs, enable_overlap)?;
     let time_mod = py.import(intern!(py, "time"))?;
-    let batch_decode_ts = time_mod.call_method0(intern!(py, "perf_counter"))?;
+    let batch_ts = time_mod.call_method0(intern!(py, "perf_counter"))?;
 
-    // ========================
-    // LOOP 1: Check-finish
-    // ========================
+    result.prof_cache_setup_us = t_start.elapsed().as_secs_f64() * 1e6;
+    let t_loop1 = Instant::now();
+
+    // ========================================================================
+    // Main loop: append token, set timestamp, check finish — single pass
+    // ========================================================================
+    // Per-req Python ops (common case, no finish):
+    //   getattr(finished_reason), getattr(is_retracted),     [overlap skip]
+    //   getattr(output_ids), call(append), len(),            [append token]
+    //   getattr(time_stats), setattr(last_decode_finish_time), [timestamp]
+    //   getattr(to_finish), getattr(grammar)                 [rare checks]
+    // = 9 Python ops per req ≈ 1us/req ≈ 3ms for 3072 reqs
+
+    let mut output_ids_lens: Vec<i64> = vec![0; n];
+
     for i in 0..n {
         let req = reqs.get_item(i)?;
         let next_token_id = next_token_ids[i];
 
-        // Skip finished/retracted in overlap mode
+        // Skip finished/retracted (overlap mode)
         if enable_overlap {
-            let finished_reason = req.getattr(intern!(py, "finished_reason"))?;
-            if !finished_reason.is_none() {
-                continue;
-            }
-            let is_retracted: bool = req.getattr(intern!(py, "is_retracted"))?.extract()?;
-            if is_retracted {
-                continue;
-            }
+            let fr = req.getattr(intern!(py, "finished_reason"))?;
+            if !fr.is_none() { continue; }
+            let retracted: bool = req.getattr(intern!(py, "is_retracted"))?.extract()?;
+            if retracted { continue; }
         }
 
-        // Append token: req.output_ids.append(next_token_id)
+        // Append token + get length
         let output_ids = req.getattr(intern!(py, "output_ids"))?;
         output_ids.call_method1(intern!(py, "append"), (next_token_id,))?;
+        let olen = output_ids.len()? as i64;
+        output_ids_lens[i] = olen;
 
-        // Inline set_last_decode_finish_time: directly set the attribute with cached timestamp
-        let time_stats = req.getattr(intern!(py, "time_stats"))?;
-        time_stats.setattr(intern!(py, "last_decode_finish_time"), &batch_decode_ts)?;
+        // Set decode timestamp (batched: one perf_counter for all reqs)
+        req.getattr(intern!(py, "time_stats"))?
+            .setattr(intern!(py, "last_decode_finish_time"), &batch_ts)?;
 
-        // === Inline check_finished ===
-        let finished_reason = req.getattr(intern!(py, "finished_reason"))?;
-        if !finished_reason.is_none() {
+        // --- Finish checks ---
+
+        // 1. Length (pure Rust, no Python call)
+        if olen >= shared.max_new_tokens {
+            result.newly_finished_indices.push(i);
+            result.finish_types.push(2);
+            result.finish_matched_token_ids.push(0);
             continue;
         }
 
-        let mut newly_finished = false;
+        // 2. EOS token (pure Rust, no Python call)
+        if !shared.ignore_eos && shared.all_eos.contains(&next_token_id) {
+            result.newly_finished_indices.push(i);
+            result.finish_types.push(4);
+            result.finish_matched_token_ids.push(next_token_id);
+            continue;
+        }
 
-        // Check to_finish
+        // 3. to_finish (1 getattr, almost always None)
         let to_finish = req.getattr(intern!(py, "to_finish"))?;
         if !to_finish.is_none() {
-            req.setattr(intern!(py, "finished_reason"), &to_finish)?;
-            req.setattr(intern!(py, "to_finish"), py.None())?;
-            newly_finished = true;
-        }
-
-        if !newly_finished {
-            let output_ids_len: i64 = output_ids.len()? as i64;
-            let sampling_params = req.getattr(intern!(py, "sampling_params"))?;
-            let max_new_tokens: i64 =
-                sampling_params.getattr(intern!(py, "max_new_tokens"))?.extract()?;
-
-            if output_ids_len >= max_new_tokens {
-                let reason = finish_length_cls.call1((max_new_tokens,))?;
-                req.setattr(intern!(py, "finished_reason"), &reason)?;
-                req.setattr(intern!(py, "finished_len"), max_new_tokens)?;
-                newly_finished = true;
-            }
-
-            if !newly_finished {
-                let grammar = req.getattr(intern!(py, "grammar"))?;
-                if !grammar.is_none() {
-                    let is_terminated: bool =
-                        grammar.call_method0(intern!(py, "is_terminated"))?.extract()?;
-                    if is_terminated {
-                        let last_token = output_ids.get_item(output_ids.len()? - 1)?;
-                        let reason = finish_matched_token_cls.call1((last_token,))?;
-                        req.setattr(intern!(py, "finished_reason"), &reason)?;
-                        newly_finished = true;
-                    } else {
-                        result.grammar_indices.push(i);
-                    }
-                }
-
-                if !newly_finished {
-                    let ignore_eos: bool =
-                        sampling_params.getattr(intern!(py, "ignore_eos"))?.extract()?;
-
-                    if !ignore_eos {
-                        let mut matched_eos = false;
-
-                        // Check stop_token_ids (per-req sampling param)
-                        let stop_token_ids_obj =
-                            sampling_params.getattr(intern!(py, "stop_token_ids"))?;
-                        if !stop_token_ids_obj.is_none() {
-                            let stop_set = py_set_to_hashset(&stop_token_ids_obj)?;
-                            if !stop_set.is_empty() {
-                                matched_eos |= stop_set.contains(&next_token_id);
-                            }
-                        }
-
-                        // Check eos_token_ids (per-req override)
-                        if !matched_eos {
-                            let eos_token_ids_obj =
-                                req.getattr(intern!(py, "eos_token_ids"))?;
-                            if !eos_token_ids_obj.is_none() {
-                                let eos_set = py_set_to_hashset(&eos_token_ids_obj)?;
-                                matched_eos |= eos_set.contains(&next_token_id);
-                            }
-                        }
-
-                        // Check tokenizer eos (cached — no per-req Python call)
-                        if !matched_eos {
-                            matched_eos |= cached_tok.matches(next_token_id);
-                        }
-
-                        if matched_eos {
-                            let reason =
-                                finish_matched_token_cls.call1((next_token_id,))?;
-                            req.setattr(intern!(py, "finished_reason"), &reason)?;
-                            let olen = output_ids.len()? as i64;
-                            req.setattr(intern!(py, "finished_len"), olen)?;
-                            newly_finished = true;
-                        }
-                    }
-
-                    if !newly_finished {
-                        // Check vocab boundary
-                        let vocab_size: i64 =
-                            req.getattr(intern!(py, "vocab_size"))?.extract()?;
-                        if next_token_id > vocab_size || next_token_id < 0 {
-                            let reason =
-                                finish_matched_str_cls.call1(("NaN happened",))?;
-                            req.setattr(intern!(py, "finished_reason"), &reason)?;
-                            newly_finished = true;
-                        }
-                    }
-
-                    if !newly_finished {
-                        // Check stop_strs - need Python fallback
-                        let stop_strs = sampling_params.getattr(intern!(py, "stop_strs"))?;
-                        let stop_strs_len: usize = stop_strs.len()?;
-                        let stop_regex_strs =
-                            sampling_params.getattr(intern!(py, "stop_regex_strs"))?;
-                        let stop_regex_len: usize = stop_regex_strs.len()?;
-                        if stop_strs_len > 0 || stop_regex_len > 0 {
-                            result.str_stop_check_indices.push(i);
-                        }
-                    }
-                }
-            }
-        }
-
-        if newly_finished {
             result.newly_finished_indices.push(i);
-            // Inline set_completion_time: set attribute + call trace_ctx.abort()
-            let completion_ts = time_mod.call_method0(intern!(py, "perf_counter"))?;
-            time_stats.setattr(intern!(py, "completion_time"), &completion_ts)?;
-            let trace_ctx = time_stats.getattr(intern!(py, "trace_ctx"))?;
-            trace_ctx.call_method0(intern!(py, "abort"))?;
+            result.finish_types.push(1);
+            result.finish_matched_token_ids.push(0);
+            continue;
+        }
+
+        // 4. Grammar (1 getattr, almost always None)
+        let grammar = req.getattr(intern!(py, "grammar"))?;
+        if !grammar.is_none() {
+            result.grammar_indices.push(i);
+            continue;
+        }
+
+        // 5. Stop strings (shared flag, no per-req Python call)
+        if shared.has_stop_strs {
+            result.str_stop_check_indices.push(i);
         }
     }
 
-    // ========================
-    // LOOP 2: Stream output
-    // ========================
+    result.prof_loop1_us = t_loop1.elapsed().as_secs_f64() * 1e6;
+    let t_loop2 = Instant::now();
+
+    // ========================================================================
+    // Apply finish reasons to Python objects (only for finished reqs)
+    // ========================================================================
+    if !result.newly_finished_indices.is_empty() {
+        let sb = py.import(intern!(py, "sglang.srt.managers.schedule_batch"))?;
+        let cls_length = sb.getattr(intern!(py, "FINISH_LENGTH"))?;
+        let cls_token = sb.getattr(intern!(py, "FINISH_MATCHED_TOKEN"))?;
+        let cls_str = sb.getattr(intern!(py, "FINISH_MATCHED_STR"))?;
+
+        for (j, &idx) in result.newly_finished_indices.iter().enumerate() {
+            let req = reqs.get_item(idx)?;
+            match result.finish_types[j] {
+                1 => { // to_finish
+                    let tf = req.getattr(intern!(py, "to_finish"))?;
+                    req.setattr(intern!(py, "finished_reason"), &tf)?;
+                    req.setattr(intern!(py, "to_finish"), py.None())?;
+                }
+                2 => { // FINISH_LENGTH
+                    let sp = req.getattr(intern!(py, "sampling_params"))?;
+                    let mnt: i64 = sp.getattr(intern!(py, "max_new_tokens"))?.extract()?;
+                    req.setattr(intern!(py, "finished_reason"), cls_length.call1((mnt,))?)?;
+                    req.setattr(intern!(py, "finished_len"), mnt)?;
+                }
+                4 => { // FINISH_MATCHED_TOKEN
+                    let tid = result.finish_matched_token_ids[j];
+                    req.setattr(intern!(py, "finished_reason"), cls_token.call1((tid,))?)?;
+                    req.setattr(intern!(py, "finished_len"), output_ids_lens[idx])?;
+                }
+                5 => { // vocab boundary
+                    req.setattr(intern!(py, "finished_reason"), cls_str.call1(("NaN happened",))?)?;
+                }
+                _ => {}
+            }
+            // Inline set_completion_time
+            let ts = req.getattr(intern!(py, "time_stats"))?;
+            let ct = time_mod.call_method0(intern!(py, "perf_counter"))?;
+            ts.setattr(intern!(py, "completion_time"), &ct)?;
+            ts.getattr(intern!(py, "trace_ctx"))?.call_method0(intern!(py, "abort"))?;
+        }
+    }
+
+    // ========================================================================
+    // Stream output collection
+    // ========================================================================
     for i in 0..n {
         let req = reqs.get_item(i)?;
 
-        // Skip multimodal gen aborted reqs
         if is_multimodal_gen {
-            let to_finish = req.getattr(intern!(py, "to_finish"))?;
-            if !to_finish.is_none() {
-                continue;
-            }
+            let tf = req.getattr(intern!(py, "to_finish"))?;
+            if !tf.is_none() { continue; }
         }
 
-        let finished_reason = req.getattr(intern!(py, "finished_reason"))?;
-        let is_finished = !finished_reason.is_none();
-        let should_output: bool;
+        let fr = req.getattr(intern!(py, "finished_reason"))?;
+        let is_fin = !fr.is_none();
 
-        if is_finished {
-            let finished_output = req.getattr(intern!(py, "finished_output"))?;
-            if !finished_output.is_none() {
-                if enable_request_time_stats_logging {
-                    result.log_time_stats_indices.push(i);
-                }
+        let should_output = if is_fin {
+            let fin_out = req.getattr(intern!(py, "finished_output"))?;
+            if !fin_out.is_none() {
+                if enable_request_time_stats_logging { result.log_time_stats_indices.push(i); }
                 continue;
             }
             req.setattr(intern!(py, "finished_output"), true)?;
-            let finished_len = req.getattr(intern!(py, "finished_len"))?;
-            if finished_len.is_none() {
-                let output_ids = req.getattr(intern!(py, "output_ids"))?;
-                let olen = output_ids.len()? as i64;
-                req.setattr(intern!(py, "finished_len"), olen)?;
-            }
-            should_output = true;
+            let fl = req.getattr(intern!(py, "finished_len"))?;
+            if fl.is_none() { req.setattr(intern!(py, "finished_len"), output_ids_lens[i])?; }
+            true
         } else {
-            let stream_flag: bool = req.getattr(intern!(py, "stream"))?.extract()?;
-            let output_ids = req.getattr(intern!(py, "output_ids"))?;
-            let output_len = output_ids.len()? as i32;
+            let olen = output_ids_lens[i] as i32;
+            if olen == 0 { continue; } // skipped req
 
-            if stream_flag {
-                let sampling_params = req.getattr(intern!(py, "sampling_params"))?;
-                let req_stream_interval =
-                    sampling_params.getattr(intern!(py, "stream_interval"))?;
-                let effective_interval = if req_stream_interval.is_none() {
-                    stream_interval
-                } else {
-                    req_stream_interval.extract::<i32>()?
-                };
-
-                let base_should = if !is_multimodal_gen && effective_interval > 1 {
-                    output_len % effective_interval == 1
-                } else {
-                    output_len % effective_interval == 0
-                };
-
-                if base_should {
-                    let stop_match: bool = req
-                        .call_method0(intern!(py, "check_match_stop_str_prefix"))?
-                        .extract()?;
-                    should_output = !stop_match;
-                } else {
-                    should_output = false;
-                }
-            } else {
-                should_output = if !is_multimodal_gen {
-                    output_len % default_force_stream_interval == 0
-                } else {
-                    false
-                };
-            }
-        }
+            let stream: bool = req.getattr(intern!(py, "stream"))?.extract()?;
+            if stream {
+                let sp = req.getattr(intern!(py, "sampling_params"))?;
+                let rsi = sp.getattr(intern!(py, "stream_interval"))?;
+                let eff = if rsi.is_none() { stream_interval } else { rsi.extract::<i32>()? };
+                let base = if !is_multimodal_gen && eff > 1 { olen % eff == 1 } else { olen % eff == 0 };
+                if base {
+                    let stop: bool = req.call_method0(intern!(py, "check_match_stop_str_prefix"))?.extract()?;
+                    !stop
+                } else { false }
+            } else if !is_multimodal_gen {
+                olen % default_force_stream_interval == 0
+            } else { false }
+        };
 
         if should_output {
-            let send_token_offset: i64 =
-                req.getattr(intern!(py, "send_token_offset"))?.extract()?;
+            let sto: i64 = req.getattr(intern!(py, "send_token_offset"))?.extract()?;
+            result.output_rids.push(req.getattr(intern!(py, "rid"))?.unbind());
+            result.output_http_worker_ipcs.push(req.getattr(intern!(py, "http_worker_ipc"))?.unbind());
+            result.output_finished_reasons.push(if is_fin {
+                fr.call_method0(intern!(py, "to_json"))?.unbind()
+            } else { py.None() });
+            result.output_decoded_texts.push(req.getattr(intern!(py, "decoded_text"))?.unbind());
 
-            // rid
-            let rid = req.getattr(intern!(py, "rid"))?;
-            result.output_rids.push(rid.unbind());
-
-            // http_worker_ipc
-            let ipc = req.getattr(intern!(py, "http_worker_ipc"))?;
-            result.output_http_worker_ipcs.push(ipc.unbind());
-
-            // finished_reason.to_json() or None
-            if is_finished {
-                let json = finished_reason.call_method0(intern!(py, "to_json"))?;
-                result.output_finished_reasons.push(json.unbind());
-            } else {
-                result.output_finished_reasons.push(py.None());
-            }
-
-            // decoded_text
-            let decoded_text = req.getattr(intern!(py, "decoded_text"))?;
-            result.output_decoded_texts.push(decoded_text.unbind());
-
-            // init_incremental_detokenize -> (decode_ids, read_offset)
-            let detok_result =
-                req.call_method0(intern!(py, "init_incremental_detokenize"))?;
-            let decode_ids_full = detok_result.get_item(0)?;
-            let read_offset: i64 = detok_result.get_item(1)?.extract()?;
-
-            let decode_ids_full_len = decode_ids_full.len()? as i64;
-
+            let dt = req.call_method0(intern!(py, "init_incremental_detokenize"))?;
+            let dids = dt.get_item(0)?;
+            let ro: i64 = dt.get_item(1)?.extract()?;
+            let dlen = dids.len()? as i64;
             if is_multimodal_gen {
-                result.output_decode_ids.push(decode_ids_full.unbind());
+                result.output_decode_ids.push(dids.unbind());
             } else {
-                let send_decode_id_offset: i64 =
-                    req.getattr(intern!(py, "send_decode_id_offset"))?.extract()?;
-                let sliced = decode_ids_full.get_item(pyo3::types::PySlice::new(
-                    py,
-                    send_decode_id_offset as isize,
-                    decode_ids_full_len as isize,
-                    1,
-                ))?;
-                result.output_decode_ids.push(sliced.unbind());
+                let sdo: i64 = req.getattr(intern!(py, "send_decode_id_offset"))?.extract()?;
+                result.output_decode_ids.push(
+                    dids.get_item(pyo3::types::PySlice::new(py, sdo as isize, dlen as isize, 1))?.unbind());
             }
+            req.setattr(intern!(py, "send_decode_id_offset"), dlen)?;
+            result.output_read_offsets.push(ro);
 
-            req.setattr(intern!(py, "send_decode_id_offset"), decode_ids_full_len)?;
-            result.output_read_offsets.push(read_offset);
+            let ots = req.getattr(intern!(py, "output_ids_through_stop"))?;
+            let ots_len = ots.len()? as i64;
+            result.output_ids.push(
+                ots.get_item(pyo3::types::PySlice::new(py, sto as isize, ots_len as isize, 1))?.unbind());
+            req.setattr(intern!(py, "send_token_offset"), ots_len)?;
 
-            // output_ids_through_stop[send_token_offset:]
-            let output_ids_through_stop =
-                req.getattr(intern!(py, "output_ids_through_stop"))?;
-            let output_ids_through_stop_len = output_ids_through_stop.len()? as i64;
-            let sliced_output =
-                output_ids_through_stop.get_item(pyo3::types::PySlice::new(
-                    py,
-                    send_token_offset as isize,
-                    output_ids_through_stop_len as isize,
-                    1,
-                ))?;
-            result.output_ids.push(sliced_output.unbind());
-            req.setattr(
-                intern!(py, "send_token_offset"),
-                output_ids_through_stop_len,
-            )?;
-
-            // sampling_params fields
-            let sampling_params = req.getattr(intern!(py, "sampling_params"))?;
-            let skip_special: bool = sampling_params
-                .getattr(intern!(py, "skip_special_tokens"))?
-                .extract()?;
-            let spaces_between: bool = sampling_params
-                .getattr(intern!(py, "spaces_between_special_tokens"))?
-                .extract()?;
-            let no_stop_trim: bool = sampling_params
-                .getattr(intern!(py, "no_stop_trim"))?
-                .extract()?;
-            result.output_skip_special_tokens.push(skip_special);
-            result
-                .output_spaces_between_special_tokens
-                .push(spaces_between);
-            result.output_no_stop_trim.push(no_stop_trim);
-
-            // prompt_tokens = len(origin_input_ids)
-            let origin_input_ids = req.getattr(intern!(py, "origin_input_ids"))?;
-            let prompt_tokens = origin_input_ids.len()? as i64;
-            result.output_prompt_tokens.push(prompt_tokens);
-
-            // completion_tokens
-            result
-                .output_completion_tokens
-                .push(output_ids_through_stop_len);
-
-            // cached_tokens
-            let cached_tokens: i64 =
-                req.getattr(intern!(py, "cached_tokens"))?.extract()?;
-            result.output_cached_tokens.push(cached_tokens);
-
-            // cached_tokens_details via callback
-            let details = get_cached_tokens_details_fn.call1((&req,))?;
-            result.output_cached_tokens_details.push(details.unbind());
-
-            // retraction_count
-            let retraction_count: i64 =
-                req.getattr(intern!(py, "retraction_count"))?.extract()?;
-            result.output_retraction_counts.push(retraction_count);
-
-            // time_stats
-            let time_stats = req.getattr(intern!(py, "time_stats"))?;
-            result.output_time_stats.push(time_stats.unbind());
+            let sp = req.getattr(intern!(py, "sampling_params"))?;
+            result.output_skip_special_tokens.push(sp.getattr(intern!(py, "skip_special_tokens"))?.extract()?);
+            result.output_spaces_between_special_tokens.push(sp.getattr(intern!(py, "spaces_between_special_tokens"))?.extract()?);
+            result.output_no_stop_trim.push(sp.getattr(intern!(py, "no_stop_trim"))?.extract()?);
+            result.output_prompt_tokens.push(req.getattr(intern!(py, "origin_input_ids"))?.len()? as i64);
+            result.output_completion_tokens.push(ots_len);
+            result.output_cached_tokens.push(req.getattr(intern!(py, "cached_tokens"))?.extract()?);
+            result.output_cached_tokens_details.push(get_cached_tokens_details_fn.call1((&req,))?.unbind());
+            result.output_retraction_counts.push(req.getattr(intern!(py, "retraction_count"))?.extract()?);
+            result.output_time_stats.push(req.getattr(intern!(py, "time_stats"))?.unbind());
         }
-
-        // Time stats logging
-        if is_finished && enable_request_time_stats_logging {
-            result.log_time_stats_indices.push(i);
-        }
+        if is_fin && enable_request_time_stats_logging { result.log_time_stats_indices.push(i); }
     }
 
+    result.prof_loop2_us = t_loop2.elapsed().as_secs_f64() * 1e6;
     Ok(result)
 }
 

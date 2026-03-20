@@ -439,7 +439,13 @@ class SchedulerOutputProcessorMixin:
                 batch, result, next_token_ids, can_run_cuda_graph
             )
             _elapsed_ms = (_time.perf_counter() - _t0) * 1000
-            logger.info("use fast: %.1fms", _elapsed_ms)
+            logger.info(
+                "use fast: %.1fms (rust: setup=%.1fus loop1=%.1fus loop2=%.1fus)",
+                _elapsed_ms,
+                self._fast_prof_setup,
+                self._fast_prof_loop1,
+                self._fast_prof_loop2,
+            )
             return
 
         # Check finish condition
@@ -562,6 +568,21 @@ class SchedulerOutputProcessorMixin:
             num_accepted_tokens=result.num_accepted_tokens,
         )
 
+    def _handle_newly_finished_req(self: Scheduler, req: Req):
+        """Handle cleanup for a newly finished request."""
+        if req.multimodal_inputs is not None:
+            for mm_item in req.multimodal_inputs.mm_items:
+                pixel_values = mm_item.feature
+                if isinstance(pixel_values, torch.Tensor):
+                    mm_item.feature = None
+                    del pixel_values
+        self.maybe_collect_routed_experts(req)
+        if self.server_args.disaggregation_decode_enable_offload_kvcache:
+            if not self.decode_offload_manager.offload_kv_cache(req):
+                self.decode_offload_manager.finalize_release_on_finish(req)
+        else:
+            release_kv_cache(req, self.tree_cache)
+
     def _process_batch_result_decode_fast(
         self: Scheduler,
         batch: ScheduleBatch,
@@ -587,37 +608,15 @@ class SchedulerOutputProcessorMixin:
             disagg_decode_offload=self.server_args.disaggregation_decode_enable_offload_kvcache,
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
         )
+        self._fast_prof_setup = fast_result.prof_cache_setup_us
+        self._fast_prof_loop1 = fast_result.prof_loop1_us
+        self._fast_prof_loop2 = fast_result.prof_loop2_us
 
-        # Python fallback: handle newly finished requests
+        # Python fallback: handle newly finished requests (from Rust fast-path)
         for idx in fast_result.newly_finished_indices:
-            req = batch.reqs[idx]
-            # Delete multimodal features to save memory
-            if req.multimodal_inputs is not None:
-                for mm_item in req.multimodal_inputs.mm_items:
-                    pixel_values = mm_item.feature
-                    if isinstance(pixel_values, torch.Tensor):
-                        mm_item.feature = None
-                        del pixel_values
-            self.maybe_collect_routed_experts(req)
+            self._handle_newly_finished_req(batch.reqs[idx])
 
-            if self.server_args.disaggregation_decode_enable_offload_kvcache:
-                if not self.decode_offload_manager.offload_kv_cache(req):
-                    self.decode_offload_manager.finalize_release_on_finish(req)
-            else:
-                release_kv_cache(req, self.tree_cache)
-
-        # Python fallback: disagg decode offload for non-finished reqs
-        if self.server_args.disaggregation_decode_enable_offload_kvcache:
-            finished_set = set(fast_result.newly_finished_indices)
-            for i, req in enumerate(batch.reqs):
-                if (
-                    i not in finished_set
-                    and not req.finished()
-                    and not req.is_retracted
-                ):
-                    self.decode_offload_manager.offload_kv_cache(req)
-
-        # Python fallback: grammar accept_token
+        # Python fallback: grammar accept_token (only for reqs with grammar)
         for idx in fast_result.grammar_indices:
             req = batch.reqs[idx]
             next_token_id = next_token_ids[idx]
@@ -626,31 +625,26 @@ class SchedulerOutputProcessorMixin:
                     req.grammar.accept_token(next_token_id)
                 except ValueError as e:
                     logger.error(
-                        f"Grammar accept_token failed for req {req.rid} with token {next_token_id}: {e}"
+                        f"Grammar accept_token failed for req {req.rid} "
+                        f"with token {next_token_id}: {e}"
                     )
                     self.abort_request(AbortReq(rid=req.rid))
                 req.grammar.finished = req.finished()
 
-        # Python fallback: str-based finish check
+        # Python fallback: str-based finish check (only for reqs with stop_strs)
         for idx in fast_result.str_stop_check_indices:
             req = batch.reqs[idx]
             if not req.finished():
                 req._check_str_based_finish()
                 if req.finished():
                     req.time_stats.set_completion_time()
-                    # Handle newly-finished from str check
-                    if req.multimodal_inputs is not None:
-                        for mm_item in req.multimodal_inputs.mm_items:
-                            pixel_values = mm_item.feature
-                            if isinstance(pixel_values, torch.Tensor):
-                                mm_item.feature = None
-                                del pixel_values
-                    self.maybe_collect_routed_experts(req)
-                    if self.server_args.disaggregation_decode_enable_offload_kvcache:
-                        if not self.decode_offload_manager.offload_kv_cache(req):
-                            self.decode_offload_manager.finalize_release_on_finish(req)
-                    else:
-                        release_kv_cache(req, self.tree_cache)
+                    self._handle_newly_finished_req(req)
+
+        # Python fallback: disagg decode offload for non-finished reqs
+        if self.server_args.disaggregation_decode_enable_offload_kvcache:
+            for i, req in enumerate(batch.reqs):
+                if not req.finished() and not req.is_retracted:
+                    self.decode_offload_manager.offload_kv_cache(req)
 
         # Python fallback: logprob, hidden states, customized info
         # These are rare; iterate with early skip
