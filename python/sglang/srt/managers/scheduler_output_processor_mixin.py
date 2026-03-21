@@ -584,6 +584,8 @@ class SchedulerOutputProcessorMixin:
         overlap scheduling, no speculative decoding."""
         logits_output = result.logits_output
 
+        _has_abort = getattr(self, "_pending_abort_count", 0) > 0
+
         fast_result = process_batch_result_decode_fast(
             reqs=batch.reqs,
             next_token_ids=next_token_ids,
@@ -597,7 +599,10 @@ class SchedulerOutputProcessorMixin:
             get_cached_tokens_details_fn=self._get_cached_tokens_details,
             num_pre_finished=getattr(self, "_num_pre_finished", 1),
             has_grammar=batch.has_grammar,
+            has_abort=_has_abort,
         )
+        if _has_abort:
+            self._pending_abort_count = 0
 
         # Track state for the next decode step
         self._num_pre_finished = len(fast_result.newly_finished_indices)

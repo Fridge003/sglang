@@ -169,7 +169,7 @@ impl BatchSharedState {
     reqs, next_token_ids,
     is_multimodal_gen, stream_interval, default_force_stream_interval,
     enable_request_time_stats_logging, get_cached_tokens_details_fn,
-    num_pre_finished, has_grammar,
+    num_pre_finished, has_grammar, has_abort,
 ))]
 fn process_batch_result_decode_fast(
     py: Python<'_>,
@@ -182,6 +182,7 @@ fn process_batch_result_decode_fast(
     get_cached_tokens_details_fn: &Bound<'_, PyAny>,
     num_pre_finished: i32,
     has_grammar: bool,
+    has_abort: bool,
 ) -> PyResult<FastDecodeResult> {
     let mut result = FastDecodeResult::default();
     let n = reqs.len();
@@ -310,15 +311,17 @@ fn process_batch_result_decode_fast(
             continue;
         }
 
-        // to_finish (abort) + grammar — use cached req_dicts
+        // to_finish (abort) + grammar — conditional on batch-level flags
         let rd = req_dicts[i];
-        let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
-        if unsafe { is_set(tf) } {
-            result.newly_finished_indices.push(i);
-            result.finish_types.push(1);
-            result.finish_matched_token_ids.push(0);
-            req_state[i] = 2;
-            continue;
+        if has_abort {
+            let tf = unsafe { dict_get(rd, k_to_finish.as_ptr()) };
+            if unsafe { is_set(tf) } {
+                result.newly_finished_indices.push(i);
+                result.finish_types.push(1);
+                result.finish_matched_token_ids.push(0);
+                req_state[i] = 2;
+                continue;
+            }
         }
 
         if has_grammar {

@@ -1241,6 +1241,7 @@ class Scheduler(
                 req.to_finish = FINISH_ABORT(
                     "Request running timeout reached.", HTTPStatus.SERVICE_UNAVAILABLE
                 )
+                self._pending_abort_count = getattr(self, "_pending_abort_count", 0) + 1
 
     def get_init_info(self) -> Dict[str, Any]:
         """Return scheduler initialization info for handshake.
@@ -3225,6 +3226,7 @@ class Scheduler(
                 # Then we reuse all existing code to clean up the KV cache allocation.
                 logger.debug(f"Abort running request. {req.rid=}")
                 req.to_finish = FINISH_ABORT()
+                self._pending_abort_count = getattr(self, "_pending_abort_count", 0) + 1
 
     def _pause_engine(self) -> Tuple[List[Req], int]:
         raise NotImplementedError()
