@@ -684,90 +684,56 @@ class SchedulerOutputProcessorMixin:
             batch.reqs[idx].log_time_stats()
 
         # Build and send BatchTokenIDOutput from fast_result
-        load = self.get_load()
-        rids = fast_result.output_rids
-        dp_ranks = [self.dp_rank] * len(rids) if rids else None
-
-        if batch.reqs or False:  # not is_idle_batch for decode
-            if not self.model_config.is_multimodal_gen:
-                # Collect logprob data if needed
-                if batch.return_logprob:
-                    (
-                        input_token_logprobs_val,
-                        input_token_logprobs_idx,
-                        output_token_logprobs_val,
-                        output_token_logprobs_idx,
-                        input_top_logprobs_val,
-                        input_top_logprobs_idx,
-                        output_top_logprobs_val,
-                        output_top_logprobs_idx,
-                        input_token_ids_logprobs_val,
-                        input_token_ids_logprobs_idx,
-                        output_token_ids_logprobs_val,
-                        output_token_ids_logprobs_idx,
-                    ) = self._collect_logprob_data_for_fast_output(batch, fast_result)
-                else:
-                    input_token_logprobs_val = input_token_logprobs_idx = (
-                        output_token_logprobs_val
-                    ) = output_token_logprobs_idx = input_top_logprobs_val = (
-                        input_top_logprobs_idx
-                    ) = output_top_logprobs_val = output_top_logprobs_idx = (
-                        input_token_ids_logprobs_val
-                    ) = input_token_ids_logprobs_idx = output_token_ids_logprobs_val = (
-                        output_token_ids_logprobs_idx
-                    ) = None
-
-                # Collect hidden states and routed experts
-                output_hidden_states = None
-                routed_experts = None
-                customized_info = {}
-                # These are collected per-output-req; iterate output rids to match
-                # For now, use simplified path - these are rare in decode
-                # and handled in the logprob fallback loop above
-
-                self.send_to_detokenizer.send_output(
-                    BatchTokenIDOutput(
-                        rids=rids,
-                        http_worker_ipcs=fast_result.output_http_worker_ipcs,
-                        spec_verify_ct=[],
-                        spec_accepted_tokens=[],
-                        spec_acceptance_histogram=[],
-                        time_stats=fast_result.output_time_stats,
-                        finished_reasons=fast_result.output_finished_reasons,
-                        decoded_texts=fast_result.output_decoded_texts,
-                        decode_ids=fast_result.output_decode_ids,
-                        read_offsets=fast_result.output_read_offsets,
-                        output_ids=fast_result.output_ids,
-                        skip_special_tokens=fast_result.output_skip_special_tokens,
-                        spaces_between_special_tokens=fast_result.output_spaces_between_special_tokens,
-                        no_stop_trim=fast_result.output_no_stop_trim,
-                        prompt_tokens=fast_result.output_prompt_tokens,
-                        completion_tokens=fast_result.output_completion_tokens,
-                        cached_tokens=fast_result.output_cached_tokens,
-                        cached_tokens_details=fast_result.output_cached_tokens_details,
-                        input_token_logprobs_val=input_token_logprobs_val,
-                        input_token_logprobs_idx=input_token_logprobs_idx,
-                        output_token_logprobs_val=output_token_logprobs_val,
-                        output_token_logprobs_idx=output_token_logprobs_idx,
-                        input_top_logprobs_val=input_top_logprobs_val,
-                        input_top_logprobs_idx=input_top_logprobs_idx,
-                        output_top_logprobs_val=output_top_logprobs_val,
-                        output_top_logprobs_idx=output_top_logprobs_idx,
-                        input_token_ids_logprobs_val=input_token_ids_logprobs_val,
-                        input_token_ids_logprobs_idx=input_token_ids_logprobs_idx,
-                        output_token_ids_logprobs_val=output_token_ids_logprobs_val,
-                        output_token_ids_logprobs_idx=output_token_ids_logprobs_idx,
-                        output_token_entropy_val=None,
-                        output_hidden_states=output_hidden_states,
-                        routed_experts=routed_experts,
-                        customized_info=customized_info,
-                        placeholder_tokens_idx=None,
-                        placeholder_tokens_val=None,
-                        retraction_counts=fast_result.output_retraction_counts,
-                        load=load,
-                        dp_ranks=dp_ranks,
-                    )
+        if not self.model_config.is_multimodal_gen:
+            rids = fast_result.output_rids
+            logprob_data = (
+                self._collect_logprob_data_for_fast_output(batch, fast_result)
+                if batch.return_logprob
+                else (None,) * 12
+            )
+            self.send_to_detokenizer.send_output(
+                BatchTokenIDOutput(
+                    rids=rids,
+                    http_worker_ipcs=fast_result.output_http_worker_ipcs,
+                    spec_verify_ct=[],
+                    spec_accepted_tokens=[],
+                    spec_acceptance_histogram=[],
+                    time_stats=fast_result.output_time_stats,
+                    finished_reasons=fast_result.output_finished_reasons,
+                    decoded_texts=fast_result.output_decoded_texts,
+                    decode_ids=fast_result.output_decode_ids,
+                    read_offsets=fast_result.output_read_offsets,
+                    output_ids=fast_result.output_ids,
+                    skip_special_tokens=fast_result.output_skip_special_tokens,
+                    spaces_between_special_tokens=fast_result.output_spaces_between_special_tokens,
+                    no_stop_trim=fast_result.output_no_stop_trim,
+                    prompt_tokens=fast_result.output_prompt_tokens,
+                    completion_tokens=fast_result.output_completion_tokens,
+                    cached_tokens=fast_result.output_cached_tokens,
+                    cached_tokens_details=fast_result.output_cached_tokens_details,
+                    input_token_logprobs_val=logprob_data[0],
+                    input_token_logprobs_idx=logprob_data[1],
+                    output_token_logprobs_val=logprob_data[2],
+                    output_token_logprobs_idx=logprob_data[3],
+                    input_top_logprobs_val=logprob_data[4],
+                    input_top_logprobs_idx=logprob_data[5],
+                    output_top_logprobs_val=logprob_data[6],
+                    output_top_logprobs_idx=logprob_data[7],
+                    input_token_ids_logprobs_val=logprob_data[8],
+                    input_token_ids_logprobs_idx=logprob_data[9],
+                    output_token_ids_logprobs_val=logprob_data[10],
+                    output_token_ids_logprobs_idx=logprob_data[11],
+                    output_token_entropy_val=None,
+                    output_hidden_states=None,
+                    routed_experts=None,
+                    customized_info={},
+                    placeholder_tokens_idx=None,
+                    placeholder_tokens_val=None,
+                    retraction_counts=fast_result.output_retraction_counts,
+                    load=self.get_load(),
+                    dp_ranks=[self.dp_rank] * len(rids) if rids else None,
                 )
+            )
 
         self.token_to_kv_pool_allocator.free_group_end()
 
