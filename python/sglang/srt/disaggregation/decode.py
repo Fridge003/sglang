@@ -70,6 +70,7 @@ from sglang.srt.observability.req_time_stats import (
     set_schedule_time_batch,
     set_time_batch,
 )
+from sglang.srt.utils import get_num_new_pages
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 
 logger = logging.getLogger(__name__)
@@ -647,8 +648,12 @@ class DecodePreallocQueue:
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
             origin_input_len = len(decode_req.req.origin_input_ids)
+            fill_len = origin_input_len + max(len(decode_req.req.output_ids) - 1, 0)
+            required_alloc_tokens = self._required_alloc_tokens(
+                fill_len=fill_len, prefix_len=prefix_len
+            )
             required_tokens_for_request = (
-                origin_input_len - prefix_len + self.num_reserved_decode_tokens
+                required_alloc_tokens + self.num_reserved_decode_tokens
             )
 
             if (
@@ -679,7 +684,9 @@ class DecodePreallocQueue:
             # reflected in available_size() and evictable_size(), so the
             # budget is exact with no page-rounding drift.
             allocatable_tokens = self._allocatable_tokens(
-                retractable_tokens=retractable_tokens, count_retracted=True
+                retractable_tokens=retractable_tokens,
+                count_retracted=True,
+                extra_reserved_reqs=len(preallocated_reqs) + 1,
             )
             decode_req.req.cache_protected_len = prefix_len
 
@@ -760,7 +767,10 @@ class DecodePreallocQueue:
         )
 
     def _allocatable_tokens(
-        self, retractable_tokens: Optional[int] = None, count_retracted: bool = True
+        self,
+        retractable_tokens: Optional[int] = None,
+        count_retracted: bool = True,
+        extra_reserved_reqs: int = 0,
     ) -> int:
         need_space_for_single_req = (
             max(
@@ -787,6 +797,7 @@ class DecodePreallocQueue:
                 len(self.scheduler.running_batch.reqs)
                 + len(self.transfer_queue.queue)
                 + len(self.scheduler.waiting_queue)
+                + extra_reserved_reqs
             ),
             # make sure each request can finish if reach max_tokens with all other requests retracted
             need_space_for_single_req,
@@ -812,6 +823,18 @@ class DecodePreallocQueue:
                 ]
             )
         return allocatable_tokens
+
+    def _required_alloc_tokens(self, *, fill_len: int, prefix_len: int) -> int:
+        page_size = self.token_to_kv_pool_allocator.page_size
+        if page_size == 1:
+            return fill_len - prefix_len
+
+        num_new_pages = get_num_new_pages(
+            seq_lens=torch.tensor([fill_len], dtype=torch.int64),
+            prefix_lens=torch.tensor([prefix_len], dtype=torch.int64),
+            page_size=page_size,
+        )
+        return num_new_pages * page_size
 
     def _pre_alloc(
         self,
@@ -839,13 +862,18 @@ class DecodePreallocQueue:
             )
 
         delta_len = fill_len - prefix_len
+        required_alloc_tokens = self._required_alloc_tokens(
+            fill_len=fill_len, prefix_len=prefix_len
+        )
 
         # Evict cached entries if the pool doesn't have enough free pages.
         if (
             not self.scheduler.server_args.disable_radix_cache
-            and self.token_to_kv_pool_allocator.available_size() < delta_len
+            and self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens
         ):
-            num_to_evict = delta_len - self.token_to_kv_pool_allocator.available_size()
+            num_to_evict = (
+                required_alloc_tokens - self.token_to_kv_pool_allocator.available_size()
+            )
             self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
 
         if self.token_to_kv_pool_allocator.page_size == 1:
