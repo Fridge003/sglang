@@ -647,6 +647,7 @@ class GenerateReqInput(BaseReq):
             disagg_prefill_dp_rank=self.disagg_prefill_dp_rank,
             conversation_id=self.conversation_id,
             priority=self.priority,
+            retention_seconds=self.retention_seconds,
             extra_key=self.extra_key,
             no_logs=self.no_logs,
             custom_labels=self.custom_labels,
