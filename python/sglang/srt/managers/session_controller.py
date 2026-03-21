@@ -262,9 +262,6 @@ class SessionController:
                 streaming=bool(recv_req.streaming),
                 timeout=recv_req.timeout,
             )
-            logger.info(
-                "Session opened: %s (active=%d)", session_id, len(self.sessions)
-            )
             return OpenSessionReqOutput(session_id, True)
 
     def close(self, recv_req: CloseSessionReqInput):
@@ -284,7 +281,6 @@ class SessionController:
         if isinstance(self.tree_cache, SessionAwareCache):
             self.tree_cache.release_session(session_id)
         del self.sessions[session_id]
-        logger.info("Session closed: %s (active=%d)", session_id, len(self.sessions))
 
     def maybe_reap(self, now: float, interval: float = 1.0):
         # reap sessions every second
