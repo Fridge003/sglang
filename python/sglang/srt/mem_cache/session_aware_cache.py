@@ -252,8 +252,14 @@ class SessionAwareCache(BasePrefixCache):
         if slot is None:
             return
 
-        tokens_freed = max(0, slot.kv_allocated_len - slot.cache_protected_len) if slot.is_holding_kv else 0
-        logger.info("Session KV released: %s (%d tokens freed)", session_id, tokens_freed)
+        tokens_freed = (
+            max(0, slot.kv_allocated_len - slot.cache_protected_len)
+            if slot.is_holding_kv
+            else 0
+        )
+        logger.info(
+            "Session KV released: %s (%d tokens freed)", session_id, tokens_freed
+        )
 
         if slot.last_node is not None:
             if slot.swa_uuid_for_lock is not None:

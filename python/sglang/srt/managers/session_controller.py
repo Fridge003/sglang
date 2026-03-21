@@ -262,7 +262,9 @@ class SessionController:
                 streaming=bool(recv_req.streaming),
                 timeout=recv_req.timeout,
             )
-            logger.info("Session opened: %s (active=%d)", session_id, len(self.sessions))
+            logger.info(
+                "Session opened: %s (active=%d)", session_id, len(self.sessions)
+            )
             return OpenSessionReqOutput(session_id, True)
 
     def close(self, recv_req: CloseSessionReqInput):
