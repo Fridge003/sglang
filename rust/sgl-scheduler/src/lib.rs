@@ -292,12 +292,6 @@ fn process_batch_result_decode_fast(
         let olen = unsafe { ffi::PyList_GET_SIZE(oids) } as i64;
         output_ids_lens[i] = olen;
 
-        // Set timestamp (pre-cached time_stats.__dict__ pointer)
-        let td = ts_dict_ptrs[i];
-        if !td.is_null() {
-            unsafe { dict_set(td, k_last_decode_finish_time.as_ptr(), batch_ts_ptr); }
-        }
-
         // Finish checks
         let next_token_id = next_token_ids[i];
 
@@ -340,6 +334,17 @@ fn process_batch_result_decode_fast(
             result.str_stop_check_indices.push(i);
         }
         req_state[i] = 1;
+    }
+
+    // Set timestamps: batch PyDict_SetItem on pre-cached time_stats dicts
+    {
+        let klf_ptr = k_last_decode_finish_time.as_ptr();
+        for i in 0..n {
+            let td = ts_dict_ptrs[i];
+            if !td.is_null() && !skipped[i] {
+                unsafe { dict_set(td, klf_ptr, batch_ts_ptr); }
+            }
+        }
     }
 
     result.prof_main_loop_us = t_loop1.elapsed().as_secs_f64() * 1e6;
