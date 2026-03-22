@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from sglang.srt.utils import get_device_sm
-from sglang.srt.utils.common import is_sm100_supported
 from sglang.test.ci.ci_register import register_cuda_ci
 
 register_cuda_ci(est_time=15, suite="stage-b-test-4-gpu-b200")
@@ -86,32 +85,23 @@ def _run_flashinfer_fp4_gemm(m, n, k, res_dtype, backend):
 
 def _run_sglang_cutlass_fp4_gemm(m, n, k, res_dtype):
     from sglang.jit_kernel.nvfp4 import cutlass_scaled_fp4_mm, scaled_fp4_quant
-    from sglang.srt.layers.quantization.modelopt_quant import pad_nvfp4_weight
-    from sglang.srt.layers.quantization.utils import swizzle_blockscale
 
     x_bf16 = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
     w_bf16 = torch.randn(n, k, device="cuda", dtype=torch.bfloat16)
 
-    global_sf_x = (448.0 * 6) / x_bf16.float().abs().nan_to_num().max()
-    global_sf_w = (448.0 * 6) / w_bf16.float().abs().nan_to_num().max()
-    alpha = (1.0 / (global_sf_x * global_sf_w)).to(torch.float32).cuda()
+    FLOAT4_E2M1_MAX = 6.0
+    FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 
-    x_fp4, x_sf = scaled_fp4_quant(x_bf16, (1.0 / global_sf_x).to(torch.float32).cuda())
-    w_fp4, w_sf = scaled_fp4_quant(w_bf16, (1.0 / global_sf_w).to(torch.float32).cuda())
+    global_sf_x = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / x_bf16.float().abs().amax()
+    global_sf_w = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / w_bf16.float().abs().amax()
+    alpha = 1.0 / (global_sf_x * global_sf_w)
 
-    w_fp4_padded, weights_padding_cols = pad_nvfp4_weight(w_fp4)
-    if weights_padding_cols > 0:
-        x_fp4 = F.pad(x_fp4, (0, weights_padding_cols)).contiguous()
-
-    w_sf_swizzled = swizzle_blockscale(w_sf)
+    x_fp4, x_sf = scaled_fp4_quant(x_bf16, global_sf_x)
+    w_fp4, w_sf = scaled_fp4_quant(w_bf16, global_sf_w)
 
     reference = torch.mm(x_bf16, w_bf16.T)
 
-    out = cutlass_scaled_fp4_mm(
-        x_fp4, w_fp4_padded, x_sf, w_sf_swizzled, alpha, res_dtype
-    )
-
-    out = out[:, :n]
+    out = cutlass_scaled_fp4_mm(x_fp4, w_fp4, x_sf, w_sf, alpha, res_dtype)
 
     cos_sim = F.cosine_similarity(
         reference.reshape(-1).float(), out.reshape(-1).float(), dim=0
@@ -162,10 +152,7 @@ class TestFP4GemmFlashinferAuto(unittest.TestCase):
                     _run_flashinfer_fp4_gemm(m, n, k, torch.bfloat16, "auto")
 
 
-@unittest.skipIf(
-    not is_sm100_supported() or SM == 103,
-    "sglang CUTLASS FP4 doesn't support SM103.",
-)
+@unittest.skipIf(SM < 100, SKIP_REASON)
 class TestFP4GemmSglangCutlass(unittest.TestCase):
 
     def test_sglang_cutlass(self):
