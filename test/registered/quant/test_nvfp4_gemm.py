@@ -36,9 +36,7 @@ def _run_flashinfer_fp4_gemm(m, n, k, res_dtype, backend):
     from flashinfer import SfLayout, mm_fp4, nvfp4_quantize
 
     if not mm_fp4.is_backend_supported(backend, SM):
-        raise unittest.SkipTest(
-            f"Backend '{backend}' not supported on SM{SM}"
-        )
+        raise unittest.SkipTest(f"Backend '{backend}' not supported on SM{SM}")
     if backend == "trtllm" and res_dtype == torch.float16:
         raise unittest.SkipTest("trtllm backend does not support float16 output")
 
