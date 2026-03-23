@@ -115,7 +115,7 @@ class EAGLEDraftCudaGraphRunner:
             seq_lens = torch.full(
                 (self.max_bs,), self.seq_len_fill_value, dtype=torch.int64
             )
-            extend_seq_lens = torch.ones((self.max_bs,), dtype=torch.int32)
+            extend_seq_lens = torch.ones((self.max_bs,), dtype=torch.int64)
             topk_p = torch.zeros((self.max_bs, self.topk), dtype=torch.float32)
             topk_index = torch.zeros((self.max_bs, self.topk), dtype=torch.int64)
             hidden_states = torch.zeros(
