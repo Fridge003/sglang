@@ -2141,6 +2141,47 @@ def _setup_and_run_http_server(
                 _global_state.tokenizer_manager.socket_mapping.clear_all_sockets()
 
 
+def _try_start_grpc_server(
+    server_args,
+    tokenizer_manager,
+    template_manager,
+    scheduler_infos,
+):
+    """Attempt to start the native Rust gRPC server alongside HTTP.
+
+    Returns a GrpcServerHandle on success, or None if sglang-grpc is not installed.
+    """
+    try:
+        import sglang_grpc
+        from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
+
+        runtime_handle = RuntimeHandle(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=template_manager,
+            server_args=server_args,
+            scheduler_info=scheduler_infos[0] if scheduler_infos else {},
+        )
+
+        grpc_handle = sglang_grpc.start_server(
+            host=server_args.host,
+            port=server_args.grpc_port,
+            runtime_handle=runtime_handle,
+        )
+        logger.info(
+            f"Native gRPC server started on {server_args.host}:{server_args.grpc_port}"
+        )
+        return grpc_handle
+    except ImportError:
+        logger.info(
+            "sglang-grpc package not installed; native gRPC server disabled. "
+            "Install with: pip install sglang-grpc"
+        )
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to start native gRPC server: {e}")
+        return None
+
+
 def launch_server(
     server_args: ServerArgs,
     init_tokenizer_manager_func: Callable = init_tokenizer_manager,
@@ -2174,12 +2215,26 @@ def launch_server(
         )
     )
 
-    _setup_and_run_http_server(
-        server_args,
-        tokenizer_manager,
-        template_manager,
-        port_args,
-        scheduler_init_result.scheduler_infos,
-        execute_warmup_func=execute_warmup_func,
-        launch_callback=launch_callback,
-    )
+    # Start native gRPC server (non-blocking, runs in background thread)
+    grpc_handle = None
+    if not server_args.disable_grpc:
+        grpc_handle = _try_start_grpc_server(
+            server_args,
+            tokenizer_manager,
+            template_manager,
+            scheduler_init_result.scheduler_infos,
+        )
+
+    try:
+        _setup_and_run_http_server(
+            server_args,
+            tokenizer_manager,
+            template_manager,
+            port_args,
+            scheduler_init_result.scheduler_infos,
+            execute_warmup_func=execute_warmup_func,
+            launch_callback=launch_callback,
+        )
+    finally:
+        if grpc_handle is not None:
+            grpc_handle.shutdown()

@@ -12,9 +12,9 @@ suppress_noisy_warnings()
 
 
 def run_server(server_args):
-    """Run the server based on server_args.grpc_mode and server_args.encoder_only."""
+    """Run the server based on server_args configuration."""
     if server_args.encoder_only:
-        if server_args.grpc_mode:
+        if server_args.smg_grpc:
             from sglang.srt.disaggregation.encode_grpc_server import (
                 serve_grpc_encoder,
             )
@@ -24,7 +24,7 @@ def run_server(server_args):
             from sglang.srt.disaggregation.encode_server import launch_server
 
             launch_server(server_args)
-    elif server_args.grpc_mode:
+    elif server_args.smg_grpc:
         from sglang.srt.entrypoints.grpc_server import serve_grpc
 
         asyncio.run(serve_grpc(server_args))
