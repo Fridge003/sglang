@@ -40,7 +40,7 @@ class TestInputFormatDetection(unittest.TestCase):
             self.port_args = PortArgs.init_new(self.server_args)
 
         with patch("zmq.asyncio.Context"), patch(
-            "sglang.srt.utils.get_zmq_socket"
+            "sglang.srt.utils.network.get_zmq_socket"
         ), patch(
             "sglang.srt.utils.hf_transformers_utils.get_tokenizer"
         ) as mock_tokenizer:
@@ -136,7 +136,7 @@ class TestTokenizerInputPreparation(unittest.TestCase):
             self.port_args = PortArgs.init_new(self.server_args)
 
         with patch("zmq.asyncio.Context"), patch(
-            "sglang.srt.utils.get_zmq_socket"
+            "sglang.srt.utils.network.get_zmq_socket"
         ), patch(
             "sglang.srt.utils.hf_transformers_utils.get_tokenizer"
         ) as mock_tokenizer:
@@ -194,7 +194,7 @@ class TestTokenizerResultExtraction(unittest.TestCase):
             self.port_args = PortArgs.init_new(self.server_args)
 
         with patch("zmq.asyncio.Context"), patch(
-            "sglang.srt.utils.get_zmq_socket"
+            "sglang.srt.utils.network.get_zmq_socket"
         ), patch(
             "sglang.srt.utils.hf_transformers_utils.get_tokenizer"
         ) as mock_tokenizer:
@@ -316,7 +316,7 @@ class TestTokenizerManagerIntegration(unittest.TestCase):
             self.port_args = PortArgs.init_new(self.server_args)
 
         with patch("zmq.asyncio.Context"), patch(
-            "sglang.srt.utils.get_zmq_socket"
+            "sglang.srt.utils.network.get_zmq_socket"
         ), patch(
             "sglang.srt.utils.hf_transformers_utils.get_tokenizer"
         ) as mock_tokenizer:
