@@ -194,17 +194,15 @@ def make_req_state(
     event: asyncio.Event,
     obj: Union[GenerateReqInput, EmbeddingReqInput],
     time_stats: APIServerReqTimeStats,
-    *,
-    stream_output_enabled: bool,
 ) -> ReqState:
-    effective_stream = stream_output_enabled and getattr(obj, "stream", False)
+    is_streaming_request = getattr(obj, "stream", False)
     return ReqState(
         out_list,
         finished,
         event,
         obj,
         time_stats,
-        buffer_text=not effective_stream,
+        buffer_text=not is_streaming_request,
     )
 
 
@@ -1170,9 +1168,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
     ):
         """Wait for the response of one request."""
         # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
-        is_stream = self.server_args.incremental_streaming_output and getattr(
-            obj, "stream", False
-        )
+        is_stream = getattr(obj, "stream", False)
         while True:
             try:
                 await asyncio.wait_for(
@@ -1637,16 +1633,19 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             state.finished = recv_obj.finished_reasons[i] is not None
             if isinstance(recv_obj, (BatchStrOutput, BatchTokenIDOutput)):
                 # Not all request types have `stream` (e.g., EmbeddingReqInput). Default to non-streaming.
-                effective_stream = (
-                    self.server_args.incremental_streaming_output
-                    and getattr(state.obj, "stream", False)
+                is_stream = getattr(state.obj, "stream", False)
+                incremental = (
+                    self.server_args.incremental_streaming_output and is_stream
                 )
                 if isinstance(recv_obj, BatchStrOutput):
                     state.append_text(recv_obj.output_strs[i])
                 state.output_ids.extend(recv_obj.output_ids[i])
-                if effective_stream:
-                    output_token_ids = state.output_ids[state.last_output_offset :]
-                    state.last_output_offset = len(state.output_ids)
+                if is_stream:
+                    if incremental:
+                        output_token_ids = state.output_ids[state.last_output_offset :]
+                        state.last_output_offset = len(state.output_ids)
+                    else:
+                        output_token_ids = state.output_ids.copy()
                     out_dict = {"output_ids": output_token_ids, "meta_info": meta_info}
                 elif state.finished:
                     out_dict = {
@@ -2216,9 +2215,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             "weight_version": self.server_args.weight_version,
             "e2e_latency": state.time_stats.get_e2e_latency(),
         }
-        is_stream = self.server_args.incremental_streaming_output and getattr(
-            state.obj, "stream", False
-        )
+        is_stream = getattr(state.obj, "stream", False)
         if getattr(state.obj, "return_logprob", False):
             self.add_logprob_to_meta_info(
                 meta_info,
@@ -2355,7 +2352,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 asyncio.Event(),
                 obj,
                 time_stats,
-                stream_output_enabled=self.server_args.incremental_streaming_output,
             )
             self.rid_to_state[obj.rid] = state
 
@@ -2378,7 +2374,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     asyncio.Event(),
                     obj[i],
                     time_stats,
-                    stream_output_enabled=self.server_args.incremental_streaming_output,
                 )
                 self.rid_to_state[obj.rid[i]] = state
 

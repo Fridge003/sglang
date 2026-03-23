@@ -476,7 +476,7 @@ class TestReqStateCrashDump(unittest.TestCase):
 class TestMakeReqState(unittest.TestCase):
     """Test make_req_state factory function."""
 
-    def _call(self, *, stream_output_enabled: bool, obj_stream=None):
+    def _call(self, *, obj_stream=None):
         if obj_stream is not None:
             obj = Mock(spec=GenerateReqInput)
             obj.stream = obj_stream
@@ -489,19 +489,18 @@ class TestMakeReqState(unittest.TestCase):
             event=asyncio.Event(),
             obj=obj,
             time_stats=APIServerReqTimeStats(),
-            stream_output_enabled=stream_output_enabled,
         )
 
     def test_streaming_request_does_not_buffer(self):
-        state = self._call(stream_output_enabled=True, obj_stream=True)
+        state = self._call(obj_stream=True)
         self.assertFalse(state.buffer_text)
 
-    def test_server_streaming_disabled_overrides_request(self):
-        state = self._call(stream_output_enabled=False, obj_stream=True)
+    def test_non_streaming_request_buffers(self):
+        state = self._call(obj_stream=False)
         self.assertTrue(state.buffer_text)
 
     def test_embedding_request_always_buffers(self):
-        state = self._call(stream_output_enabled=True)
+        state = self._call()
         self.assertTrue(state.buffer_text)
 
 
