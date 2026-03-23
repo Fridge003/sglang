@@ -47,6 +47,7 @@ from sglang.multimodal_gen.runtime.models.dits.base import CachableDiT
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.cuda_graph import (
     CudaGraphCallableCache,
+    SharedStaticInputPool,
     pad_tensor_along_dim,
     replace_shape_dim,
     shape_with_next_power_of_2,
@@ -676,12 +677,24 @@ class QwenImageCrossAttention(nn.Module):
 
 class QwenImageTransformerBlock(nn.Module):
     _shared_cuda_graph_pool_handle = None
+    _shared_cuda_graph_input_pool = None
 
     @classmethod
     def _get_shared_cuda_graph_pool_handle(cls):
         if cls._shared_cuda_graph_pool_handle is None:
             cls._shared_cuda_graph_pool_handle = torch.cuda.graphs.graph_pool_handle()
         return cls._shared_cuda_graph_pool_handle
+
+    @classmethod
+    def _get_shared_cuda_graph_input_pool(cls) -> SharedStaticInputPool:
+        if cls._shared_cuda_graph_input_pool is None:
+            cls._shared_cuda_graph_input_pool = SharedStaticInputPool()
+        return cls._shared_cuda_graph_input_pool
+
+    @classmethod
+    def clear_shared_cuda_graph_input_pool(cls) -> None:
+        if cls._shared_cuda_graph_input_pool is not None:
+            cls._shared_cuda_graph_input_pool.clear()
 
     def __init__(
         self,
@@ -794,6 +807,7 @@ class QwenImageTransformerBlock(nn.Module):
             label=prefix or self.__class__.__name__,
             log_capture_events=log_graph_events,
             pool_handle=self._get_shared_cuda_graph_pool_handle(),
+            shared_input_pool=self._get_shared_cuda_graph_input_pool(),
         )
         self._cuda_graph_text_buckets: tuple[int, ...] | None = None
         self._log_cuda_graph_events = log_graph_events
@@ -1039,7 +1053,13 @@ class QwenImageTransformerBlock(nn.Module):
             example_inputs = (hidden_states, temb_img_silu, modulate_index)
             call_inputs = example_inputs
 
-        return self._cuda_graphs.capture_or_replay(key, fn, example_inputs, call_inputs)
+        return self._cuda_graphs.capture_or_replay(
+            key,
+            fn,
+            example_inputs,
+            call_inputs,
+            input_buffer_key=key,
+        )
 
     def _maybe_graph_txt_pre_attention(
         self,
@@ -1093,6 +1113,7 @@ class QwenImageTransformerBlock(nn.Module):
             key,
             self._txt_pre_attention_forward,
             (padded_encoder_hidden_states, temb_txt_silu),
+            input_buffer_key=key,
         )
         txt_modulated = padded_txt_modulated[:, :seq_len_txt]
         return txt_modulated, txt_gate1, txt_mod2
@@ -1129,7 +1150,13 @@ class QwenImageTransformerBlock(nn.Module):
             )
             call_inputs = example_inputs
 
-        return self._cuda_graphs.capture_or_replay(key, fn, example_inputs, call_inputs)
+        return self._cuda_graphs.capture_or_replay(
+            key,
+            fn,
+            example_inputs,
+            call_inputs,
+            input_buffer_key=key,
+        )
 
     def _maybe_graph_txt_post_attention(
         self,
@@ -1195,6 +1222,7 @@ class QwenImageTransformerBlock(nn.Module):
                 txt_gate1,
                 padded_encoder_hidden_states,
             ),
+            input_buffer_key=key,
         )
         return padded_encoder_hidden_states[:, :seq_len_txt]
 
@@ -1380,12 +1408,15 @@ class QwenImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         return modulate_index
 
     def enable_cuda_graph_capture(self, enable: bool):
+        if not enable:
+            QwenImageTransformerBlock.clear_shared_cuda_graph_input_pool()
         for block in self.transformer_blocks:
             block.enable_cuda_graph_capture(enable)
 
     def set_cuda_graph_text_buckets(
         self, lengths: list[int] | tuple[int, ...] | None
     ) -> None:
+        QwenImageTransformerBlock.clear_shared_cuda_graph_input_pool()
         for block in self.transformer_blocks:
             block.set_cuda_graph_text_buckets(lengths)
 
