@@ -94,7 +94,9 @@ class SharedStaticInputPool:
     ) -> tuple[torch.Tensor, ...]:
         buffers = self._buffers.get(key)
         if buffers is None:
-            buffers = tuple(clone_tensor_preserve_layout(tensor) for tensor in example_inputs)
+            buffers = tuple(
+                clone_tensor_preserve_layout(tensor) for tensor in example_inputs
+            )
             self._buffers[key] = buffers
             return buffers
 
