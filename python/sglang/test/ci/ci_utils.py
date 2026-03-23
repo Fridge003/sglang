@@ -11,6 +11,7 @@ from sglang.srt.debug_utils import cuda_coredump
 from sglang.srt.utils.common import kill_process_tree
 from sglang.test.ci.ci_register import CIRegistry
 
+
 def _cleanup_gpu_processes():
     """Kill orphan sglang/GPU processes between test files to prevent OOM.
 
