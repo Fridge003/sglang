@@ -11,6 +11,52 @@ from sglang.srt.debug_utils import cuda_coredump
 from sglang.srt.utils.common import kill_process_tree
 from sglang.test.ci.ci_register import CIRegistry
 
+def _cleanup_gpu_processes():
+    """Kill orphan sglang/GPU processes between test files to prevent OOM.
+
+    Uses two strategies:
+    1. Kill processes matching sglang patterns by name
+    2. Kill ALL processes using GPU devices via nvidia-smi (catches unnamed python orphans)
+    """
+    # Strategy 1: Kill by process name pattern
+    try:
+        subprocess.run(
+            [
+                "pkill",
+                "-9",
+                "-f",
+                "sglang::|sglang\\.launch_server|sglang\\.bench|sgl_diffusion::",
+            ],
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+    # Strategy 2: Kill any remaining GPU-using processes via nvidia-smi
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=pid",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for line in result.stdout.strip().split("\n"):
+                pid = line.strip()
+                if pid and pid.isdigit():
+                    try:
+                        os.kill(int(pid), 9)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+    except Exception:
+        pass
+
+
 # Configure logger to output to stdout
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -209,6 +255,7 @@ def run_unittest_files(
 
                 if ret_code == 0:
                     file_passed = True
+                    _cleanup_gpu_processes()
                     if was_retried:
                         logger.info(
                             f"\n✓ PASSED on retry (attempt {attempt}): {filename}\n"
@@ -236,6 +283,7 @@ def run_unittest_files(
                             )
 
                     # No retry or not retriable
+                    _cleanup_gpu_processes()
                     logger.info(
                         f"\n✗ FAILED: {filename} returned exit code {ret_code}\n"
                     )
@@ -246,6 +294,7 @@ def run_unittest_files(
 
             except TimeoutError:
                 kill_process_tree(process.pid)
+                _cleanup_gpu_processes()
                 time.sleep(5)
                 logger.info(
                     f"\n✗ TIMEOUT: {filename} after {timeout_per_file} seconds\n"
