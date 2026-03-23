@@ -1,0 +1,144 @@
+syntax = "proto3";
+package sglang.runtime.v1;
+
+option java_multiple_files = true;
+option java_package = "io.sglang.runtime.v1";
+
+service SglangService {
+  rpc TextGenerate(TextGenerateRequest) returns (stream TextGenerateResponse);
+  rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+  rpc TextEmbed(TextEmbedRequest) returns (TextEmbedResponse);
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc Abort(AbortRequest) returns (AbortResponse);
+}
+
+// Sampling parameters shared across text and tokenized RPCs.
+message SamplingParams {
+  optional float temperature = 1;
+  optional float top_p = 2;
+  optional int32 top_k = 3;
+  optional float min_p = 4;
+  optional float frequency_penalty = 5;
+  optional float presence_penalty = 6;
+  optional float repetition_penalty = 7;
+  optional int32 max_new_tokens = 8;
+  optional int32 min_new_tokens = 9;
+  repeated string stop = 10;
+  repeated int32 stop_token_ids = 11;
+  optional bool ignore_eos = 12;
+  optional int32 n = 13;
+  optional string json_schema = 14;
+  optional string regex = 15;
+}
+
+// ---- Text-based generate (text in, text out) ----
+
+message TextGenerateRequest {
+  string text = 1;
+  optional SamplingParams sampling_params = 2;
+  optional bool stream = 3;
+  optional bool return_logprob = 4;
+  optional int32 top_logprobs_num = 5;
+  optional int32 logprob_start_len = 6;
+  optional bool return_text_in_logprobs = 7;
+  optional string rid = 8;
+  optional string lora_path = 9;
+  optional string routing_key = 10;
+  optional int32 routed_dp_rank = 11;
+  map<string, string> trace_headers = 12;
+}
+
+message TextGenerateResponse {
+  string text = 1;
+  map<string, string> meta_info = 2;
+  bool finished = 3;
+}
+
+// ---- Tokenized generate (input_ids in, token_ids out) ----
+
+message GenerateRequest {
+  repeated int32 input_ids = 1;
+  optional SamplingParams sampling_params = 2;
+  optional bool stream = 3;
+  optional bool return_logprob = 4;
+  optional int32 top_logprobs_num = 5;
+  optional int32 logprob_start_len = 6;
+  optional string rid = 7;
+  optional string lora_path = 8;
+  optional string routing_key = 9;
+  optional int32 routed_dp_rank = 10;
+  map<string, string> trace_headers = 11;
+}
+
+message GenerateResponse {
+  repeated int32 output_ids = 1;
+  map<string, string> meta_info = 2;
+  bool finished = 3;
+}
+
+// ---- Text-based embed (text in, embedding out) ----
+
+message TextEmbedRequest {
+  string text = 1;
+  optional string rid = 2;
+  optional string routing_key = 3;
+  map<string, string> trace_headers = 4;
+}
+
+message TextEmbedResponse {
+  repeated float embedding = 1;
+  map<string, string> meta_info = 2;
+}
+
+// ---- Tokenized embed (input_ids in, embedding out) ----
+
+message EmbedRequest {
+  repeated int32 input_ids = 1;
+  optional string rid = 2;
+  optional string routing_key = 3;
+  map<string, string> trace_headers = 4;
+}
+
+message EmbedResponse {
+  repeated float embedding = 1;
+  map<string, string> meta_info = 2;
+}
+
+// ---- Health check ----
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+}
+
+// ---- Model info ----
+
+message GetModelInfoRequest {}
+
+message GetModelInfoResponse {
+  string model_path = 1;
+  string json_info = 2;
+}
+
+// ---- Server info ----
+
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  string json_info = 1;
+}
+
+// ---- Abort ----
+
+message AbortRequest {
+  string rid = 1;
+  bool abort_all = 2;
+}
+
+message AbortResponse {
+  bool success = 1;
+}
