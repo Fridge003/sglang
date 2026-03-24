@@ -104,7 +104,7 @@ def write_accuracy_results_json(
                 "dataset": r.dataset,
                 "gpu_config": gpu_config,
                 "score": r.score,
-                "baseline_accuracy": r.baseline_accuracy,
+                "baseline_accuracy": float(r.baseline_accuracy),
                 "passed": r.passed,
                 "latency": r.latency,
             }
