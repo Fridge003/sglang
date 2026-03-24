@@ -87,7 +87,7 @@ class SamplingParams:
 
     data_type: DataType = DataType.VIDEO
 
-    request_id: str | None = field(default=None, metadata={"batch_sig_exclude": True})
+    request_id: str | None = None
 
     # All fields below are copied from ForwardBatch
 
@@ -95,17 +95,13 @@ class SamplingParams:
     image_path: str | list[str] | None = None
 
     # Text inputs
-    prompt: str | list[str] | None = field(
-        default=None, metadata={"batch_sig_exclude": True}
-    )
+    prompt: str | list[str] | None = None
     negative_prompt: str = (
         "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
     )
-    prompt_path: str | None = field(default=None, metadata={"batch_sig_exclude": True})
-    output_path: str | None = field(default=None, metadata={"batch_sig_exclude": True})
-    output_file_name: str | None = field(
-        default=None, metadata={"batch_sig_exclude": True}
-    )
+    prompt_path: str | None = None
+    output_path: str | None = None
+    output_file_name: str | None = None
     output_quality: str | None = "default"
     output_compression: int | None = None
 
@@ -119,7 +115,7 @@ class SamplingParams:
 
     # Batch info
     num_outputs_per_prompt: int = 1
-    seed: int = field(default=42, metadata={"batch_sig_exclude": True})
+    seed: int = 42
     generator_device: str = "cuda"  # Device for random generator: "cuda" or "cpu"
 
     # Original dimensions (before VAE scaling)
@@ -130,18 +126,14 @@ class SamplingParams:
     height: int | None = None
     width: int | None = None
     # NOTE: this is temporary, we need a way to know if width or height is not provided, or do the image resize earlier
-    height_not_provided: bool = field(
-        default=False, metadata={"batch_sig_exclude": True}
-    )
-    width_not_provided: bool = field(
-        default=False, metadata={"batch_sig_exclude": True}
-    )
+    height_not_provided: bool = False
+    width_not_provided: bool = False
     fps: int = 24
 
     # Resolution validation
-    supported_resolutions: list[tuple[int, int]] | None = field(
-        default=None, metadata={"batch_sig_exclude": True}
-    )  # None means all resolutions allowed
+    supported_resolutions: list[tuple[int, int]] | None = (
+        None  # None means all resolutions allowed
+    )
 
     # Denoising parameters
     num_inference_steps: int = None
@@ -156,31 +148,25 @@ class SamplingParams:
     enable_teacache: bool = False
 
     # Profiling
-    profile: bool = field(default=False, metadata={"batch_sig_exclude": True})
-    num_profiled_timesteps: int = field(default=5, metadata={"batch_sig_exclude": True})
-    profile_all_stages: bool = field(
-        default=False, metadata={"batch_sig_exclude": True}
-    )
+    profile: bool = False
+    num_profiled_timesteps: int = 5
+    profile_all_stages: bool = False
 
     # Debugging
-    debug: bool = field(default=False, metadata={"batch_sig_exclude": True})
-    perf_dump_path: str | None = field(
-        default=None, metadata={"batch_sig_exclude": True}
-    )
+    debug: bool = False
+    perf_dump_path: str | None = None
 
     # Misc
     save_output: bool = True
-    return_frames: bool = field(default=False, metadata={"batch_sig_exclude": True})
+    return_frames: bool = False
     return_trajectory_latents: bool = False  # returns all latents for each timestep
     return_trajectory_decoded: bool = False  # returns decoded latents for each timestep
     # if True, disallow user params to override subclass-defined protected fields
-    no_override_protected_fields: bool = field(
-        default=False, metadata={"batch_sig_exclude": True}
-    )
+    no_override_protected_fields: bool = False
     # whether to adjust num_frames for multi-GPU friendly splitting (default: True)
     adjust_frames: bool = True
     # if True, suppress verbose logging for this request
-    suppress_logs: bool = field(default=False, metadata={"batch_sig_exclude": True})
+    suppress_logs: bool = False
 
     return_file_paths_only: bool = True
     enable_sequence_shard: bool | None = None

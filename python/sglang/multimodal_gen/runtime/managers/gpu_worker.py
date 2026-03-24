@@ -287,7 +287,7 @@ class GPUWorker:
                         build_output_path = lambda idx: req.output_file_path(
                             num_outputs, idx
                         )
-                        
+
                     output_paths = save_outputs(
                         output_batch.output,
                         req.data_type,
