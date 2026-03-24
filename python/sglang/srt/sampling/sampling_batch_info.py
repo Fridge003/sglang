@@ -8,6 +8,7 @@ import torch
 
 import sglang.srt.sampling.penaltylib as penaltylib
 from sglang.srt.sampling.custom_logit_processor import CustomLogitProcessor
+from sglang.srt.sampling.penaltylib.repetition_penalty import apply_scaling_penalties
 from sglang.srt.sampling.sampling_params import TOP_K_ALL
 from sglang.srt.server_args import get_global_server_args
 
@@ -46,7 +47,10 @@ class SamplingBatchInfo:
 
     # Penalizer
     penalizer_orchestrator: Optional[penaltylib.BatchedPenalizerOrchestrator] = None
-    acc_linear_penalties: torch.Tensor = None  # Used in the overlap mode
+    acc_linear_penalties: Optional[torch.Tensor] = None  # Used in the overlap mode
+    acc_scaling_penalties: Optional[torch.Tensor] = (
+        None  # Used in the overlap mode for repetition penalty
+    )
 
     # Whether any request has custom logit processor
     has_custom_logit_processor: bool = False
@@ -159,6 +163,7 @@ class SamplingBatchInfo:
                 penaltylib.BatchedFrequencyPenalizer,
                 penaltylib.BatchedMinNewTokensPenalizer,
                 penaltylib.BatchedPresencePenalizer,
+                penaltylib.BatchedRepetitionPenalizer,
             },
         )
 
@@ -228,17 +233,33 @@ class SamplingBatchInfo:
                 dtype=torch.float32,
                 device=self.temperatures.device,
             )
-            self.penalizer_orchestrator.apply(self.acc_linear_penalties)
+            self.acc_scaling_penalties = None
+
+            for pen in self.penalizer_orchestrator.penalizers.values():
+                if not pen._is_prepared:
+                    continue
+                if isinstance(pen, penaltylib.BatchedRepetitionPenalizer):
+                    # Snapshot the multiplicative penalty for overlap-safe forwarding
+                    self.acc_scaling_penalties = (
+                        pen.cumulated_repetition_penalties.clone()
+                    )
+                else:
+                    pen.apply(self.acc_linear_penalties)
         else:
             self.acc_linear_penalties = None
+            self.acc_scaling_penalties = None
 
     def apply_logits_bias(self, logits: torch.Tensor):
+        # Overlap mode: additive penalties (frequency, presence, min_new_tokens)
         if self.acc_linear_penalties is not None:
-            # Used in the overlap mode
             logits.add_(self.acc_linear_penalties)
 
+        # Overlap mode: multiplicative penalties (repetition)
+        if self.acc_scaling_penalties is not None:
+            apply_scaling_penalties(logits, self.acc_scaling_penalties)
+
+        # Non-overlap mode: apply all penalties directly
         if self.penalizer_orchestrator and self.penalizer_orchestrator.is_required:
-            # Used in the non-overlap mode
             self.penalizer_orchestrator.apply(logits)
 
         if self.vocab_mask is not None:

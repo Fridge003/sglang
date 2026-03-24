@@ -294,6 +294,28 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 torch.repeat_interleave(linear_penalty, self.draft_token_num, dim=0)
             )
 
+            # Apply multiplicative penalties (repetition) directly on logits
+            import sglang.srt.sampling.penaltylib as penaltylib
+
+            rep_cls = penaltylib.BatchedRepetitionPenalizer
+            if rep_cls in sampling_info.penalizer_orchestrator.penalizers:
+                rep_pen = sampling_info.penalizer_orchestrator.penalizers[rep_cls]
+                if rep_pen._is_prepared:
+
+                    # Expand per-request penalties to match draft_token_num layout
+                    expanded_penalties = torch.repeat_interleave(
+                        rep_pen.cumulated_repetition_penalties,
+                        self.draft_token_num,
+                        dim=0,
+                    )
+                    mask = expanded_penalties != 1.0
+                    if mask.any():
+                        logits = logits_output.next_token_logits
+                        pos = (logits > 0) & mask
+                        neg = (logits <= 0) & mask
+                        logits[pos] = logits[pos] / expanded_penalties[pos]
+                        logits[neg] = logits[neg] * expanded_penalties[neg]
+
         # Apply grammar mask
         if vocab_mask is not None:
             assert self.grammar is not None
