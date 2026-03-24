@@ -29,7 +29,7 @@ on:
         description: "Test parallel dispatch behavior (simulates scheduled run)"
         required: false
         type: boolean
-        default: false
+        default: true
   workflow_call:
     inputs:
       git_ref:
