@@ -27,6 +27,7 @@ class FakeKVManager(BaseKVManager):
         is_mla_backend: Optional[bool] = False,
     ):
         super().__init__(args, disaggregation_mode, server_args, is_mla_backend)
+        self.req_to_decode_prefix_len = {}
 
     def register_to_bootstrap(self):
         pass
@@ -41,6 +42,7 @@ class FakeKVSender(BaseKVSender):
         dest_tp_ranks: List[int],
         pp_rank: int,
     ):
+        self.kv_mgr = mgr
         self.has_sent = False
 
     def poll(self) -> KVPoll:
