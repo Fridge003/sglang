@@ -217,9 +217,16 @@ def _use_cached_default_models(model_repo: str):
 
 
 if is_in_ci():
-    DEFAULT_PORT_FOR_SRT_TEST_RUNNER = (
-        10000 + int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")[0]) * 2000
+    # SGLANG_CI_BASE_GPU: physical GPU id for port offset calculation.
+    # Needed on --network=host runners where --runtime=nvidia remaps GPUs
+    # (physical 2,3 become container-local 0,1) but we still need unique ports.
+    _ci_gpu_for_port = int(
+        os.environ.get(
+            "SGLANG_CI_BASE_GPU",
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
+        )[0]
     )
+    DEFAULT_PORT_FOR_SRT_TEST_RUNNER = 10000 + _ci_gpu_for_port * 2000
 else:
     DEFAULT_PORT_FOR_SRT_TEST_RUNNER = (
         20000 + int(os.environ.get("CUDA_VISIBLE_DEVICES", "0")[0]) * 1000
