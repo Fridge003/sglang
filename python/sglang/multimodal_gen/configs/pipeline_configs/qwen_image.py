@@ -18,6 +18,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     maybe_unpad_latents,
     shard_rotary_emb_for_sp,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.batching import (
+    can_batch_prompt_only_diffusion_requests,
+)
 from sglang.multimodal_gen.runtime.models.vision_utils import resize
 from sglang.multimodal_gen.utils import calculate_dimensions
 
@@ -109,6 +112,9 @@ class QwenImagePipelineConfig(ImagePipelineConfig):
             None,
         ]
     )
+
+    def can_batch(self, base_req, ref_req) -> bool:
+        return can_batch_prompt_only_diffusion_requests(base_req, ref_req)
 
     def prepare_sigmas(self, sigmas, num_inference_steps):
         return self._prepare_sigmas(sigmas, num_inference_steps)

@@ -4,9 +4,9 @@
 import json
 import os
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from enum import Enum, auto
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import PIL
@@ -39,6 +39,9 @@ from sglang.multimodal_gen.utils import (
 )
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 
 
 # NOTE: possible duplication with DataType
@@ -201,6 +204,14 @@ class PipelineConfig:
 
     # image encoding
     image_encoder_extra_args: dict = field(default_factory=lambda: {})
+
+    def can_batch(self, base_req: "Req", ref_req: "Req") -> bool:
+        """
+            Decides whether two requests should be batched
+
+            Batching is disabled by default. Each PipelineConfig should decides this on their own, based on their own standard (e.g., some conditions must be the same across the reqs from a batch for some models)
+        """
+        return False
 
     def postprocess_image(self, image):
         return image.last_hidden_state

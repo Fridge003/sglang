@@ -8,7 +8,6 @@ import pickle
 import time
 from collections import Counter, deque
 from copy import deepcopy
-from enum import Enum
 from typing import Any, List
 
 import zmq
@@ -257,40 +256,6 @@ class Scheduler:
         )
         return ordered[index]
 
-    def _find_sampling_param_mismatch_field(
-        self, base_req: Req, candidate_req: Req
-    ) -> str | None:
-        base_sp = base_req.sampling_params
-        candidate_sp = candidate_req.sampling_params
-        if base_sp is None or candidate_sp is None:
-            return None
-
-        try:
-            sp_fields = dataclasses.fields(base_sp)
-        except Exception:
-            return None
-
-        for f in sp_fields:
-            if f.metadata.get("batch_sig_exclude", False):
-                continue
-            base_value = self._freeze_signature_value(getattr(base_sp, f.name, None))
-            candidate_value = self._freeze_signature_value(
-                getattr(candidate_sp, f.name, None)
-            )
-            if base_value != candidate_value:
-                return f"sampling_params.{f.name}"
-
-        base_diffusers_kwargs = self._freeze_signature_value(
-            (base_req.extra or {}).get("diffusers_kwargs")
-        )
-        candidate_diffusers_kwargs = self._freeze_signature_value(
-            (candidate_req.extra or {}).get("diffusers_kwargs")
-        )
-        if base_diffusers_kwargs != candidate_diffusers_kwargs:
-            return "extra.diffusers_kwargs"
-
-        return None
-
     def _get_dynamic_batch_reject_reason(
         self, base_req: Req, candidate_req: Req
     ) -> str | None:
@@ -308,15 +273,7 @@ class Scheduler:
         if base_req.return_file_paths_only != candidate_req.return_file_paths_only:
             return "return_file_paths_only"
 
-        base_sig = self._get_cached_signature(base_req)
-        candidate_sig = self._get_cached_signature(candidate_req)
-        if base_sig is None or candidate_sig is None:
-            return "signature_unavailable"
-
-        return (
-            self._find_sampling_param_mismatch_field(base_req, candidate_req)
-            or "signature_mismatch"
-        )
+        return "pipeline_config.can_batch"
 
     def _record_batch_dispatch_metrics(
         self,
@@ -398,75 +355,8 @@ class Scheduler:
         if not is_warmup and self.receiver is not None and identity is not None:
             self.receiver.send_multipart([identity, b"", pickle.dumps(output_batch)])
 
-    def _freeze_signature_value(self, value: Any):
-        if isinstance(value, (str, int, float, bool, type(None))):
-            return value
-        if isinstance(value, Enum):
-            return value.value
-        if isinstance(value, dict):
-            return {
-                str(k): self._freeze_signature_value(v)
-                for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
-            }
-        if isinstance(value, (list, tuple)):
-            return tuple(self._freeze_signature_value(v) for v in value)
-        return repr(value)
-
-    def _build_dynamic_batch_signature(self, req: Req) -> tuple[Any, ...] | None:
-        sp = req.sampling_params
-        if sp is None:
-            return None
-
-        try:
-            sp_fields = dataclasses.fields(sp)
-        except Exception:
-            return None
-
-        signature_items: list[tuple[str, Any]] = []
-        for f in sp_fields:
-            if f.metadata.get("batch_sig_exclude", False):
-                continue
-            signature_items.append(
-                (f.name, self._freeze_signature_value(getattr(sp, f.name, None)))
-            )
-
-        if req.extra:
-            diffusers_kwargs = req.extra.get("diffusers_kwargs")
-            if diffusers_kwargs:
-                signature_items.append(
-                    (
-                        "diffusers_kwargs",
-                        self._freeze_signature_value(diffusers_kwargs),
-                    )
-                )
-
-        return tuple(signature_items)
-
-    def _get_cached_signature(self, req: Req) -> tuple[Any, ...] | None:
-        cached = getattr(req, "_dynamic_batch_sig", None)
-        if cached is not None:
-            return cached
-        sig = self._build_dynamic_batch_signature(req)
-        req._dynamic_batch_sig = sig  # type: ignore[attr-defined]
-        return sig
-
     def _can_dynamic_batch(self, base_req: Req, candidate_req: Req) -> bool:
-        if base_req.is_warmup or candidate_req.is_warmup:
-            return False
-
-        if not isinstance(base_req.prompt, str) or not isinstance(
-            candidate_req.prompt, str
-        ):
-            return False
-
-        if base_req.image_path is not None or candidate_req.image_path is not None:
-            return False
-        if base_req.return_file_paths_only != candidate_req.return_file_paths_only:
-            return False
-
-        base_sig = self._get_cached_signature(base_req)
-        cand_sig = self._get_cached_signature(candidate_req)
-        return base_sig is not None and base_sig == cand_sig
+        return self.server_args.pipeline_config.can_batch(base_req, candidate_req)
 
     def _try_merge_generation_reqs(self, reqs: List[Req]) -> Req | None:
         if len(reqs) <= 1:

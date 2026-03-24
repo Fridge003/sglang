@@ -26,6 +26,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     preprocess_text,
     shard_rotary_emb_for_sp,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.batching import (
+    can_batch_prompt_only_diffusion_requests,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan import (
     clip_postprocess_text,
     clip_preprocess_text,
@@ -85,6 +88,9 @@ class FluxPipelineConfig(ImagePipelineConfig):
             None,
         ]
     )
+
+    def can_batch(self, base_req, ref_req) -> bool:
+        return can_batch_prompt_only_diffusion_requests(base_req, ref_req)
 
     def prepare_sigmas(self, sigmas, num_inference_steps):
         return self._prepare_sigmas(sigmas, num_inference_steps)

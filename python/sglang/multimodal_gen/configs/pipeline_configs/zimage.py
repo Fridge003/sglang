@@ -14,6 +14,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ImagePipelineConfig,
     ModelTaskType,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.batching import (
+    can_batch_prompt_only_diffusion_requests,
+)
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
 )
@@ -60,6 +63,9 @@ class ZImagePipelineConfig(ImagePipelineConfig):
     SEQ_LEN_MULTIPLE: int = 32
     PATCH_SIZE: int = 2
     F_PATCH_SIZE: int = 1
+
+    def can_batch(self, base_req, ref_req) -> bool:
+        return can_batch_prompt_only_diffusion_requests(base_req, ref_req)
 
     def tokenize_prompt(self, prompts: list[str], tokenizer, tok_kwargs) -> dict:
         # flatten to 1-d list
