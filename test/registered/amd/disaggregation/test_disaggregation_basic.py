@@ -44,8 +44,8 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
         cls.start_decode()
 
         # Block until both
-        cls.wait_server_ready(cls.prefill_url + "/health")
-        cls.wait_server_ready(cls.decode_url + "/health")
+        cls.wait_server_ready(cls.prefill_url + "/health", process=cls.process_prefill)
+        cls.wait_server_ready(cls.decode_url + "/health", process=cls.process_decode)
 
         cls.launch_lb()
 
@@ -212,7 +212,7 @@ class TestDisaggregationAccuracy(PDDisaggregationServerBase):
         )
 
 
-# register_amd_ci(est_time=300, suite="stage-b-test-large-2-gpu-amd")
+# register_amd_ci(est_time=300, suite="stage-b-test-2-gpu-large-amd")
 class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
     @classmethod
     def setUpClass(cls):
@@ -238,8 +238,8 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
         cls.start_decode()
 
         # Block until both
-        cls.wait_server_ready(cls.prefill_url + "/health")
-        cls.wait_server_ready(cls.decode_url + "/health")
+        cls.wait_server_ready(cls.prefill_url + "/health", process=cls.process_prefill)
+        cls.wait_server_ready(cls.decode_url + "/health", process=cls.process_decode)
 
         cls.launch_lb()
 
@@ -322,7 +322,7 @@ class TestDisaggregationMooncakeFailure(PDDisaggregationServerBase):
                 raise e from health_check_error
 
 
-# register_amd_ci(est_time=300, suite="stage-b-test-large-2-gpu-amd")
+# register_amd_ci(est_time=300, suite="stage-b-test-2-gpu-large-amd")
 class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
     @classmethod
     def setUpClass(cls):
@@ -346,8 +346,8 @@ class TestDisaggregationSimulatedRetract(PDDisaggregationServerBase):
         cls.start_decode()
 
         # Block until both
-        cls.wait_server_ready(cls.prefill_url + "/health")
-        cls.wait_server_ready(cls.decode_url + "/health")
+        cls.wait_server_ready(cls.prefill_url + "/health", process=cls.process_prefill)
+        cls.wait_server_ready(cls.decode_url + "/health", process=cls.process_decode)
 
         cls.launch_lb()
 
