@@ -164,7 +164,7 @@ class RuntimeHandle:
         )
 
         asyncio.run_coroutine_threadsafe(
-            self._run_generate(obj, chunk_callback, stream), self._loop
+            self._run_generate(obj, chunk_callback, stream), self._tm_loop
         )
 
     async def _run_generate(self, obj, chunk_callback, stream: bool):
@@ -212,7 +212,7 @@ class RuntimeHandle:
         )
 
         asyncio.run_coroutine_threadsafe(
-            self._run_embed(obj, chunk_callback), self._loop
+            self._run_embed(obj, chunk_callback), self._tm_loop
         )
 
     async def _run_embed(self, obj, chunk_callback):
@@ -253,7 +253,7 @@ class RuntimeHandle:
         )
 
         asyncio.run_coroutine_threadsafe(
-            self._run_embed(obj, chunk_callback), self._loop
+            self._run_embed(obj, chunk_callback), self._tm_loop
         )
 
     # ------------------------------------------------------------------
@@ -526,7 +526,7 @@ class RuntimeHandle:
         """Submit OpenAI chat completion (JSON pass-through)."""
         asyncio.run_coroutine_threadsafe(
             self._run_openai_request("chat", json_body, chunk_callback, streaming=True),
-            self._loop,
+            self._tm_loop,
         )
 
     def submit_openai_complete(self, *, json_body: bytes, chunk_callback):
@@ -535,7 +535,7 @@ class RuntimeHandle:
             self._run_openai_request(
                 "completion", json_body, chunk_callback, streaming=True
             ),
-            self._loop,
+            self._tm_loop,
         )
 
     def submit_openai_embed(self, *, json_body: bytes, chunk_callback):
@@ -544,7 +544,7 @@ class RuntimeHandle:
             self._run_openai_request(
                 "embedding", json_body, chunk_callback, streaming=False
             ),
-            self._loop,
+            self._tm_loop,
         )
 
     def submit_openai_classify(self, *, json_body: bytes, chunk_callback):
@@ -553,7 +553,7 @@ class RuntimeHandle:
             self._run_openai_request(
                 "classify", json_body, chunk_callback, streaming=False
             ),
-            self._loop,
+            self._tm_loop,
         )
 
     def submit_openai_score(self, *, json_body: bytes, chunk_callback):
@@ -562,7 +562,7 @@ class RuntimeHandle:
             self._run_openai_request(
                 "score", json_body, chunk_callback, streaming=False
             ),
-            self._loop,
+            self._tm_loop,
         )
 
     def submit_openai_rerank(self, *, json_body: bytes, chunk_callback):
@@ -571,7 +571,7 @@ class RuntimeHandle:
             self._run_openai_request(
                 "rerank", json_body, chunk_callback, streaming=False
             ),
-            self._loop,
+            self._tm_loop,
         )
 
     def _get_openai_request_class(self, serving_key: str):
