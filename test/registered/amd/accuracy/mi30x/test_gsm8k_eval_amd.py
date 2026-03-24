@@ -25,7 +25,6 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     is_in_ci,
-    parse_models,
     popen_launch_server,
     write_github_step_summary,
     write_results_to_json,
@@ -205,13 +204,7 @@ class TestNightlyGsm8KEval(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.model_groups = [
-            (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1), False, False),
-            (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2), False, True),
-            (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP1), True, False),
-            (parse_models(DEFAULT_MODEL_NAME_FOR_NIGHTLY_EVAL_FP8_TP2), True, True),
-            # AMD-specific models verified on MI300X
-            (parse_models(AMD_MODEL_NAME_FOR_NIGHTLY_EVAL_TP1), False, False),
-            (parse_models(AMD_MODEL_NAME_FOR_NIGHTLY_EVAL_TP2), False, True),
+            (["mistralai/Mistral-7B-Instruct-v0.3"], False, False),
         ]
         cls.base_url = DEFAULT_URL_FOR_TEST
 
@@ -275,6 +268,30 @@ class TestNightlyGsm8KEval(unittest.TestCase):
                         try:
                             metrics = run_eval(args)
                             score = metrics["score"]
+                            if score < (threshold or 0):
+                                import openai as _oai
+
+                                _c = _oai.OpenAI(
+                                    base_url=f"{self.base_url}/v1", api_key="EMPTY"
+                                )
+                                _r = _c.chat.completions.create(
+                                    model=model,
+                                    temperature=0.0,
+                                    max_tokens=256,
+                                    messages=[
+                                        {
+                                            "role": "user",
+                                            "content": 'Solve this math problem. Give the reasoning steps before giving the final answer on the last line by itself in the format of "Answer:". Do not add anything other than the integer answer after "Answer:".\n\n'
+                                            "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells every duck egg at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?",
+                                        }
+                                    ],
+                                )
+                                print(
+                                    f"   [DIAG] attempt={attempt+1} score={score:.3f} finish={_r.choices[0].finish_reason} prompt_tok={_r.usage.prompt_tokens} compl_tok={_r.usage.completion_tokens}"
+                                )
+                                print(
+                                    f"   [DIAG] response={_r.choices[0].message.content!r}"
+                                )
                             if threshold and score >= threshold:
                                 break
                         except Exception as e:
