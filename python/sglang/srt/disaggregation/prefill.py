@@ -800,10 +800,13 @@ class SchedulerDisaggregationPrefillMixin:
                 state_indices = kv_to_page_indices(state_indices, page_size)
 
         page_indices = kv_to_page_indices(kv_indices, page_size)
-        # Skip sending empty non-last chunks. With decode-side radix cache,
-        # the cursor clamp can produce 0-page chunks; calling send() would
-        # inflate chunk_id without producing a NIXL notification, causing
-        # the receiver to expect more chunks than it will ever receive.
-        if len(page_indices) == 0 and not last_chunk:
-            return
+        # Skip empty non-last chunks for all backends. For empty last chunks,
+        # only NIXL currently defines the aux/state-only completion path used
+        # by decode-side radix cache; keep a conservative early return for
+        # other backends until they implement the same semantics.
+        if len(page_indices) == 0:
+            if not last_chunk:
+                return
+            if self.transfer_backend != TransferBackend.NIXL:
+                return
         req.disagg_kv_sender.send(page_indices, state_indices)
