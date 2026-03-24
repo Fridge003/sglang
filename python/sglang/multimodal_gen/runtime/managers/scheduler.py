@@ -7,7 +7,7 @@ import os
 import pickle
 import time
 from collections import Counter, deque
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Any, List
 
 import zmq
@@ -39,6 +39,7 @@ from sglang.multimodal_gen.runtime.server_args import (
 from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import GREEN, RESET, init_logger
+from sglang.multimodal_gen.runtime.utils.perf_logger import RequestMetrics
 
 logger = init_logger(__name__)
 
@@ -367,10 +368,14 @@ class Scheduler:
             if not self._can_dynamic_batch(base_req, req):
                 return None
 
-        merged_req = deepcopy(base_req)
+        merged_req = copy(base_req)
+        merged_req.sampling_params = (
+            deepcopy(base_req.sampling_params)
+            if base_req.sampling_params is not None
+            else None
+        )
         merged_req.prompt = [req.prompt for req in reqs]
-
-        merged_req.extra = deepcopy(merged_req.extra)
+        merged_req.extra = dict(base_req.extra) if base_req.extra else {}
         merged_req.extra["dynamic_batch_seeds"] = [req.seed for req in reqs]
         merged_req.return_file_paths_only = base_req.return_file_paths_only
         if merged_req.return_file_paths_only:
@@ -382,6 +387,7 @@ class Scheduler:
                     )
             merged_req.extra["dynamic_batch_output_paths"] = dynamic_output_paths
         merged_req.request_id = f"dynamic_batch::{merged_req.request_id}"
+        merged_req.metrics = RequestMetrics(request_id=merged_req.request_id)
 
         return merged_req
 
@@ -411,7 +417,7 @@ class Scheduler:
             if len(value) == total_items:
                 sliced = value[start:end]
                 return list(sliced) if isinstance(value, list) else tuple(sliced)
-            return deepcopy(value)
+            return list(value) if isinstance(value, list) else tuple(value)
 
         value_items = self._count_first_dim(value)
         if value_items == total_items:
@@ -420,8 +426,24 @@ class Scheduler:
             except Exception:
                 pass
 
+        if isinstance(value, dict):
+            return dict(value)
+
         # Scalar / non-batched metadata
-        return deepcopy(value)
+        return value
+
+    def _clone_metrics_for_split(
+        self, metrics: RequestMetrics | None, request_id: str
+    ) -> RequestMetrics | None:
+        if metrics is None:
+            return None
+
+        cloned = RequestMetrics(request_id=request_id)
+        cloned.stages = dict(metrics.stages)
+        cloned.steps = list(metrics.steps)
+        cloned.total_duration_ms = metrics.total_duration_ms
+        cloned.memory_snapshots = dict(metrics.memory_snapshots)
+        return cloned
 
     def _split_batched_output(
         self, output_batch: OutputBatch, reqs: List[Req]
@@ -477,14 +499,14 @@ class Scheduler:
                 output_file_paths=self._slice_batched_value(
                     output_batch.output_file_paths, start, end, total_items
                 ),
-                metrics=deepcopy(output_batch.metrics),
+                metrics=self._clone_metrics_for_split(
+                    output_batch.metrics, req.request_id
+                ),
                 noise_pred=self._slice_batched_value(
                     output_batch.noise_pred, start, end, total_items
                 ),
                 peak_memory_mb=output_batch.peak_memory_mb,
             )
-            if split.metrics is not None:
-                split.metrics.request_id = req.request_id
             outputs.append(split)
             start = end
 
@@ -528,37 +550,48 @@ class Scheduler:
             )
             return [(identity, req)]
 
-        compatible_indices: list[int] = [0]
+        contiguous_batch_len = 1
         reject_reasons: list[str] = []
+        blocked_by_earlier_item = False
         for idx in range(1, len(self.waiting_queue)):
-            if len(compatible_indices) >= self._dynamic_batch_max_size:
+            if contiguous_batch_len >= self._dynamic_batch_max_size:
                 break
             _identity, candidate_req, _enqueue_time = self.waiting_queue[idx]
-            if isinstance(candidate_req, Req) and self._can_dynamic_batch(
-                req, candidate_req
-            ):
-                compatible_indices.append(idx)
-            elif self._batch_metrics_enabled and isinstance(candidate_req, Req):
+            if not isinstance(candidate_req, Req):
+                blocked_by_earlier_item = True
+                if self._batch_metrics_enabled:
+                    reject_reasons.append(
+                        f"queue_blocker:{type(candidate_req).__name__}"
+                    )
+                break
+            if self._can_dynamic_batch(req, candidate_req):
+                contiguous_batch_len += 1
+                continue
+
+            blocked_by_earlier_item = True
+            if self._batch_metrics_enabled:
                 reason = self._get_dynamic_batch_reject_reason(req, candidate_req)
                 if reason is not None:
                     reject_reasons.append(reason)
+            break
 
-        batch_len = len(compatible_indices)
+        batch_len = contiguous_batch_len
 
         oldest_wait_s = time.monotonic() - enqueue_time
 
         should_wait_for_more = (
+            not blocked_by_earlier_item
+            and
             batch_len < self._dynamic_batch_max_size
             and oldest_wait_s < self._dynamic_batch_delay_s
         )
         if should_wait_for_more:
             return None
 
-        batch_items: list[tuple[bytes | None, Any]] = [None] * batch_len
-        for pos, idx in enumerate(reversed(compatible_indices)):
-            item_identity, item_req, _ = self.waiting_queue[idx]
-            batch_items[batch_len - 1 - pos] = (item_identity, item_req)
-            del self.waiting_queue[idx]
+        batch_items: list[tuple[bytes | None, Any]] = []
+        for _ in range(batch_len):
+            item_identity, item_req, _ = self.waiting_queue.popleft()
+            batch_items.append((item_identity, item_req))
         self._record_batch_dispatch_metrics(
             batch_size=batch_len,
             queue_wait_ms=oldest_wait_s * 1000.0,
