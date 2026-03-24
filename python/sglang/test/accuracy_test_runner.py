@@ -313,16 +313,19 @@ def run_accuracy_test(
     # Validate against baseline
     # Handle different metric key names: "score", "mean_score" (for GPQA with repeat), "accuracy"
     # Use explicit None checks so a legitimate 0.0 score is not skipped.
-    score = next(
-        (
-            metrics[k]
-            for k in ("score", "mean_score", "accuracy")
-            if metrics.get(k) is not None
-        ),
-        0.0,
+    score = float(
+        next(
+            (
+                metrics[k]
+                for k in ("score", "mean_score", "accuracy")
+                if metrics.get(k) is not None
+            ),
+            0.0,
+        )
     )
-    passed = score >= params.baseline_accuracy
-    latency = metrics.get("latency")
+    passed = bool(score >= params.baseline_accuracy)
+    raw_latency = metrics.get("latency")
+    latency = float(raw_latency) if raw_latency is not None else None
     error = None
 
     if passed:
