@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(grep -rn \"HF_TOKEN\\\\|hf_token\\\\|secrets\\\\.\" /Users/doug/sgl-workspace/sglang/.github/workflows/*.yml)"
-    ]
-  }
-}
