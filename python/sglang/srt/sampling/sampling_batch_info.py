@@ -250,16 +250,16 @@ class SamplingBatchInfo:
             self.acc_scaling_penalties = None
 
     def apply_logits_bias(self, logits: torch.Tensor):
-        # Overlap mode: additive penalties (frequency, presence, min_new_tokens)
         if self.acc_linear_penalties is not None:
+            # Used in the overlap mode
             logits.add_(self.acc_linear_penalties)
 
-        # Overlap mode: multiplicative penalties (repetition)
         if self.acc_scaling_penalties is not None:
+            # Used in the overlap mode
             apply_scaling_penalties(logits, self.acc_scaling_penalties)
 
-        # Non-overlap mode: apply all penalties directly
         if self.penalizer_orchestrator and self.penalizer_orchestrator.is_required:
+            # Used in the overlap mode
             self.penalizer_orchestrator.apply(logits)
 
         if self.vocab_mask is not None:
