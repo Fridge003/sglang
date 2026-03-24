@@ -102,6 +102,7 @@ class FakeKVReceiver(BaseKVReceiver):
         kv_indices: list[int],
         aux_index: Optional[int] = None,
         state_indices: Optional[List[int]] = None,
+        decode_prefix_len: Optional[int] = None,
     ):
         self.has_init = True
         logger.debug(
