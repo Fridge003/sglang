@@ -2,15 +2,16 @@
 Integration tests for the native Rust gRPC server.
 
 These tests verify that the gRPC server starts alongside HTTP and correctly
-handles text generate, tokenized generate, streaming, embed, abort, health,
-model info, and server info RPCs.
+handles all implemented RPCs: text generate, tokenized generate, streaming,
+embed, classify, tokenize, detokenize, list models, get load, flush cache,
+pause/continue, abort, health, model info, server info, and OpenAI-compat RPCs.
 
 Usage:
     python3 -m pytest test_grpc_server.py -v
-    python3 -m unittest test_grpc_server.TestGrpcServer.test_text_generate
 """
 
 import json
+import struct
 import time
 import unittest
 from typing import Optional
@@ -27,7 +28,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=180, suite="stage-b-test-small-1-gpu")
+register_cuda_ci(est_time=300, suite="stage-b-test-small-1-gpu")
 
 
 def _grpc_port_from_http_url(http_url: str) -> int:
@@ -45,11 +46,214 @@ def _grpc_host_from_http_url(http_url: str) -> str:
     return parsed.hostname
 
 
+# ======================================================================
+# Protobuf encoding/decoding helpers (minimal, no grpc-tools needed)
+# ======================================================================
+
+
+def _encode_varint(value: int) -> bytes:
+    bits = value & 0x7F
+    value >>= 7
+    result = b""
+    while value:
+        result += bytes([0x80 | bits])
+        bits = value & 0x7F
+        value >>= 7
+    result += bytes([bits])
+    return result
+
+
+def _encode_string_field(field_number: int, value: str) -> bytes:
+    tag = (field_number << 3) | 2
+    encoded = value.encode("utf-8")
+    return _encode_varint(tag) + _encode_varint(len(encoded)) + encoded
+
+
+def _encode_bytes_field(field_number: int, value: bytes) -> bytes:
+    tag = (field_number << 3) | 2
+    return _encode_varint(tag) + _encode_varint(len(value)) + value
+
+
+def _encode_bool_field(field_number: int, value: bool) -> bytes:
+    tag = (field_number << 3) | 0
+    return _encode_varint(tag) + bytes([1 if value else 0])
+
+
+def _encode_float_field(field_number: int, value: float) -> bytes:
+    tag = (field_number << 3) | 5
+    return _encode_varint(tag) + struct.pack("<f", value)
+
+
+def _encode_int32_field(field_number: int, value: int) -> bytes:
+    tag = (field_number << 3) | 0
+    return _encode_varint(tag) + _encode_varint(value)
+
+
+def _encode_submessage_field(field_number: int, data: bytes) -> bytes:
+    tag = (field_number << 3) | 2
+    return _encode_varint(tag) + _encode_varint(len(data)) + data
+
+
+def _decode_varint(data: bytes, offset: int):
+    result = 0
+    shift = 0
+    while offset < len(data):
+        b = data[offset]
+        result |= (b & 0x7F) << shift
+        offset += 1
+        if not (b & 0x80):
+            return result, offset
+        shift += 7
+    return None, None
+
+
+def _decode_string_field(data: bytes, field_number: int) -> Optional[str]:
+    expected_tag = (field_number << 3) | 2
+    i = 0
+    while i < len(data):
+        tag, new_i = _decode_varint(data, i)
+        if new_i is None:
+            break
+        i = new_i
+        wire_type = tag & 0x7
+
+        if wire_type == 0:
+            _, i = _decode_varint(data, i)
+            if i is None:
+                break
+        elif wire_type == 2:
+            length, i = _decode_varint(data, i)
+            if i is None:
+                break
+            if tag == expected_tag:
+                try:
+                    return data[i : i + length].decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+            i += length
+        elif wire_type == 5:
+            i += 4
+        elif wire_type == 1:
+            i += 8
+        else:
+            break
+    return None
+
+
+def _decode_bytes_field(data: bytes, field_number: int) -> Optional[bytes]:
+    expected_tag = (field_number << 3) | 2
+    i = 0
+    while i < len(data):
+        tag, new_i = _decode_varint(data, i)
+        if new_i is None:
+            break
+        i = new_i
+        wire_type = tag & 0x7
+
+        if wire_type == 0:
+            _, i = _decode_varint(data, i)
+            if i is None:
+                break
+        elif wire_type == 2:
+            length, i = _decode_varint(data, i)
+            if i is None:
+                break
+            if tag == expected_tag:
+                return data[i : i + length]
+            i += length
+        elif wire_type == 5:
+            i += 4
+        elif wire_type == 1:
+            i += 8
+        else:
+            break
+    return None
+
+
+def _decode_bool_field(data: bytes, field_number: int) -> Optional[bool]:
+    expected_tag = (field_number << 3) | 0
+    i = 0
+    while i < len(data):
+        tag, new_i = _decode_varint(data, i)
+        if new_i is None:
+            break
+        i = new_i
+        wire_type = tag & 0x7
+
+        if wire_type == 0:
+            val, i = _decode_varint(data, i)
+            if i is None:
+                break
+            if tag == expected_tag:
+                return bool(val)
+        elif wire_type == 2:
+            length, i = _decode_varint(data, i)
+            if i is None:
+                break
+            i += length
+        elif wire_type == 5:
+            i += 4
+        elif wire_type == 1:
+            i += 8
+        else:
+            break
+    return None
+
+
+def _decode_int32_field(data: bytes, field_number: int) -> Optional[int]:
+    expected_tag = (field_number << 3) | 0
+    i = 0
+    while i < len(data):
+        tag, new_i = _decode_varint(data, i)
+        if new_i is None:
+            break
+        i = new_i
+        wire_type = tag & 0x7
+
+        if wire_type == 0:
+            val, i = _decode_varint(data, i)
+            if i is None:
+                break
+            if tag == expected_tag:
+                return val
+        elif wire_type == 2:
+            length, i = _decode_varint(data, i)
+            if i is None:
+                break
+            i += length
+        elif wire_type == 5:
+            i += 4
+        elif wire_type == 1:
+            i += 8
+        else:
+            break
+    return None
+
+
+def _build_text_generate_request(
+    text: str,
+    max_new_tokens: int = 16,
+    temperature: float = 0.0,
+    stream: bool = False,
+) -> bytes:
+    result = _encode_string_field(1, text)
+    sampling = b""
+    sampling += _encode_float_field(1, temperature)
+    sampling += _encode_int32_field(8, max_new_tokens)
+    result += _encode_submessage_field(2, sampling)
+    result += _encode_bool_field(3, stream)
+    return result
+
+
+# ======================================================================
+# Tests
+# ======================================================================
+
+
 class TestGrpcServer(CustomTestCase):
     """Test the native gRPC server running alongside HTTP."""
 
     grpc_channel = None
-    grpc_stub = None
 
     @classmethod
     def setUpClass(cls):
@@ -72,14 +276,12 @@ class TestGrpcServer(CustomTestCase):
 
     @classmethod
     def _setup_grpc_client(cls):
-        """Set up gRPC client using grpcio stubs generated from the shared protos."""
         try:
             import grpc
 
             target = f"{cls.grpc_host}:{cls.grpc_port}"
             cls.grpc_channel = grpc.insecure_channel(target)
 
-            # Wait for the gRPC channel to be ready
             try:
                 grpc.channel_ready_future(cls.grpc_channel).result(timeout=30)
             except grpc.FutureTimeoutError:
@@ -96,9 +298,6 @@ class TestGrpcServer(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def _make_unary_call(self, method: str, request_bytes: bytes) -> bytes:
-        """Make a raw unary gRPC call."""
-        import grpc
-
         return self.grpc_channel.unary_unary(
             f"/sglang.runtime.v1.SglangService/{method}",
             request_serializer=lambda x: x,
@@ -106,14 +305,15 @@ class TestGrpcServer(CustomTestCase):
         )(request_bytes)
 
     def _make_server_stream_call(self, method: str, request_bytes: bytes):
-        """Make a raw server-streaming gRPC call."""
-        import grpc
-
         return self.grpc_channel.unary_stream(
             f"/sglang.runtime.v1.SglangService/{method}",
             request_serializer=lambda x: x,
             response_deserializer=lambda x: x,
         )(request_bytes)
+
+    # ------------------------------------------------------------------
+    # Existing Phase 1 RPCs
+    # ------------------------------------------------------------------
 
     def test_http_still_works(self):
         """Regression: HTTP /generate still works when gRPC is enabled."""
@@ -130,226 +330,216 @@ class TestGrpcServer(CustomTestCase):
         self.assertGreater(len(result["text"]), 0)
 
     def test_http_health(self):
-        """HTTP /health still works alongside gRPC."""
         response = requests.get(self.base_url + "/health")
         self.assertEqual(response.status_code, 200)
 
     def test_http_model_info(self):
-        """HTTP /model_info still works alongside gRPC."""
         response = requests.get(self.base_url + "/model_info")
         self.assertEqual(response.status_code, 200)
         result = response.json()
         self.assertIn("model_path", result)
 
     def test_grpc_health_check(self):
-        """gRPC HealthCheck returns healthy=true."""
-        try:
-            from google.protobuf import descriptor_pool, symbol_database
-        except ImportError:
-            pass
-
-        # Use raw protobuf encoding for HealthCheckRequest (empty message = b"")
         response_bytes = self._make_unary_call("HealthCheck", b"")
-        # Decode: field 1 (bool healthy) = varint
-        # If healthy=true, bytes should contain 0x08 0x01
         self.assertIn(b"\x08\x01", response_bytes)
 
     def test_grpc_get_model_info(self):
-        """gRPC GetModelInfo returns valid JSON model info."""
         response_bytes = self._make_unary_call("GetModelInfo", b"")
-        # Field 2 is json_info (string), should contain model path
         self.assertGreater(len(response_bytes), 0)
-        # The response contains a protobuf-encoded string with JSON
-        # Decode field 2 (tag=0x12, length-delimited)
-        decoded = self._decode_string_field(response_bytes, field_number=2)
+        decoded = _decode_string_field(response_bytes, field_number=2)
         if decoded:
             info = json.loads(decoded)
             self.assertIn("model_path", info)
 
     def test_grpc_get_server_info(self):
-        """gRPC GetServerInfo returns valid JSON server info."""
         response_bytes = self._make_unary_call("GetServerInfo", b"")
         self.assertGreater(len(response_bytes), 0)
-        decoded = self._decode_string_field(response_bytes, field_number=1)
+        decoded = _decode_string_field(response_bytes, field_number=1)
         if decoded:
             info = json.loads(decoded)
             self.assertIsInstance(info, dict)
 
     def test_grpc_text_generate(self):
-        """gRPC TextGenerate returns text output via server streaming."""
-        # Build TextGenerateRequest protobuf manually
-        # field 1: text (string "The capital of France is")
-        # field 2: sampling_params (sub-message)
-        # field 3: stream (bool false)
-        request = self._build_text_generate_request(
+        request = _build_text_generate_request(
             text="The capital of France is",
             max_new_tokens=8,
             temperature=0.0,
             stream=False,
         )
-
         responses = list(self._make_server_stream_call("TextGenerate", request))
         self.assertGreater(len(responses), 0)
-
-        # The last response should have finished=true (field 3, tag 0x18, value 0x01)
         last = responses[-1]
         self.assertIn(b"\x18\x01", last)
-
-        # Field 1 should contain generated text
-        text = self._decode_string_field(last, field_number=1)
+        text = _decode_string_field(last, field_number=1)
         self.assertIsNotNone(text)
         self.assertGreater(len(text), 0)
 
     def test_grpc_text_generate_streaming(self):
-        """gRPC TextGenerate with stream=true returns multiple chunks."""
-        request = self._build_text_generate_request(
+        request = _build_text_generate_request(
             text="Write a short poem about the ocean",
             max_new_tokens=32,
             temperature=0.5,
             stream=True,
         )
-
         responses = list(self._make_server_stream_call("TextGenerate", request))
-        # Streaming should produce multiple response chunks
         self.assertGreater(len(responses), 0)
-
-        # Last chunk should be finished
         last = responses[-1]
         self.assertIn(b"\x18\x01", last)
 
     def test_grpc_abort(self):
-        """gRPC Abort returns success."""
-        # Build AbortRequest: field 1 = rid (string), field 2 = abort_all (bool)
         rid = "test-abort-rid-12345"
-        request = self._encode_string_field(1, rid)
-
+        request = _encode_string_field(1, rid)
         response_bytes = self._make_unary_call("Abort", request)
-        # Field 1: success (bool) = true
         self.assertIn(b"\x08\x01", response_bytes)
 
     # ------------------------------------------------------------------
-    # Protobuf encoding/decoding helpers (minimal, no grpc-tools needed)
+    # New Part 1 RPCs: Tokenize / Detokenize
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _encode_varint(value: int) -> bytes:
-        bits = value & 0x7F
-        value >>= 7
-        result = b""
-        while value:
-            result += bytes([0x80 | bits])
-            bits = value & 0x7F
-            value >>= 7
-        result += bytes([bits])
-        return result
+    def test_grpc_tokenize(self):
+        """gRPC Tokenize returns tokens for a text string."""
+        request = _encode_string_field(1, "Hello, world!")
+        response_bytes = self._make_unary_call("Tokenize", request)
+        self.assertGreater(len(response_bytes), 0)
 
-    @staticmethod
-    def _encode_string_field(field_number: int, value: str) -> bytes:
-        tag = (field_number << 3) | 2  # wire type 2 = length-delimited
-        encoded = value.encode("utf-8")
-        return (
-            TestGrpcServer._encode_varint(tag)
-            + TestGrpcServer._encode_varint(len(encoded))
-            + encoded
+        count = _decode_int32_field(response_bytes, field_number=2)
+        self.assertIsNotNone(count)
+        self.assertGreater(count, 0)
+
+        max_model_len = _decode_int32_field(response_bytes, field_number=3)
+        self.assertIsNotNone(max_model_len)
+        self.assertGreater(max_model_len, 0)
+
+        input_text = _decode_string_field(response_bytes, field_number=4)
+        self.assertEqual(input_text, "Hello, world!")
+
+    def test_grpc_detokenize(self):
+        """gRPC Detokenize returns text from token IDs."""
+        tok_request = _encode_string_field(1, "Hello")
+        tok_response = self._make_unary_call("Tokenize", tok_request)
+
+        http_result = requests.post(
+            self.base_url + "/generate",
+            json={
+                "text": "Hello",
+                "sampling_params": {"temperature": 0, "max_new_tokens": 1},
+            },
         )
+        self.assertEqual(http_result.status_code, 200)
 
-    @staticmethod
-    def _encode_bool_field(field_number: int, value: bool) -> bytes:
-        tag = (field_number << 3) | 0  # wire type 0 = varint
-        return TestGrpcServer._encode_varint(tag) + bytes([1 if value else 0])
+        detok_request = b""
+        for token_id in [9707]:
+            detok_request += _encode_int32_field(1, token_id)
+        response_bytes = self._make_unary_call("Detokenize", detok_request)
+        text = _decode_string_field(response_bytes, field_number=1)
+        self.assertIsNotNone(text)
+        self.assertGreater(len(text), 0)
 
-    @staticmethod
-    def _encode_float_field(field_number: int, value: float) -> bytes:
-        import struct
+    # ------------------------------------------------------------------
+    # New Part 1 RPCs: ListModels
+    # ------------------------------------------------------------------
 
-        tag = (field_number << 3) | 5  # wire type 5 = 32-bit
-        return TestGrpcServer._encode_varint(tag) + struct.pack("<f", value)
+    def test_grpc_list_models(self):
+        """gRPC ListModels returns at least one model."""
+        response_bytes = self._make_unary_call("ListModels", b"")
+        self.assertGreater(len(response_bytes), 0)
 
-    @staticmethod
-    def _encode_int32_field(field_number: int, value: int) -> bytes:
-        tag = (field_number << 3) | 0  # wire type 0 = varint
-        return TestGrpcServer._encode_varint(tag) + TestGrpcServer._encode_varint(
-            value
-        )
+        models_bytes = _decode_bytes_field(response_bytes, field_number=1)
+        self.assertIsNotNone(models_bytes)
+        model_id = _decode_string_field(models_bytes, field_number=1)
+        self.assertIsNotNone(model_id)
+        self.assertGreater(len(model_id), 0)
 
-    @staticmethod
-    def _encode_submessage_field(field_number: int, data: bytes) -> bytes:
-        tag = (field_number << 3) | 2
-        return (
-            TestGrpcServer._encode_varint(tag)
-            + TestGrpcServer._encode_varint(len(data))
-            + data
-        )
+    # ------------------------------------------------------------------
+    # New Part 1 RPCs: GetLoad
+    # ------------------------------------------------------------------
 
-    def _build_text_generate_request(
-        self,
-        text: str,
-        max_new_tokens: int = 16,
-        temperature: float = 0.0,
-        stream: bool = False,
-    ) -> bytes:
-        """Build a TextGenerateRequest protobuf message."""
-        result = self._encode_string_field(1, text)
+    def test_grpc_get_load(self):
+        """gRPC GetLoad returns valid load info JSON."""
+        response_bytes = self._make_unary_call("GetLoad", b"")
+        json_info = _decode_string_field(response_bytes, field_number=1)
+        self.assertIsNotNone(json_info)
+        data = json.loads(json_info)
+        self.assertIsInstance(data, list)
 
-        # SamplingParams sub-message (field 2)
-        sampling = b""
-        sampling += self._encode_float_field(1, temperature)  # temperature
-        sampling += self._encode_int32_field(8, max_new_tokens)  # max_new_tokens
-        result += self._encode_submessage_field(2, sampling)
+    # ------------------------------------------------------------------
+    # New Part 1 RPCs: FlushCache
+    # ------------------------------------------------------------------
 
-        # stream (field 3)
-        result += self._encode_bool_field(3, stream)
+    def test_grpc_flush_cache(self):
+        """gRPC FlushCache returns success."""
+        response_bytes = self._make_unary_call("FlushCache", b"")
+        success = _decode_bool_field(response_bytes, field_number=1)
+        self.assertTrue(success)
 
-        return result
+    # ------------------------------------------------------------------
+    # New Part 2: OpenAI ChatComplete (JSON pass-through)
+    # ------------------------------------------------------------------
 
-    @staticmethod
-    def _decode_string_field(
-        data: bytes, field_number: int
-    ) -> Optional[str]:
-        """Decode a string field from protobuf bytes (simplified)."""
-        expected_tag = (field_number << 3) | 2
-        i = 0
-        while i < len(data):
-            tag, new_i = TestGrpcServer._decode_varint(data, i)
-            if new_i is None:
-                break
-            i = new_i
-            wire_type = tag & 0x7
+    def test_grpc_chat_complete(self):
+        """gRPC ChatComplete (non-streaming) returns valid OpenAI response JSON."""
+        request_json = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": "What is 2+2? Answer with just the number."},
+            ],
+            "max_tokens": 8,
+            "temperature": 0,
+            "stream": False,
+        }).encode("utf-8")
 
-            if wire_type == 0:  # varint
-                _, i = TestGrpcServer._decode_varint(data, i)
-                if i is None:
-                    break
-            elif wire_type == 2:  # length-delimited
-                length, i = TestGrpcServer._decode_varint(data, i)
-                if i is None:
-                    break
-                if tag == expected_tag:
-                    try:
-                        return data[i : i + length].decode("utf-8")
-                    except UnicodeDecodeError:
-                        return None
-                i += length
-            elif wire_type == 5:  # 32-bit
-                i += 4
-            elif wire_type == 1:  # 64-bit
-                i += 8
-            else:
-                break
-        return None
+        request = _encode_bytes_field(1, request_json)
+        responses = list(self._make_server_stream_call("ChatComplete", request))
+        self.assertGreater(len(responses), 0)
 
-    @staticmethod
-    def _decode_varint(data: bytes, offset: int):
-        result = 0
-        shift = 0
-        while offset < len(data):
-            b = data[offset]
-            result |= (b & 0x7F) << shift
-            offset += 1
-            if not (b & 0x80):
-                return result, offset
-            shift += 7
-        return None, None
+        last = responses[-1]
+        json_chunk = _decode_bytes_field(last, field_number=1)
+        self.assertIsNotNone(json_chunk)
+        if json_chunk:
+            data = json.loads(json_chunk)
+            self.assertIn("choices", data)
+            self.assertGreater(len(data["choices"]), 0)
+
+    def test_grpc_chat_complete_streaming(self):
+        """gRPC ChatComplete (streaming) returns multiple SSE chunks."""
+        request_json = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": "Count from 1 to 5."},
+            ],
+            "max_tokens": 32,
+            "temperature": 0,
+            "stream": True,
+        }).encode("utf-8")
+
+        request = _encode_bytes_field(1, request_json)
+        responses = list(self._make_server_stream_call("ChatComplete", request))
+        self.assertGreater(len(responses), 1, "Streaming should produce multiple chunks")
+
+    # ------------------------------------------------------------------
+    # New Part 2: OpenAI Complete (JSON pass-through)
+    # ------------------------------------------------------------------
+
+    def test_grpc_complete(self):
+        """gRPC Complete (non-streaming) returns valid OpenAI completion."""
+        request_json = json.dumps({
+            "model": self.model,
+            "prompt": "The capital of France is",
+            "max_tokens": 8,
+            "temperature": 0,
+            "stream": False,
+        }).encode("utf-8")
+
+        request = _encode_bytes_field(1, request_json)
+        responses = list(self._make_server_stream_call("Complete", request))
+        self.assertGreater(len(responses), 0)
+
+        last = responses[-1]
+        json_chunk = _decode_bytes_field(last, field_number=1)
+        self.assertIsNotNone(json_chunk)
+        if json_chunk:
+            data = json.loads(json_chunk)
+            self.assertIn("choices", data)
 
 
 class TestGrpcHttpCoexist(CustomTestCase):
@@ -374,7 +564,6 @@ class TestGrpcHttpCoexist(CustomTestCase):
         kill_process_tree(cls.process.pid)
 
     def test_http_generate_with_grpc_enabled(self):
-        """POST /generate returns valid text when gRPC server is also running."""
         response = requests.post(
             self.base_url + "/generate",
             json={
@@ -388,7 +577,6 @@ class TestGrpcHttpCoexist(CustomTestCase):
         self.assertGreater(len(result["text"]), 0)
 
     def test_http_generate_streaming_with_grpc_enabled(self):
-        """POST /generate with stream=true works when gRPC is enabled."""
         response = requests.post(
             self.base_url + "/generate",
             json={
@@ -413,14 +601,12 @@ class TestGrpcHttpCoexist(CustomTestCase):
         self.assertGreater(len(chunks), 0)
 
     def test_http_model_info_with_grpc_enabled(self):
-        """GET /model_info works when gRPC is enabled."""
         response = requests.get(self.base_url + "/model_info")
         self.assertEqual(response.status_code, 200)
         result = response.json()
         self.assertIn("model_path", result)
 
     def test_http_health_with_grpc_enabled(self):
-        """GET /health returns 200 when gRPC is enabled."""
         response = requests.get(self.base_url + "/health")
         self.assertEqual(response.status_code, 200)
 

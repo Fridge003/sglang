@@ -12,16 +12,35 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+class MockRequest:
+    """Lightweight stand-in for fastapi.Request when called from gRPC.
+
+    The OpenAI serving classes expect a fastapi.Request for disconnect
+    detection and routing key extraction. This satisfies that interface
+    without importing FastAPI.
+    """
+
+    def __init__(self, headers: Optional[Dict[str, str]] = None):
+        self.headers = headers or {}
+        self.url = type("URL", (), {"path": "/grpc"})()
+        self.state = type("State", (), {})()
+        self.app = type(
+            "App", (), {"state": type("AppState", (), {})()}
+        )()
+
+    async def is_disconnected(self) -> bool:
+        return False
 
 
 class RuntimeHandle:
     """Thin Python handle that the Rust gRPC server calls into.
 
-    Provides synchronous ``submit_generate``, ``submit_embed``, ``abort``,
-    ``get_model_info``, ``get_server_info``, and ``health_check`` methods.
+    Provides synchronous ``submit_*``, ``abort``, and info methods.
     Each submit method receives a ``chunk_callback`` (a Rust-side PyO3 object)
     that it invokes with ``(chunk_dict, finished, error)`` for each response
     chunk produced by TokenizerManager.
@@ -45,9 +64,60 @@ class RuntimeHandle:
         )
         self._thread.start()
 
+        self._openai_serving_classes = None
+
     def _run_loop(self):
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
+
+    @property
+    def _tm_loop(self):
+        """Return the tokenizer_manager's event loop (uvicorn loop).
+
+        Communicator-based async methods (flush_cache, get_load, etc.) use
+        asyncio.Event internally, which only works within a single event
+        loop.  These must run on the same loop as handle_loop(), i.e. the
+        tokenizer_manager's event_loop, NOT our grpc-bridge-loop.
+        """
+        return getattr(self.tokenizer_manager, "event_loop", None) or self._loop
+
+    def _get_openai_serving(self):
+        """Lazily initialize OpenAI serving classes."""
+        if self._openai_serving_classes is not None:
+            return self._openai_serving_classes
+
+        from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+        from sglang.srt.entrypoints.openai.serving_classify import (
+            OpenAIServingClassify,
+        )
+        from sglang.srt.entrypoints.openai.serving_completions import (
+            OpenAIServingCompletion,
+        )
+        from sglang.srt.entrypoints.openai.serving_embedding import (
+            OpenAIServingEmbedding,
+        )
+        from sglang.srt.entrypoints.openai.serving_rerank import OpenAIServingRerank
+        from sglang.srt.entrypoints.openai.serving_score import OpenAIServingScore
+
+        self._openai_serving_classes = {
+            "chat": OpenAIServingChat(
+                self.tokenizer_manager, self.template_manager
+            ),
+            "completion": OpenAIServingCompletion(
+                self.tokenizer_manager, self.template_manager
+            ),
+            "embedding": OpenAIServingEmbedding(
+                self.tokenizer_manager, self.template_manager
+            ),
+            "classify": OpenAIServingClassify(
+                self.tokenizer_manager, self.template_manager
+            ),
+            "score": OpenAIServingScore(self.tokenizer_manager),
+            "rerank": OpenAIServingRerank(
+                self.tokenizer_manager, self.template_manager
+            ),
+        }
+        return self._openai_serving_classes
 
     # ------------------------------------------------------------------
     # Generation (text or tokenized)
@@ -157,6 +227,36 @@ class RuntimeHandle:
             chunk_callback({}, finished=True, error=str(e))
 
     # ------------------------------------------------------------------
+    # Classify (same internal path as embed)
+    # ------------------------------------------------------------------
+
+    def submit_classify(
+        self,
+        *,
+        rid: str,
+        chunk_callback,
+        text: Optional[str] = None,
+        input_ids=None,
+        routing_key: Optional[str] = None,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
+        """Submit a classify request to TokenizerManager (same path as embed)."""
+        from sglang.srt.managers.io_struct import EmbeddingReqInput
+
+        obj = EmbeddingReqInput(
+            text=text,
+            input_ids=input_ids,
+            rid=rid,
+            routing_key=routing_key,
+            external_trace_header=trace_headers,
+            received_time=time.time(),
+        )
+
+        asyncio.run_coroutine_threadsafe(
+            self._run_embed(obj, chunk_callback), self._loop
+        )
+
+    # ------------------------------------------------------------------
     # Abort
     # ------------------------------------------------------------------
 
@@ -205,3 +305,340 @@ class RuntimeHandle:
         if self.tokenizer_manager.server_status == ServerStatus.Starting:
             return False
         return True
+
+    # ------------------------------------------------------------------
+    # Tokenize / Detokenize (local ops, no inference)
+    # ------------------------------------------------------------------
+
+    def tokenize(self, text: str, add_special_tokens: bool = True) -> str:
+        """Tokenize text and return result as JSON string."""
+        tokenizer = self.tokenizer_manager.tokenizer
+        tokens = tokenizer.encode(text, add_special_tokens=add_special_tokens)
+        result = {
+            "tokens": tokens,
+            "count": len(tokens),
+            "max_model_len": self.tokenizer_manager.model_config.context_len,
+            "input_text": text,
+        }
+        return json.dumps(result)
+
+    def detokenize(self, tokens: List[int]) -> str:
+        """Detokenize token IDs and return result as JSON string."""
+        tokenizer = self.tokenizer_manager.tokenizer
+        text = tokenizer.decode(tokens)
+        return json.dumps({"text": text})
+
+    # ------------------------------------------------------------------
+    # List models
+    # ------------------------------------------------------------------
+
+    def list_models(self) -> str:
+        """Return the list of served models as JSON string."""
+        served_model_name = self.tokenizer_manager.served_model_name
+        models = [
+            {
+                "id": served_model_name,
+                "root": served_model_name,
+                "max_model_len": self.tokenizer_manager.model_config.context_len,
+            }
+        ]
+        if self.server_args.enable_lora and hasattr(
+            self.tokenizer_manager, "lora_registry"
+        ):
+            lora_registry = self.tokenizer_manager.lora_registry
+            for _, lora_ref in lora_registry.get_all_adapters().items():
+                models.append(
+                    {
+                        "id": lora_ref.lora_name,
+                        "root": lora_ref.lora_path,
+                        "parent": served_model_name,
+                    }
+                )
+        return json.dumps(models)
+
+    # ------------------------------------------------------------------
+    # Get load
+    # ------------------------------------------------------------------
+
+    def get_load(self, chunk_callback) -> None:
+        """Return load info via chunk_callback."""
+        asyncio.run_coroutine_threadsafe(
+            self._get_load_async(chunk_callback), self._tm_loop
+        )
+
+    async def _get_load_async(self, chunk_callback) -> None:
+        try:
+            result = await self.tokenizer_manager.get_load()
+            data = json.dumps([dataclasses.asdict(r) for r in result], default=str)
+            chunk_callback(data.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC get_load error: %s", e)
+            data = json.dumps({"error": str(e)})
+            chunk_callback(data.encode("utf-8"), finished=True, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Flush cache
+    # ------------------------------------------------------------------
+
+    def flush_cache(self, chunk_callback) -> None:
+        """Flush the radix cache. Sends result through chunk_callback."""
+        asyncio.run_coroutine_threadsafe(
+            self._flush_cache_async(chunk_callback), self._tm_loop
+        )
+
+    async def _flush_cache_async(self, chunk_callback) -> None:
+        try:
+            ret = await self.tokenizer_manager.flush_cache()
+            result = json.dumps({"success": ret.success, "message": "Cache flushed."})
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC flush_cache error: %s", e)
+            result = json.dumps({"success": False, "message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Pause / Continue generation
+    # ------------------------------------------------------------------
+
+    def pause_generation(self, mode: str, chunk_callback) -> None:
+        """Pause generation. Sends result through chunk_callback."""
+        from sglang.srt.managers.io_struct import PauseGenerationReqInput
+
+        obj = PauseGenerationReqInput(mode=mode)
+        asyncio.run_coroutine_threadsafe(
+            self._pause_generation_async(obj, chunk_callback), self._tm_loop
+        )
+
+    async def _pause_generation_async(self, obj, chunk_callback) -> None:
+        try:
+            await self.tokenizer_manager.pause_generation(obj)
+            result = json.dumps({"message": f"Generation paused (mode={obj.mode})."})
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC pause_generation error: %s", e)
+            result = json.dumps({"message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    def continue_generation(self, chunk_callback) -> None:
+        """Continue generation. Sends result through chunk_callback."""
+        from sglang.srt.managers.io_struct import ContinueGenerationReqInput
+
+        obj = ContinueGenerationReqInput()
+        asyncio.run_coroutine_threadsafe(
+            self._continue_generation_async(obj, chunk_callback), self._tm_loop
+        )
+
+    async def _continue_generation_async(self, obj, chunk_callback) -> None:
+        try:
+            await self.tokenizer_manager.continue_generation(obj)
+            result = json.dumps({"message": "Generation continued."})
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC continue_generation error: %s", e)
+            result = json.dumps({"message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Profile (admin)
+    # ------------------------------------------------------------------
+
+    def start_profile(self, output_dir: Optional[str], chunk_callback) -> None:
+        """Start profiling. Sends result through chunk_callback."""
+        asyncio.run_coroutine_threadsafe(
+            self._start_profile_async(output_dir, chunk_callback), self._tm_loop
+        )
+
+    async def _start_profile_async(self, output_dir, chunk_callback) -> None:
+        try:
+            kwargs = {}
+            if output_dir:
+                kwargs["output_dir"] = output_dir
+            await self.tokenizer_manager.start_profile(**kwargs)
+            result = json.dumps({"message": "Profiling started."})
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC start_profile error: %s", e)
+            result = json.dumps({"message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    def stop_profile(self, chunk_callback) -> None:
+        """Stop profiling. Sends result through chunk_callback."""
+        asyncio.run_coroutine_threadsafe(
+            self._stop_profile_async(chunk_callback), self._tm_loop
+        )
+
+    async def _stop_profile_async(self, chunk_callback) -> None:
+        try:
+            await self.tokenizer_manager.stop_profile()
+            result = json.dumps({"message": "Profiling stopped."})
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC stop_profile error: %s", e)
+            result = json.dumps({"message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    # ------------------------------------------------------------------
+    # Update weights from disk (admin)
+    # ------------------------------------------------------------------
+
+    def update_weights_from_disk(
+        self, model_path: str, load_format: Optional[str], chunk_callback
+    ) -> None:
+        """Update weights from disk. Sends result through chunk_callback."""
+        asyncio.run_coroutine_threadsafe(
+            self._update_weights_async(model_path, load_format, chunk_callback),
+            self._tm_loop,
+        )
+
+    async def _update_weights_async(
+        self, model_path: str, load_format: Optional[str], chunk_callback
+    ) -> None:
+        try:
+            from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqInput
+
+            obj = UpdateWeightFromDiskReqInput(
+                model_path=model_path,
+                load_format=load_format,
+            )
+            success, message, num_paused = (
+                await self.tokenizer_manager.update_weights_from_disk(
+                    obj, request=None
+                )
+            )
+            result = json.dumps(
+                {
+                    "success": success,
+                    "message": message,
+                    "num_paused_requests": num_paused,
+                }
+            )
+            chunk_callback(result.encode("utf-8"), finished=True)
+        except Exception as e:
+            logger.error("gRPC update_weights error: %s", e)
+            result = json.dumps({"success": False, "message": str(e)})
+            chunk_callback(result.encode("utf-8"), finished=True, error=str(e))
+
+    # ------------------------------------------------------------------
+    # OpenAI-compatible RPCs (JSON pass-through)
+    # ------------------------------------------------------------------
+
+    def submit_openai_chat(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI chat completion (JSON pass-through)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request("chat", json_body, chunk_callback, streaming=True),
+            self._loop,
+        )
+
+    def submit_openai_complete(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI completion (JSON pass-through)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request(
+                "completion", json_body, chunk_callback, streaming=True
+            ),
+            self._loop,
+        )
+
+    def submit_openai_embed(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI embedding (JSON pass-through, unary)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request(
+                "embedding", json_body, chunk_callback, streaming=False
+            ),
+            self._loop,
+        )
+
+    def submit_openai_classify(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI classify (JSON pass-through, unary)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request(
+                "classify", json_body, chunk_callback, streaming=False
+            ),
+            self._loop,
+        )
+
+    def submit_openai_score(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI score (JSON pass-through, unary)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request(
+                "score", json_body, chunk_callback, streaming=False
+            ),
+            self._loop,
+        )
+
+    def submit_openai_rerank(self, *, json_body: bytes, chunk_callback):
+        """Submit OpenAI rerank (JSON pass-through, unary)."""
+        asyncio.run_coroutine_threadsafe(
+            self._run_openai_request(
+                "rerank", json_body, chunk_callback, streaming=False
+            ),
+            self._loop,
+        )
+
+    def _get_openai_request_class(self, serving_key: str):
+        """Return the Pydantic request class for a given serving key."""
+        from sglang.srt.entrypoints.openai.protocol import (
+            ChatCompletionRequest,
+            ClassifyRequest,
+            CompletionRequest,
+            EmbeddingRequest,
+            ScoringRequest,
+            V1RerankReqInput,
+        )
+
+        return {
+            "chat": ChatCompletionRequest,
+            "completion": CompletionRequest,
+            "embedding": EmbeddingRequest,
+            "classify": ClassifyRequest,
+            "score": ScoringRequest,
+            "rerank": V1RerankReqInput,
+        }[serving_key]
+
+    async def _run_openai_request(
+        self,
+        serving_key: str,
+        json_body: bytes,
+        chunk_callback,
+        streaming: bool,
+    ):
+        """Generic OpenAI pass-through handler.
+
+        Delegates to the appropriate OpenAIServing* class, sending response
+        data back through the Rust chunk_callback.
+        """
+        try:
+            serving = self._get_openai_serving()[serving_key]
+            request_dict = json.loads(json_body)
+            mock_request = MockRequest()
+
+            request_cls = self._get_openai_request_class(serving_key)
+            request_obj = request_cls(**request_dict)
+
+            result = await serving.handle_request(request_obj, mock_request)
+
+            if hasattr(result, "body_iterator"):
+                async for raw_chunk in result.body_iterator:
+                    if isinstance(raw_chunk, bytes):
+                        raw_chunk = raw_chunk.decode("utf-8", errors="replace")
+                    if raw_chunk.startswith("data: ") and raw_chunk.strip() != "data: [DONE]":
+                        json_chunk = raw_chunk[len("data: "):].strip()
+                        if json_chunk:
+                            chunk_callback(
+                                json_chunk.encode("utf-8"), finished=False
+                            )
+                chunk_callback(b"", finished=True)
+            else:
+                if hasattr(result, "model_dump"):
+                    resp_bytes = json.dumps(result.model_dump()).encode("utf-8")
+                elif hasattr(result, "body"):
+                    resp_bytes = result.body
+                elif isinstance(result, (dict, list)):
+                    resp_bytes = json.dumps(result).encode("utf-8")
+                else:
+                    resp_bytes = str(result).encode("utf-8")
+                chunk_callback(resp_bytes, finished=True)
+
+        except Exception as e:
+            logger.error("gRPC OpenAI %s error: %s", serving_key, e)
+            error_body = json.dumps({"error": {"message": str(e)}}).encode("utf-8")
+            chunk_callback(error_body, finished=True, error=str(e))

@@ -81,8 +81,18 @@ fn grpc_metadata_to_trace_headers(
 
 type StreamResult<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
+/// Helper: parse a JSON string returned by Python into a serde_json::Value.
+fn parse_json_result(json_str: &str) -> Result<serde_json::Value, Status> {
+    serde_json::from_str(json_str)
+        .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))
+}
+
 #[tonic::async_trait]
 impl proto::sglang_service_server::SglangService for SglangServiceImpl {
+    // ==================================================================
+    // SGLang-native RPCs: TextGenerate / Generate
+    // ==================================================================
+
     type TextGenerateStream = StreamResult<proto::TextGenerateResponse>;
 
     async fn text_generate(
@@ -150,7 +160,6 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
                         break;
                     }
                     Err(_) => {
-                        // Channel closed — abort the request
                         let _ = bridge.abort(&rid_clone);
                         break;
                     }
@@ -236,6 +245,10 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         Ok(Response::new(Box::pin(stream)))
     }
 
+    // ==================================================================
+    // SGLang-native RPCs: Embed (text / tokenized)
+    // ==================================================================
+
     async fn text_embed(
         &self,
         request: Request<proto::TextEmbedRequest>,
@@ -294,6 +307,99 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         }
     }
 
+    // ==================================================================
+    // SGLang-native RPCs: Classify
+    // ==================================================================
+
+    async fn classify(
+        &self,
+        request: Request<proto::ClassifyRequest>,
+    ) -> Result<Response<proto::ClassifyResponse>, Status> {
+        let req = request.into_inner();
+        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
+
+        let text = if req.text.is_empty() { None } else { Some(req.text.as_str()) };
+        let input_ids = if req.input_ids.is_empty() { None } else { Some(req.input_ids) };
+
+        let receiver = self
+            .bridge
+            .submit_classify(&rid, text, input_ids, req.routing_key.as_deref(), trace)
+            .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
+
+        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+            .map_err(|_| Status::internal("Channel closed before response"))?;
+
+        match chunk {
+            ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
+                Ok(Response::new(proto::ClassifyResponse {
+                    embedding: data.embedding.unwrap_or_default(),
+                    meta_info: data.meta_info,
+                }))
+            }
+            ResponseChunk::Error(msg) => Err(Status::internal(msg)),
+        }
+    }
+
+    // ==================================================================
+    // SGLang-native RPCs: Tokenize / Detokenize
+    // ==================================================================
+
+    async fn tokenize(
+        &self,
+        request: Request<proto::TokenizeRequest>,
+    ) -> Result<Response<proto::TokenizeResponse>, Status> {
+        let req = request.into_inner();
+        let add_special = req.add_special_tokens.unwrap_or(true);
+
+        let json_str = tokio::task::spawn_blocking({
+            let bridge = self.bridge.clone();
+            let text = req.text.clone();
+            move || bridge.tokenize(&text, add_special)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+        .map_err(|e| Status::internal(format!("Tokenize failed: {}", e)))?;
+
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::TokenizeResponse {
+            tokens: v["tokens"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|x| x.as_i64().map(|n| n as i32)).collect())
+                .unwrap_or_default(),
+            count: v["count"].as_i64().unwrap_or(0) as i32,
+            max_model_len: v["max_model_len"].as_i64().unwrap_or(0) as i32,
+            input_text: v["input_text"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    async fn detokenize(
+        &self,
+        request: Request<proto::DetokenizeRequest>,
+    ) -> Result<Response<proto::DetokenizeResponse>, Status> {
+        let req = request.into_inner();
+
+        let json_str = tokio::task::spawn_blocking({
+            let bridge = self.bridge.clone();
+            let tokens = req.tokens;
+            move || bridge.detokenize(tokens)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+        .map_err(|e| Status::internal(format!("Detokenize failed: {}", e)))?;
+
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::DetokenizeResponse {
+            text: v["text"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    // ==================================================================
+    // SGLang-native RPCs: Info / control
+    // ==================================================================
+
     async fn health_check(
         &self,
         _request: Request<proto::HealthCheckRequest>,
@@ -333,6 +439,51 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         Ok(Response::new(proto::GetServerInfoResponse { json_info }))
     }
 
+    async fn list_models(
+        &self,
+        _request: Request<proto::ListModelsRequest>,
+    ) -> Result<Response<proto::ListModelsResponse>, Status> {
+        let json_str = tokio::task::spawn_blocking({
+            let bridge = self.bridge.clone();
+            move || bridge.list_models()
+        })
+        .await
+        .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+        .map_err(|e| Status::internal(format!("Failed to list models: {}", e)))?;
+
+        let models_arr: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse models JSON: {}", e)))?;
+
+        let models = models_arr
+            .iter()
+            .map(|m| proto::ModelCard {
+                id: m["id"].as_str().unwrap_or("").to_string(),
+                root: m["root"].as_str().unwrap_or("").to_string(),
+                parent: m.get("parent").and_then(|v| v.as_str()).map(String::from),
+                max_model_len: m
+                    .get("max_model_len")
+                    .and_then(|v| v.as_i64())
+                    .map(|n| n as i32),
+            })
+            .collect();
+
+        Ok(Response::new(proto::ListModelsResponse { models }))
+    }
+
+    async fn get_load(
+        &self,
+        _request: Request<proto::GetLoadRequest>,
+    ) -> Result<Response<proto::GetLoadResponse>, Status> {
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_get_load(&rid)
+            .map_err(|e| Status::internal(format!("Failed to get load: {}", e)))?;
+
+        let json_info = recv_json_response(receiver).await?;
+        Ok(Response::new(proto::GetLoadResponse { json_info }))
+    }
+
     async fn abort(
         &self,
         request: Request<proto::AbortRequest>,
@@ -344,10 +495,289 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
 
         Ok(Response::new(proto::AbortResponse { success: true }))
     }
+
+    async fn flush_cache(
+        &self,
+        _request: Request<proto::FlushCacheRequest>,
+    ) -> Result<Response<proto::FlushCacheResponse>, Status> {
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_flush_cache(&rid)
+            .map_err(|e| Status::internal(format!("Failed to flush cache: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::FlushCacheResponse {
+            success: v["success"].as_bool().unwrap_or(false),
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    async fn pause_generation(
+        &self,
+        request: Request<proto::PauseGenerationRequest>,
+    ) -> Result<Response<proto::PauseGenerationResponse>, Status> {
+        let req = request.into_inner();
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_pause_generation(&rid, &req.mode)
+            .map_err(|e| Status::internal(format!("Failed to pause generation: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::PauseGenerationResponse {
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    async fn continue_generation(
+        &self,
+        _request: Request<proto::ContinueGenerationRequest>,
+    ) -> Result<Response<proto::ContinueGenerationResponse>, Status> {
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_continue_generation(&rid)
+            .map_err(|e| Status::internal(format!("Failed to continue generation: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::ContinueGenerationResponse {
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    // ==================================================================
+    // OpenAI-compatible RPCs (JSON pass-through)
+    // ==================================================================
+
+    type ChatCompleteStream = StreamResult<proto::OpenAiStreamChunk>;
+
+    async fn chat_complete(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<Self::ChatCompleteStream>, Status> {
+        self.openai_streaming_rpc(request, "submit_openai_chat").await
+    }
+
+    type CompleteStream = StreamResult<proto::OpenAiStreamChunk>;
+
+    async fn complete(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<Self::CompleteStream>, Status> {
+        self.openai_streaming_rpc(request, "submit_openai_complete")
+            .await
+    }
+
+    async fn open_ai_embed(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<proto::OpenAiResponse>, Status> {
+        self.openai_unary_rpc(request, "submit_openai_embed").await
+    }
+
+    async fn open_ai_classify(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<proto::OpenAiResponse>, Status> {
+        self.openai_unary_rpc(request, "submit_openai_classify")
+            .await
+    }
+
+    async fn score(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<proto::OpenAiResponse>, Status> {
+        self.openai_unary_rpc(request, "submit_openai_score").await
+    }
+
+    async fn rerank(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+    ) -> Result<Response<proto::OpenAiResponse>, Status> {
+        self.openai_unary_rpc(request, "submit_openai_rerank").await
+    }
+
+    // ==================================================================
+    // Admin RPCs
+    // ==================================================================
+
+    async fn start_profile(
+        &self,
+        request: Request<proto::StartProfileRequest>,
+    ) -> Result<Response<proto::StartProfileResponse>, Status> {
+        let req = request.into_inner();
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_start_profile(&rid, req.output_dir.as_deref())
+            .map_err(|e| Status::internal(format!("Failed to start profile: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::StartProfileResponse {
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    async fn stop_profile(
+        &self,
+        _request: Request<proto::StopProfileRequest>,
+    ) -> Result<Response<proto::StopProfileResponse>, Status> {
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_stop_profile(&rid)
+            .map_err(|e| Status::internal(format!("Failed to stop profile: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::StopProfileResponse {
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+
+    async fn update_weights_from_disk(
+        &self,
+        request: Request<proto::UpdateWeightsRequest>,
+    ) -> Result<Response<proto::UpdateWeightsResponse>, Status> {
+        let req = request.into_inner();
+        let rid = uuid::Uuid::new_v4().to_string();
+        let receiver = self
+            .bridge
+            .submit_update_weights(&rid, &req.model_path, req.load_format.as_deref())
+            .map_err(|e| Status::internal(format!("Failed to update weights: {}", e)))?;
+
+        let json_str = recv_json_response(receiver).await?;
+        let v = parse_json_result(&json_str)?;
+        Ok(Response::new(proto::UpdateWeightsResponse {
+            success: v["success"].as_bool().unwrap_or(false),
+            message: v["message"].as_str().unwrap_or("").to_string(),
+        }))
+    }
+}
+
+// ======================================================================
+// Helper methods for OpenAI pass-through RPCs
+// ======================================================================
+
+impl SglangServiceImpl {
+    async fn openai_streaming_rpc(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+        method_name: &str,
+    ) -> Result<Response<StreamResult<proto::OpenAiStreamChunk>>, Status> {
+        let req = request.into_inner();
+        let rid = uuid::Uuid::new_v4().to_string();
+
+        let receiver = self
+            .bridge
+            .submit_openai(&rid, method_name, &req.json_body)
+            .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
+
+        let bridge = self.bridge.clone();
+        let rid_clone = rid.clone();
+
+        let stream = async_stream::stream! {
+            loop {
+                let chunk = tokio::task::spawn_blocking({
+                    let receiver = receiver.clone();
+                    move || receiver.recv()
+                })
+                .await
+                .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
+
+                match chunk {
+                    Ok(ResponseChunk::Data(data)) => {
+                        yield Ok(proto::OpenAiStreamChunk {
+                            json_chunk: data.json_bytes.unwrap_or_default(),
+                            finished: false,
+                        });
+                    }
+                    Ok(ResponseChunk::Finished(data)) => {
+                        let bytes = data.json_bytes.unwrap_or_default();
+                        if !bytes.is_empty() {
+                            yield Ok(proto::OpenAiStreamChunk {
+                                json_chunk: bytes,
+                                finished: true,
+                            });
+                        }
+                        break;
+                    }
+                    Ok(ResponseChunk::Error(msg)) => {
+                        yield Err(Status::internal(msg));
+                        break;
+                    }
+                    Err(_) => {
+                        let _ = bridge.abort(&rid_clone);
+                        break;
+                    }
+                }
+            }
+        };
+
+        Ok(Response::new(Box::pin(stream)))
+    }
+
+    async fn openai_unary_rpc(
+        &self,
+        request: Request<proto::OpenAiRequest>,
+        method_name: &str,
+    ) -> Result<Response<proto::OpenAiResponse>, Status> {
+        let req = request.into_inner();
+        let rid = uuid::Uuid::new_v4().to_string();
+
+        let receiver = self
+            .bridge
+            .submit_openai(&rid, method_name, &req.json_body)
+            .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
+
+        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
+            .await
+            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+            .map_err(|_| Status::internal("Channel closed before response"))?;
+
+        match chunk {
+            ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
+                Ok(Response::new(proto::OpenAiResponse {
+                    json_body: data.json_bytes.unwrap_or_default(),
+                    status_code: 200,
+                }))
+            }
+            ResponseChunk::Error(msg) => {
+                let error_json = serde_json::json!({"error": {"message": msg}});
+                Ok(Response::new(proto::OpenAiResponse {
+                    json_body: error_json.to_string().into_bytes(),
+                    status_code: 500,
+                }))
+            }
+        }
+    }
+}
+
+/// Receive a single JSON response from a crossbeam channel (used for async-bridged RPCs).
+async fn recv_json_response(
+    receiver: crossbeam_channel::Receiver<ResponseChunk>,
+) -> Result<String, Status> {
+    let chunk = tokio::task::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
+        .map_err(|_| Status::internal("Channel closed before response"))?;
+
+    match chunk {
+        ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
+            let bytes = data.json_bytes.unwrap_or_default();
+            String::from_utf8(bytes)
+                .map_err(|e| Status::internal(format!("Invalid UTF-8 in response: {}", e)))
+        }
+        ResponseChunk::Error(msg) => Err(Status::internal(msg)),
+    }
 }
 
 /// Start the Tonic gRPC server on the given address.
-/// Returns a handle that can be used to shut down the server.
 pub async fn run_grpc_server(
     addr: std::net::SocketAddr,
     bridge: Arc<PyBridge>,

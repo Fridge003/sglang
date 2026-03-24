@@ -5,14 +5,36 @@ option java_multiple_files = true;
 option java_package = "io.sglang.runtime.v1";
 
 service SglangService {
+  // SGLang-native RPCs (typed proto)
   rpc TextGenerate(TextGenerateRequest) returns (stream TextGenerateResponse);
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
   rpc TextEmbed(TextEmbedRequest) returns (TextEmbedResponse);
   rpc Embed(EmbedRequest) returns (EmbedResponse);
+  rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+  rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
+  rpc Detokenize(DetokenizeRequest) returns (DetokenizeResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  rpc GetLoad(GetLoadRequest) returns (GetLoadResponse);
   rpc Abort(AbortRequest) returns (AbortResponse);
+  rpc FlushCache(FlushCacheRequest) returns (FlushCacheResponse);
+  rpc PauseGeneration(PauseGenerationRequest) returns (PauseGenerationResponse);
+  rpc ContinueGeneration(ContinueGenerationRequest) returns (ContinueGenerationResponse);
+
+  // OpenAI-compatible RPCs (JSON pass-through)
+  rpc ChatComplete(OpenAIRequest) returns (stream OpenAIStreamChunk);
+  rpc Complete(OpenAIRequest) returns (stream OpenAIStreamChunk);
+  rpc OpenAIEmbed(OpenAIRequest) returns (OpenAIResponse);
+  rpc OpenAIClassify(OpenAIRequest) returns (OpenAIResponse);
+  rpc Score(OpenAIRequest) returns (OpenAIResponse);
+  rpc Rerank(OpenAIRequest) returns (OpenAIResponse);
+
+  // Admin/Ops RPCs
+  rpc StartProfile(StartProfileRequest) returns (StartProfileResponse);
+  rpc StopProfile(StopProfileRequest) returns (StopProfileResponse);
+  rpc UpdateWeightsFromDisk(UpdateWeightsRequest) returns (UpdateWeightsResponse);
 }
 
 // Sampling parameters shared across text and tokenized RPCs.
@@ -141,4 +163,136 @@ message AbortRequest {
 
 message AbortResponse {
   bool success = 1;
+}
+
+// ---- Classify (same internal path as embed, uses EmbeddingReqInput) ----
+
+message ClassifyRequest {
+  string text = 1;
+  repeated int32 input_ids = 2;
+  optional string rid = 3;
+  optional string routing_key = 4;
+  map<string, string> trace_headers = 5;
+}
+
+message ClassifyResponse {
+  repeated float embedding = 1;
+  map<string, string> meta_info = 2;
+}
+
+// ---- Tokenize / Detokenize (local ops, no inference) ----
+
+message TokenizeRequest {
+  string text = 1;
+  optional bool add_special_tokens = 2;
+}
+
+message TokenizeResponse {
+  repeated int32 tokens = 1;
+  int32 count = 2;
+  int32 max_model_len = 3;
+  string input_text = 4;
+}
+
+message DetokenizeRequest {
+  repeated int32 tokens = 1;
+}
+
+message DetokenizeResponse {
+  string text = 1;
+}
+
+// ---- List models ----
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+  repeated ModelCard models = 1;
+}
+
+message ModelCard {
+  string id = 1;
+  string root = 2;
+  optional string parent = 3;
+  optional int32 max_model_len = 4;
+}
+
+// ---- Get load ----
+
+message GetLoadRequest {
+  optional int32 dp_rank = 1;
+}
+
+message GetLoadResponse {
+  string json_info = 1;
+}
+
+// ---- Flush cache ----
+
+message FlushCacheRequest {}
+
+message FlushCacheResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ---- Pause / Continue generation ----
+
+message PauseGenerationRequest {
+  string mode = 1;
+}
+
+message PauseGenerationResponse {
+  string message = 1;
+}
+
+message ContinueGenerationRequest {}
+
+message ContinueGenerationResponse {
+  string message = 1;
+}
+
+// ---- OpenAI-compatible pass-through messages ----
+
+message OpenAIRequest {
+  bytes json_body = 1;
+  map<string, string> trace_headers = 2;
+}
+
+message OpenAIStreamChunk {
+  bytes json_chunk = 1;
+  bool finished = 2;
+}
+
+message OpenAIResponse {
+  bytes json_body = 1;
+  int32 status_code = 2;
+}
+
+// ---- Admin: Profile ----
+
+message StartProfileRequest {
+  optional string output_dir = 1;
+}
+
+message StartProfileResponse {
+  string message = 1;
+}
+
+message StopProfileRequest {}
+
+message StopProfileResponse {
+  string message = 1;
+}
+
+// ---- Admin: Weight update ----
+
+message UpdateWeightsRequest {
+  string model_path = 1;
+  optional string load_format = 2;
+}
+
+message UpdateWeightsResponse {
+  bool success = 1;
+  string message = 2;
 }
