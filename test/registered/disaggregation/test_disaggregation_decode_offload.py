@@ -85,7 +85,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "--hicache-ratio",
             "2",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -113,7 +113,7 @@ class TestDisaggregationDecodeOffload(PDDisaggregationServerBase):
             "--hicache-storage-backend",
             "file",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,

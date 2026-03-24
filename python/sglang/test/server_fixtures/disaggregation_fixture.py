@@ -11,6 +11,7 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    find_available_port,
     is_in_ci,
     popen_with_error_check,
 )
@@ -33,6 +34,17 @@ class PDDisaggregationServerBase(CustomTestCase):
         cls.lb_url = f"http://{cls.base_host}:{cls.lb_port}"
         print(f"{cls.base_host=} {cls.lb_port=} {cls.prefill_port=} {cls.decode_port=}")
         cls.process_lb, cls.process_decode, cls.process_prefill = None, None, None
+
+        # Use dynamic bootstrap port in CI to avoid conflicts between
+        # --network=host containers sharing the same port space
+        if is_in_ci():
+            cls.bootstrap_port = str(find_available_port(8998))
+        else:
+            cls.bootstrap_port = "8998"
+        cls.bootstrap_port_args = [
+            "--disaggregation-bootstrap-port",
+            cls.bootstrap_port,
+        ]
 
         # config transfer backend and rdma devices
         if is_in_ci():

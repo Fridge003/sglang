@@ -103,7 +103,7 @@ class TestMoriTransferEngineE2E(PDDisaggregationServerBase):
             "--tp",
             "1",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -122,7 +122,7 @@ class TestMoriTransferEngineE2E(PDDisaggregationServerBase):
             "--base-gpu-id",
             "1",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,
@@ -246,7 +246,7 @@ class TestMoriTransferEngineTPMismatchE2E(PDDisaggregationServerBase):
             "--tp",
             "2",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -265,7 +265,7 @@ class TestMoriTransferEngineTPMismatchE2E(PDDisaggregationServerBase):
             "--base-gpu-id",
             "2",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,

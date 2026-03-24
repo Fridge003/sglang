@@ -49,7 +49,7 @@ class TestDisaggregationMooncakeAARCH64Accuracy(PDDisaggregationServerBase):
             "--tp",
             "2",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_prefill = popen_launch_pd_server(
             cls.model,
             cls.prefill_url,
@@ -68,7 +68,7 @@ class TestDisaggregationMooncakeAARCH64Accuracy(PDDisaggregationServerBase):
             "--base-gpu-id",
             "2",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         cls.process_decode = popen_launch_pd_server(
             cls.model,
             cls.decode_url,

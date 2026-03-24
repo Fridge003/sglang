@@ -64,7 +64,7 @@ class DisaggregationHiCacheBase(PDDisaggregationServerBase):
             "--mem-fraction-static",
             "0.8",
         ]
-        prefill_args += cls.transfer_backend + cls.rdma_devices
+        prefill_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         env = {
             **os.environ,
             "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR": cls.temp_dir,
@@ -139,7 +139,7 @@ class TestDisaggregationPrefillWithHiCache(DisaggregationHiCacheBase):
             "--base-gpu-id",
             "1",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         env = {
             **os.environ,
             "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR": cls.temp_dir,
@@ -198,7 +198,7 @@ class TestDisaggregationDecodeWithHiCache(DisaggregationHiCacheBase):
             "--hicache-storage-prefetch-policy",
             "wait_complete",
         ]
-        decode_args += cls.transfer_backend + cls.rdma_devices
+        decode_args += cls.transfer_backend + cls.rdma_devices + cls.bootstrap_port_args
         env = {
             **os.environ,
             "SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR": cls.temp_dir,
