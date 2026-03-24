@@ -328,7 +328,9 @@ class Glm4MoeGate(nn.Module):
         )
 
     def forward(self, hidden_states):
-        logits = F.linear(hidden_states, self.weight, None)
+        # Cast to FP32 before lm_head projection to avoid BF16 accumulated rounding errors
+        # in the large matmul, which can flip top-1 token rankings under greedy decoding.
+        logits = F.linear(hidden_states.to(torch.float32), self.weight.to(torch.float32), None)
         return logits
 
 
