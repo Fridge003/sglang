@@ -14,6 +14,9 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import (
     ImagePipelineConfig,
     ModelTaskType,
 )
+from sglang.multimodal_gen.configs.pipeline_configs.batching import (
+    can_batch_prompt_only_diffusion_requests,
+)
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
 )
@@ -31,9 +34,7 @@ def zimage_preprocess_text(prompt: str):
 
 
 def zimage_postprocess_text(outputs: BaseEncoderOutput, _text_inputs) -> torch.Tensor:
-    device = outputs.hidden_states[-2].device
-    prompt_mask = _text_inputs.attention_mask.to(device).bool()
-    return outputs.hidden_states[-2][0][prompt_mask[0]]
+    return outputs.hidden_states[-2]
 
 
 class TransformersModelConfig(EncoderConfig):
@@ -62,9 +63,7 @@ class ZImagePipelineConfig(ImagePipelineConfig):
     F_PATCH_SIZE: int = 1
 
     def can_batch(self, base_req, ref_req) -> bool:
-        # Z-Image still assumes single-sample prompt/image sequences in its text/model
-        # path, so enabling scheduler-side request merging crashes at runtime.
-        return False
+        return can_batch_prompt_only_diffusion_requests(base_req, ref_req)
 
     def tokenize_prompt(self, prompts: list[str], tokenizer, tok_kwargs) -> dict:
         # flatten to 1-d list
@@ -91,6 +90,7 @@ class ZImagePipelineConfig(ImagePipelineConfig):
         """Build a minimal SP plan on batch for zimage (spatial sharding + cap sharding)."""
         sp_size = get_sp_world_size()
         rank = get_sp_parallel_rank()
+        prompt_embeds = self.get_pos_prompt_embeds(batch)
 
         raw_latent_shape = getattr(batch, "raw_latent_shape", None)
         if raw_latent_shape is not None and len(raw_latent_shape) >= 5:
@@ -119,8 +119,8 @@ class ZImagePipelineConfig(ImagePipelineConfig):
 
         # Cap/text sharding: avoid duplicating cap tokens across ranks.
         cap_len = (
-            int(batch.prompt_embeds[0].size(0))
-            if getattr(batch, "prompt_embeds", None)
+            max(int(prompt_embed.size(0)) for prompt_embed in prompt_embeds)
+            if prompt_embeds
             else 0
         )
         cap_total = self._ceil_to_multiple(cap_len, self.SEQ_LEN_MULTIPLE * sp_size)
@@ -167,12 +167,60 @@ class ZImagePipelineConfig(ImagePipelineConfig):
         local = plan["cap_local"]
         return cap[start : start + local]
 
+    @staticmethod
+    def _split_prompt_embeds(
+        prompt_embeds: torch.Tensor, prompt_attention_mask: torch.Tensor | None
+    ) -> list[torch.Tensor]:
+        if prompt_embeds.ndim == 2:
+            if prompt_attention_mask is None:
+                return [prompt_embeds]
+            prompt_attention_mask = prompt_attention_mask.bool()
+            if prompt_attention_mask.ndim == 2:
+                prompt_attention_mask = prompt_attention_mask[0]
+            return [prompt_embeds[prompt_attention_mask]]
+
+        if prompt_embeds.ndim != 3:
+            raise ValueError(
+                f"Unsupported Z-Image prompt embedding shape: {tuple(prompt_embeds.shape)}"
+            )
+
+        if prompt_attention_mask is None:
+            return [prompt_embeds[i] for i in range(prompt_embeds.shape[0])]
+
+        prompt_attention_mask = prompt_attention_mask.bool()
+        if prompt_attention_mask.ndim == 1:
+            prompt_attention_mask = prompt_attention_mask.unsqueeze(0).expand(
+                prompt_embeds.shape[0], -1
+            )
+
+        return [
+            prompt_embeds[i][prompt_attention_mask[i]]
+            for i in range(prompt_embeds.shape[0])
+        ]
+
     def get_pos_prompt_embeds(self, batch):
         # Keep ZImage model signature: encoder_hidden_states is List[Tensor]
+        prompt_embeds = self._split_prompt_embeds(
+            batch.prompt_embeds[0],
+            batch.prompt_attention_mask[0] if batch.prompt_attention_mask else None,
+        )
         if get_sp_world_size() <= 1:
-            return batch.prompt_embeds
+            return prompt_embeds
         plan = self._get_zimage_sp_plan(batch)
-        return [self._shard_cap(batch.prompt_embeds[0], plan)]
+        return [self._shard_cap(prompt_embed, plan) for prompt_embed in prompt_embeds]
+
+    def get_neg_prompt_embeds(self, batch):
+        if not batch.negative_prompt_embeds:
+            return batch.negative_prompt_embeds
+
+        prompt_embeds = self._split_prompt_embeds(
+            batch.negative_prompt_embeds[0],
+            batch.negative_attention_mask[0] if batch.negative_attention_mask else None,
+        )
+        if get_sp_world_size() <= 1:
+            return prompt_embeds
+        plan = self._get_zimage_sp_plan(batch)
+        return [self._shard_cap(prompt_embed, plan) for prompt_embed in prompt_embeds]
 
     def shard_latents_for_sp(self, batch, latents):
         sp_size = get_sp_world_size()
@@ -269,7 +317,10 @@ class ZImagePipelineConfig(ImagePipelineConfig):
             x_freqs_cis = rotary_emb(img_pos_ids)
             return (cap_freqs_cis, x_freqs_cis)
 
-        cap_ori_len = prompt_embeds.size(0)
+        if isinstance(prompt_embeds, list):
+            cap_ori_len = max(prompt_embed.size(0) for prompt_embed in prompt_embeds)
+        else:
+            cap_ori_len = prompt_embeds.size(0)
         cap_padding_len = (-cap_ori_len) % self.SEQ_LEN_MULTIPLE
         cap_padded_pos_ids = create_coordinate_grid(
             size=(cap_ori_len + cap_padding_len, 1, 1),
@@ -309,9 +360,10 @@ class ZImagePipelineConfig(ImagePipelineConfig):
         return (cap_freqs_cis, x_freqs_cis)
 
     def prepare_pos_cond_kwargs(self, batch, device, rotary_emb, dtype):
+        prompt_embeds = self.get_pos_prompt_embeds(batch)
         return {
             "freqs_cis": self.get_freqs_cis(
-                batch.prompt_embeds[0],
+                prompt_embeds,
                 batch.width,
                 batch.height,
                 device,
@@ -321,9 +373,10 @@ class ZImagePipelineConfig(ImagePipelineConfig):
         }
 
     def prepare_neg_cond_kwargs(self, batch, device, rotary_emb, dtype):
+        prompt_embeds = self.get_neg_prompt_embeds(batch)
         return {
             "freqs_cis": self.get_freqs_cis(
-                batch.prompt_embeds[0],
+                prompt_embeds,
                 batch.width,
                 batch.height,
                 device,

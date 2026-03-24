@@ -659,48 +659,71 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         patch_size: int,
         f_patch_size: int,
     ):
-        assert len(all_image) == len(all_cap_feats) == 1
+        assert len(all_image) == len(all_cap_feats)
 
-        image = all_image[0]  # C, F, H, W
-        cap_feat = all_cap_feats[0]  # L, D
         pH = pW = patch_size
         pF = f_patch_size
-        device = image.device
 
         all_image_out = []
         all_image_size = []
         all_cap_feats_out = []
+        cap_padded_feats = []
+        image_padded_feats = []
+        max_cap_len = 0
+        max_image_len = 0
 
-        # ------------ Process Caption ------------
-        cap_ori_len = cap_feat.size(0)
-        cap_padding_len = (-cap_ori_len) % SEQ_MULTI_OF
+        for image, cap_feat in zip(all_image, all_cap_feats, strict=True):
+            # ------------ Process Caption ------------
+            cap_ori_len = cap_feat.size(0)
+            cap_padding_len = (-cap_ori_len) % SEQ_MULTI_OF
+            cap_padded_feat = torch.cat(
+                [cap_feat, cap_feat[-1:].repeat(cap_padding_len, 1)],
+                dim=0,
+            )
+            cap_padded_feats.append(cap_padded_feat)
+            max_cap_len = max(max_cap_len, cap_padded_feat.size(0))
 
-        # padded feature
-        cap_padded_feat = torch.cat(
-            [cap_feat, cap_feat[-1:].repeat(cap_padding_len, 1)],
-            dim=0,
-        )
-        all_cap_feats_out.append(cap_padded_feat)
+            # ------------ Process Image ------------
+            C, F, H, W = image.size()
+            all_image_size.append((F, H, W))
 
-        # ------------ Process Image ------------
-        C, F, H, W = image.size()
-        all_image_size.append((F, H, W))
+            F_tokens, H_tokens, W_tokens = F // pF, H // pH, W // pW
+            image = image.view(C, F_tokens, pF, H_tokens, pH, W_tokens, pW)
+            image = image.permute(1, 3, 5, 2, 4, 6, 0).reshape(
+                F_tokens * H_tokens * W_tokens, pF * pH * pW * C
+            )
+            image_ori_len = image.size(0)
+            image_padding_len = (-image_ori_len) % SEQ_MULTI_OF
+            image_padded_feat = torch.cat(
+                [image, image[-1:].repeat(image_padding_len, 1)],
+                dim=0,
+            )
+            image_padded_feats.append(image_padded_feat)
+            max_image_len = max(max_image_len, image_padded_feat.size(0))
 
-        F_tokens, H_tokens, W_tokens = F // pF, H // pH, W // pW
-        image = image.view(C, F_tokens, pF, H_tokens, pH, W_tokens, pW)
-        # "c f pf h ph w pw -> (f h w) (pf ph pw c)"
-        image = image.permute(1, 3, 5, 2, 4, 6, 0).reshape(
-            F_tokens * H_tokens * W_tokens, pF * pH * pW * C
-        )
-        image_ori_len = image.size(0)
-        image_padding_len = (-image_ori_len) % SEQ_MULTI_OF
+        for cap_padded_feat in cap_padded_feats:
+            if cap_padded_feat.size(0) < max_cap_len:
+                cap_padded_feat = torch.cat(
+                    [
+                        cap_padded_feat,
+                        cap_padded_feat[-1:].repeat(max_cap_len - cap_padded_feat.size(0), 1),
+                    ],
+                    dim=0,
+                )
+            all_cap_feats_out.append(cap_padded_feat)
 
-        # padded feature
-        image_padded_feat = torch.cat(
-            [image, image[-1:].repeat(image_padding_len, 1)],
-            dim=0,
-        )
-        all_image_out.append(image_padded_feat)
+        for image_padded_feat in image_padded_feats:
+            if image_padded_feat.size(0) < max_image_len:
+                image_padded_feat = torch.cat(
+                    [
+                        image_padded_feat,
+                        image_padded_feat[-1:].repeat(
+                            max_image_len - image_padded_feat.size(0), 1
+                        ),
+                    ],
+                    dim=0,
+                )
+            all_image_out.append(image_padded_feat)
 
         return (
             all_image_out,
@@ -722,36 +745,51 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         assert patch_size in self.all_patch_size
         assert f_patch_size in self.all_f_patch_size
 
-        x = hidden_states
-        cap_feats = encoder_hidden_states
+        if isinstance(hidden_states, torch.Tensor):
+            x = list(hidden_states.unbind(dim=0))
+        else:
+            x = list(hidden_states)
+
+        if isinstance(encoder_hidden_states, torch.Tensor):
+            cap_feats = list(encoder_hidden_states.unbind(dim=0))
+        elif (
+            isinstance(encoder_hidden_states, list)
+            and len(encoder_hidden_states) == 1
+            and isinstance(encoder_hidden_states[0], torch.Tensor)
+            and encoder_hidden_states[0].ndim == 3
+        ):
+            cap_feats = list(encoder_hidden_states[0].unbind(dim=0))
+        else:
+            cap_feats = list(encoder_hidden_states)
+
+        batch_size = len(x)
+        assert batch_size == len(cap_feats)
+
         timestep = 1000.0 - timestep
-        t = timestep
-        bsz = 1
-        device = x[0].device
-        t = self.t_embedder(t)
-        adaln_input = t.type_as(x)
+        if not isinstance(timestep, torch.Tensor):
+            timestep = torch.tensor(timestep, device=x[0].device)
+        if timestep.ndim == 0:
+            timestep = timestep.repeat(batch_size)
+        t = self.t_embedder(timestep)
+        adaln_input = t.to(dtype=x[0].dtype)
         (
             x,
             cap_feats,
             x_size,
         ) = self.patchify_and_embed(x, cap_feats, patch_size, f_patch_size)
 
-        x = torch.cat(x, dim=0)
+        x = torch.stack(x, dim=0)
         x, _ = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x)
         x_freqs_cis = freqs_cis[1]
 
-        x = x.unsqueeze(0)
-        x_freqs_cis = x_freqs_cis
         for layer in self.noise_refiner:
             x = layer(x, x_freqs_cis, adaln_input)
 
-        cap_feats = torch.cat(cap_feats, dim=0)
-
+        cap_feats = torch.stack(cap_feats, dim=0)
         cap_feats, _ = self.cap_embedder(cap_feats)
 
         cap_freqs_cis = freqs_cis[0]
 
-        cap_feats = cap_feats.unsqueeze(0)
         for layer in self.context_refiner:
             cap_feats = layer(cap_feats, cap_freqs_cis)
 
@@ -770,7 +808,7 @@ class ZImageTransformer2DModel(CachableDiT, OffloadableDiTMixin):
         unified = list(unified.unbind(dim=0))
         x = self.unpatchify(unified, x_size, patch_size, f_patch_size)
 
-        return -x[0]
+        return -torch.stack(x, dim=0)
 
 
 EntryClass = ZImageTransformer2DModel
