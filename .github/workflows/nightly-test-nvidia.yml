@@ -166,7 +166,7 @@ jobs:
           cd test
           python3 run_suite.py --hw cuda --suite nightly-8-gpu-h200 --nightly --continue-on-error
 
-      - name: Collect performance metrics
+      - name: Collect performance and accuracy metrics
         if: always()
         run: |
           python3 scripts/ci/utils/save_metrics.py \
@@ -174,6 +174,7 @@ jobs:
             --partition ${{ matrix.partition }} \
             --run-id ${{ github.run_id }} \
             --output test/metrics-8gpu-h200-partition-${{ matrix.partition }}.json \
+            --accuracy-output test/accuracy-metrics-8gpu-h200-partition-${{ matrix.partition }}.json \
             --search-dir test/performance_profiles_8_gpu \
             --search-dir test
 
@@ -183,6 +184,15 @@ jobs:
         with:
           name: metrics-8gpu-h200-partition-${{ matrix.partition }}
           path: test/metrics-8gpu-h200-partition-${{ matrix.partition }}.json
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Upload accuracy metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-metrics-8gpu-h200-partition-${{ matrix.partition }}
+          path: test/accuracy-metrics-8gpu-h200-partition-${{ matrix.partition }}.json
           retention-days: 5
           if-no-files-found: ignore
 
@@ -274,7 +284,7 @@ jobs:
             echo "No trace directories found, skipping publish"
           fi
 
-      - name: Collect performance metrics
+      - name: Collect performance and accuracy metrics
         if: always()
         run: |
           python3 scripts/ci/utils/save_metrics.py \
@@ -282,6 +292,7 @@ jobs:
             --partition ${{ matrix.partition }} \
             --run-id ${{ github.run_id }} \
             --output test/metrics-8gpu-b200-partition-${{ matrix.partition }}.json \
+            --accuracy-output test/accuracy-metrics-8gpu-b200-partition-${{ matrix.partition }}.json \
             --search-dir test/performance_profiles_8_gpu \
             --search-dir test
 
@@ -291,6 +302,15 @@ jobs:
         with:
           name: metrics-8gpu-b200-partition-${{ matrix.partition }}
           path: test/metrics-8gpu-b200-partition-${{ matrix.partition }}.json
+          retention-days: 5
+          if-no-files-found: ignore
+
+      - name: Upload accuracy metrics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-metrics-8gpu-b200-partition-${{ matrix.partition }}
+          path: test/accuracy-metrics-8gpu-b200-partition-${{ matrix.partition }}.json
           retention-days: 5
           if-no-files-found: ignore
 
@@ -574,41 +594,9 @@ jobs:
 
       - name: Run test
         timeout-minutes: 300
-        env:
-          GPU_CONFIG: "4-gpu-b200"
         run: |
           cd test
           python3 run_suite.py --hw cuda --suite nightly-4-gpu-b200 --nightly --continue-on-error --timeout-per-file 12000
-
-      - name: Collect performance and accuracy metrics
-        if: always()
-        run: |
-          python3 scripts/ci/utils/save_metrics.py \
-            --gpu-config 4-gpu-b200 \
-            --partition 0 \
-            --run-id ${{ github.run_id }} \
-            --output test/metrics-4gpu-b200-partition-0.json \
-            --accuracy-output test/accuracy-metrics-4gpu-b200-partition-0.json \
-            --search-dir test/performance_profiles_4_gpu \
-            --search-dir test
-
-      - name: Upload partition metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: metrics-4gpu-b200-partition-0
-          path: test/metrics-4gpu-b200-partition-0.json
-          retention-days: 5
-          if-no-files-found: ignore
-
-      - name: Upload accuracy metrics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: accuracy-metrics-4gpu-b200-partition-0
-          path: test/accuracy-metrics-4gpu-b200-partition-0.json
-          retention-days: 5
-          if-no-files-found: ignore
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: always()
@@ -652,7 +640,6 @@ jobs:
       - nightly-test-general-8-gpu-b200
       - nightly-test-multimodal-server-1-gpu
       - nightly-test-multimodal-server-2-gpu
-      - nightly-test-perf-4-gpu-b200
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
