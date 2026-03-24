@@ -126,6 +126,7 @@ class BaseKVReceiver(ABC):
         kv_indices: npt.NDArray[np.int32],
         aux_index: Optional[int] = None,
         state_indices: Optional[List[int]] = None,
+        decode_prefix_len: Optional[int] = None,
     ):
         """
         Set req's index metadata locally or notify the prefill server about the kv indices, aux index, and state_indices.
