@@ -259,7 +259,7 @@ class SamplingBatchInfo:
             apply_scaling_penalties(logits, self.acc_scaling_penalties)
 
         if self.penalizer_orchestrator and self.penalizer_orchestrator.is_required:
-            # Used in the overlap mode
+            # Used in the non-overlap mode
             self.penalizer_orchestrator.apply(logits)
 
         if self.vocab_mask is not None:
