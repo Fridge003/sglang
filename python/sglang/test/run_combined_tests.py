@@ -156,7 +156,8 @@ def run_combined_tests(
             model_result["perf_results"].append(perf_result)
             if not perf_result.passed:
                 all_passed = False
-                model_result["errors"].append(perf_result.error)
+                if perf_result.error:
+                    model_result["errors"].append(perf_result.error)
 
             print("\nWaiting 20 seconds for resource cleanup...")
             time.sleep(20)
@@ -171,7 +172,8 @@ def run_combined_tests(
             model_result["accuracy_results"].append(acc_result)
             if not acc_result.passed:
                 all_passed = False
-                model_result["errors"].append(acc_result.error)
+                if acc_result.error:
+                    model_result["errors"].append(acc_result.error)
 
             print("\nWaiting 20 seconds for resource cleanup...")
             time.sleep(20)

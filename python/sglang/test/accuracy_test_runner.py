@@ -103,10 +103,11 @@ def write_accuracy_results_json(
                 "variant": r.variant,
                 "dataset": r.dataset,
                 "gpu_config": gpu_config,
-                "score": r.score,
+                "score": float(r.score) if r.score is not None else None,
                 "baseline_accuracy": float(r.baseline_accuracy),
                 "passed": r.passed,
-                "latency": r.latency,
+                "latency": float(r.latency) if r.latency is not None else None,
+                "error": r.error,
             }
             for r in results
         ],
