@@ -157,7 +157,7 @@ class TestHiCacheEagle(HiCacheBaseServer, HiCacheEvalMixin):
         self.assertGreaterEqual(metrics["score"], self.expected_mmlu_score)
 
         # EAGLE-specific check
-        server_info = requests.get(self.base_url + "/get_server_info").json()
+        server_info = requests.get(self.base_url + "/server_info").json()
         avg_spec_accept_length = server_info["internal_states"][0][
             "avg_spec_accept_length"
         ]
