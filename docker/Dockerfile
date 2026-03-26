@@ -1,4 +1,4 @@
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.2
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
@@ -188,7 +188,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         12.6.1) CUINDEX=126 ;; \
         12.8.1) CUINDEX=128 ;; \
         12.9.1) CUINDEX=129 ;; \
-        13.0.1) CUINDEX=130 ;; \
+        13.0.1|13.0.2) CUINDEX=130 ;; \
         *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
     esac \
     && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
@@ -197,7 +197,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     elif [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
         python3 -m pip install sglang-kernel==${SGL_KERNEL_VERSION} \
     ; \
-    elif [ "$CUDA_VERSION" = "13.0.1" ]; then \
+    elif [ "$CUDA_VERSION" = "13.0.1" ] || [ "$CUDA_VERSION" = "13.0.2" ]; then \
         python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sglang_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     else \
@@ -281,7 +281,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         12.8.1) \
             CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0' \
             ;; \
-        12.9.1|13.0.1) \
+        12.9.1|13.0.1|13.0.2) \
             CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0;10.3' \
             ;; \
         *) \
