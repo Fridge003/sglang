@@ -18,6 +18,8 @@ class BatchedRepetitionPenalizer(_BatchedPenalizer):
     Repetition penalizer penalizes tokens based on their presence in the generated output.
     """
 
+    is_multiplicative: bool = True
+
     def _is_required(self) -> bool:
         return any(
             req.sampling_params.repetition_penalty != 1.0

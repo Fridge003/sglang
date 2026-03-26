@@ -132,6 +132,8 @@ class _BatchedPenalizer(abc.ABC):
     An abstract class for a batched penalizer.
     """
 
+    is_multiplicative: bool = False
+
     def __init__(self, orchestrator: BatchedPenalizerOrchestrator):
         self._orchestrator_ref: weakref.ReferenceType[BatchedPenalizerOrchestrator] = (
             weakref.ref(orchestrator)
