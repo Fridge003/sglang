@@ -38,6 +38,8 @@ class WeightChecker:
 
     def _reset_tensors(self):
         for name, param in self._model_state():
+            if "cos_sin_cache" in name or "freqs_cis" in name:
+                continue
             param.copy_(_random_like(param))
 
     def _compare(self):
