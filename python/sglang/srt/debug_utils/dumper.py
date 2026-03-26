@@ -1040,11 +1040,16 @@ def _create_zmq_rpc_broadcast(
     rank = _get_rank()
     world_size = dist.get_world_size() if dist.is_initialized() else 1
 
+    from sglang.srt.utils.network import apply_curve_server, get_curve_config
+
     ctx = zmq.Context()
     sock = ctx.socket(zmq.REP)
-    sock.bind("tcp://*:0")
+    curve = get_curve_config()
+    if curve is not None:
+        apply_curve_server(sock, curve)
+    sock.bind("tcp://127.0.0.1:0")
     bound_port = int(sock.getsockopt_string(zmq.LAST_ENDPOINT).rsplit(":", 1)[1])
-    local_addr = f"tcp://{_get_local_ip_by_remote()}:{bound_port}"
+    local_addr = f"tcp://127.0.0.1:{bound_port}"
 
     def serve_loop():
         while True:
@@ -1073,9 +1078,13 @@ def _create_zmq_rpc_broadcast(
     print(f"[Dumper.ZmqRpc] rank={rank} all_addresses={all_addresses}")
 
     if rank == 0:
+        from sglang.srt.utils.network import apply_curve_client
+
         handles = []
         for i, addr in enumerate(all_addresses):
             req_socket = ctx.socket(zmq.REQ)
+            if curve is not None:
+                apply_curve_client(req_socket, curve)
             req_socket.connect(addr)
             handles.append(_ZmqRpcHandle(req_socket, debug_name=f"rank-{i}"))
         return _ZmqRpcBroadcast(handles)
