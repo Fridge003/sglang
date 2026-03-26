@@ -252,8 +252,10 @@ def get_zmq_socket_on_host(
     Args:
         context: ZeroMQ context to create the socket from.
         socket_type: Type of ZeroMQ socket to create.
-        host: Host to bind to, without ``tcp://`` prefix.
-            If *None*, binds to ``tcp://*``.
+        host: Host to bind to, without ``tcp://`` prefix.  Defaults to
+            ``127.0.0.1`` (localhost-only) to avoid exposing unauthenticated
+            sockets to the network (CVE-2026-3060).  Callers that need
+            cross-machine reachability must pass an explicit host.
         curve: Explicit CurveConfig.  When *None* the global config is used
             for non-loopback hosts.
 
@@ -262,17 +264,15 @@ def get_zmq_socket_on_host(
     """
     socket = context.socket(socket_type)
     config_socket(socket, socket_type)
-    if host:
-        if is_valid_ipv6_address(host):
-            socket.setsockopt(zmq.IPV6, 1)
-            bind_host = f"tcp://[{host}]"
-        else:
-            bind_host = f"tcp://{host}"
+    if host is None:
+        host = "127.0.0.1"
+    if is_valid_ipv6_address(host):
+        socket.setsockopt(zmq.IPV6, 1)
+        bind_host = f"tcp://[{host}]"
     else:
-        bind_host = "tcp://*"
+        bind_host = f"tcp://{host}"
 
-    # Auto-resolve CURVE config for non-loopback hosts.
-    if curve is None and (host is None or host not in _LOCALHOST_ADDRS):
+    if curve is None and host not in _LOCALHOST_ADDRS:
         curve = get_curve_config()
     if curve is not None:
         apply_curve_server(socket, curve)

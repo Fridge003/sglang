@@ -15,10 +15,14 @@ async def run_zeromq_broker(server_args: ServerArgs):
     This function runs as a background task in the FastAPI process.
     It listens for TCP requests from offline clients (e.g., DiffGenerator).
     """
+    from sglang.srt.utils.network import apply_curve_server, get_curve_config
+
     ctx = zmq.asyncio.Context()
-    # This is the REP socket that listens for requests from DiffGenerator
     socket = ctx.socket(zmq.REP)
-    broker_endpoint = f"tcp://*:{server_args.broker_port}"
+    curve = get_curve_config()
+    if curve is not None:
+        apply_curve_server(socket, curve)
+    broker_endpoint = f"tcp://127.0.0.1:{server_args.broker_port}"
     socket.bind(broker_endpoint)
     logger.info(f"ZMQ Broker is listening for offline jobs on {broker_endpoint}")
 
@@ -56,6 +60,8 @@ class SchedulerClient:
         self.server_args = None
 
     def initialize(self, server_args: ServerArgs):
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         if self.context is not None and not self.context.closed:
             logger.warning("SchedulerClient is already initialized. Re-initializing.")
             self.close()
@@ -64,13 +70,13 @@ class SchedulerClient:
         self.context = zmq.Context()
         self.scheduler_socket = self.context.socket(zmq.REQ)
 
-        # Set socket options for the main communication socket
         self.scheduler_socket.setsockopt(zmq.LINGER, 0)
-
-        # 100 minute timeout for generation
         self.scheduler_socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         scheduler_endpoint = self.server_args.scheduler_endpoint
+        curve = get_curve_config()
+        if curve is not None and scheduler_endpoint.startswith("tcp://"):
+            apply_curve_client(self.scheduler_socket, curve)
         self.scheduler_socket.connect(scheduler_endpoint)
         logger.debug(
             f"SchedulerClient connected to backend scheduler at {scheduler_endpoint}"
@@ -90,15 +96,20 @@ class SchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
             return False
 
         ping_socket = self.context.socket(zmq.REQ)
         ping_socket.setsockopt(zmq.LINGER, 0)
-        ping_socket.setsockopt(zmq.RCVTIMEO, 2000)  # 2-second timeout for pings
+        ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
+        curve = get_curve_config()
+        if curve is not None and endpoint.startswith("tcp://"):
+            apply_curve_client(ping_socket, curve)
 
         try:
             ping_socket.connect(endpoint)
@@ -146,18 +157,21 @@ class AsyncSchedulerClient:
 
     async def forward(self, batch: Any) -> Any:
         """Sends a batch or request to the scheduler and waits for the response."""
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         if self.context is None:
             raise RuntimeError(
                 "AsyncSchedulerClient is not initialized. Call initialize() first."
             )
 
-        # Create a temporary REQ socket for this request to allow concurrency
         socket = self.context.socket(zmq.REQ)
         socket.setsockopt(zmq.LINGER, 0)
-        # 100 minute timeout
         socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         endpoint = self.server_args.scheduler_endpoint
+        curve = get_curve_config()
+        if curve is not None and endpoint.startswith("tcp://"):
+            apply_curve_client(socket, curve)
         socket.connect(endpoint)
 
         try:
@@ -174,6 +188,8 @@ class AsyncSchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
             return False
@@ -183,6 +199,9 @@ class AsyncSchedulerClient:
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
+        curve = get_curve_config()
+        if curve is not None and endpoint.startswith("tcp://"):
+            apply_curve_client(ping_socket, curve)
 
         try:
             ping_socket.connect(endpoint)
