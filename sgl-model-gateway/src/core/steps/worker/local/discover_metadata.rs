@@ -96,6 +96,8 @@ async fn get_json_fallback(
 }
 
 /// Get server info from /server_info endpoint.
+// TODO: Rename to `server_info` (or `fetch_server_info`) after removing
+// `/get_server_info` fallback compatibility.
 pub async fn get_server_info(url: &str, api_key: Option<&str>) -> Result<ServerInfo, String> {
     let base_url = url.trim_end_matches('/');
     let server_info_url = format!("{}/server_info", base_url);
@@ -110,6 +112,7 @@ pub async fn get_server_info(url: &str, api_key: Option<&str>) -> Result<ServerI
         .await
         .map_err(|e| format!("Failed to connect to {}: {}", server_info_url, e))?;
 
+    // TODO: Remove this fallback in the release where `/get_server_info` is deleted.
     // If /server_info returns 404, fallback to /get_server_info for backward compatibility
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         let json = get_json_fallback(base_url, "server_info", api_key).await?;
