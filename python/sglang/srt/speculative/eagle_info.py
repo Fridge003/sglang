@@ -20,6 +20,10 @@ from sglang.srt.mem_cache.common import (
     get_last_loc,
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
+from sglang.srt.sampling.penaltylib import BatchedRepetitionPenalizer
+from sglang.srt.sampling.penaltylib.penalizers.repetition_penalty import (
+    apply_scaling_penalties,
+)
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_info_v2 import (
     EagleDraftInputV2Mixin,
@@ -295,26 +299,20 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             )
 
             # Apply multiplicative penalties (repetition) directly on logits
-            import sglang.srt.sampling.penaltylib as penaltylib
-
-            rep_cls = penaltylib.BatchedRepetitionPenalizer
+            rep_cls = BatchedRepetitionPenalizer
             if rep_cls in sampling_info.penalizer_orchestrator.penalizers:
                 rep_pen = sampling_info.penalizer_orchestrator.penalizers[rep_cls]
                 if rep_pen._is_prepared:
-
                     # Expand per-request penalties to match draft_token_num layout
                     expanded_penalties = torch.repeat_interleave(
                         rep_pen.cumulated_repetition_penalties,
                         self.draft_token_num,
                         dim=0,
                     )
-                    mask = expanded_penalties != 1.0
-                    if mask.any():
-                        logits = logits_output.next_token_logits
-                        pos = (logits > 0) & mask
-                        neg = (logits <= 0) & mask
-                        logits[pos] = logits[pos] / expanded_penalties[pos]
-                        logits[neg] = logits[neg] * expanded_penalties[neg]
+                    apply_scaling_penalties(
+                        logits_output.next_token_logits,
+                        expanded_penalties,
+                    )
 
         # Apply grammar mask
         if vocab_mask is not None:

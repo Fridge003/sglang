@@ -244,6 +244,9 @@ class SamplingBatchInfo:
             for pen in self.penalizer_orchestrator.penalizers.values():
                 if not pen._is_prepared:
                     continue
+                # NOTE: BatchedRepetitionPenalizer is a multiplicative penalizer and must
+                # be handled separately via acc_scaling_penalties. If a new multiplicative
+                # penalizer is added in the future, it must also be handled here explicitly.
                 if isinstance(pen, penaltylib.BatchedRepetitionPenalizer):
                     # Snapshot the multiplicative penalty for overlap-safe forwarding
                     self.acc_scaling_penalties = (

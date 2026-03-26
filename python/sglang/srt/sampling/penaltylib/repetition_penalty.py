@@ -15,7 +15,7 @@ def apply_scaling_penalties(logits, scaling_penalties):
 
 class BatchedRepetitionPenalizer(_BatchedPenalizer):
     """
-    Repetition penalizer penalizes tokens based on their repetition in the input and output.
+    Repetition penalizer penalizes tokens based on their presence in the generated output.
     """
 
     def _is_required(self) -> bool:
