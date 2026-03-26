@@ -26,6 +26,8 @@ from sglang.srt.mem_cache.common import (
     alloc_token_slots,
     get_last_loc,
 )
+from sglang.srt.sampling.penaltylib import BatchedRepetitionPenalizer
+from sglang.srt.sampling.penaltylib.repetition_penalty import apply_scaling_penalties
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.speculative.spec_info import SpecInput, SpecInputType
 from sglang.srt.speculative.spec_utils import (
@@ -398,7 +400,10 @@ class NgramVerifyInput(SpecInput):
             )
 
         # Apply penalty
-        if sampling_info.penalizer_orchestrator.is_required:
+        if (
+            sampling_info.penalizer_orchestrator.is_required
+            or sampling_info.logit_bias is not None
+        ):
             # This is a relaxed version of penalties for speculative decoding.
             linear_penalty = torch.zeros(
                 (bs, logits_output.next_token_logits.shape[1]),
@@ -409,6 +414,21 @@ class NgramVerifyInput(SpecInput):
             logits_output.next_token_logits.add_(
                 torch.repeat_interleave(linear_penalty, self.draft_token_num, dim=0)
             )
+
+            # Apply multiplicative penalties (repetition) directly on logits
+            rep_cls = BatchedRepetitionPenalizer
+            if rep_cls in sampling_info.penalizer_orchestrator.penalizers:
+                rep_pen = sampling_info.penalizer_orchestrator.penalizers[rep_cls]
+                if rep_pen._is_prepared:
+                    expanded_penalties = torch.repeat_interleave(
+                        rep_pen.cumulated_repetition_penalties,
+                        self.draft_token_num,
+                        dim=0,
+                    )
+                    apply_scaling_penalties(
+                        logits_output.next_token_logits,
+                        expanded_penalties,
+                    )
 
         # Apply grammar mask
         if vocab_mask is not None:
