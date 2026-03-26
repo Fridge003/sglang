@@ -21,7 +21,7 @@ from sglang.srt.mem_cache.common import (
 )
 from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.sampling.penaltylib import BatchedRepetitionPenalizer
-from sglang.srt.sampling.penaltylib.penalizers.repetition_penalty import (
+from sglang.srt.sampling.penaltylib.repetition_penalty import (
     apply_scaling_penalties,
 )
 from sglang.srt.server_args import get_global_server_args
