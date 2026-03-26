@@ -44,13 +44,20 @@ class ExpertBackupManager:
         self.expert_num = self.model_config.hf_config.n_routed_experts
         self.idmn = (self.expert_num // self.engine_num) * self.engine_rank
         self.idmx = (self.expert_num // self.engine_num) * (self.engine_rank + 1)
+        from sglang.srt.utils.network import apply_curve_server, get_curve_config
+
         context = zmq.Context(2)
+        curve = get_curve_config()
         # Synchronization socket to avoid PUB/SUB slow joiner issues.
         self.recv_from_expert_backup_client = context.socket(zmq.PULL)
+        if curve is not None:
+            apply_curve_server(self.recv_from_expert_backup_client, curve)
         self.recv_from_expert_backup_client.bind(
             f"tcp://{get_local_ip_auto()}:{PORT_BASE + server_args.node_rank * 2}"
         )
         self.send_to_expert_backup_client = context.socket(zmq.PUB)
+        if curve is not None:
+            apply_curve_server(self.send_to_expert_backup_client, curve)
         self.send_to_expert_backup_client.bind(
             f"tcp://{get_local_ip_auto()}:{PORT_BASE + server_args.node_rank * 2 + 1}"
         )

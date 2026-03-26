@@ -251,17 +251,32 @@ class ZmqEventPublisher(EventPublisher):
         """Initialize sockets
         https://pyzmq.readthedocs.io/en/v19.0.0/morethanbindings.html#thread-safety
         """
+        from sglang.srt.utils.network import (
+            apply_curve_client,
+            apply_curve_server,
+            get_curve_config,
+        )
+
+        curve = get_curve_config()
+
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
             # Heuristic: bind if wildcard / * present, else connect.
             # bind stable, connect volatile convention
-            if (
+            is_bind = (
                 "*" in self._endpoint
                 or "::" in self._endpoint
                 or self._endpoint.startswith("ipc://")
                 or self._endpoint.startswith("inproc://")
-            ):
+            )
+            is_tcp = self._endpoint.startswith("tcp://")
+            if curve is not None and is_tcp:
+                if is_bind:
+                    apply_curve_server(self._pub, curve)
+                else:
+                    apply_curve_client(self._pub, curve)
+            if is_bind:
                 logger.debug(
                     f"ZmqEventPublisher socket publisher_endpoint bind to {self._endpoint}"
                 )
@@ -275,6 +290,11 @@ class ZmqEventPublisher(EventPublisher):
         # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
+            if (
+                curve is not None
+                and self._replay_endpoint.startswith("tcp://")
+            ):
+                apply_curve_server(self._replay, curve)
             logger.debug(
                 f"ZmqEventPublisher socket replay_endpoint bind to {self._replay_endpoint}"
             )

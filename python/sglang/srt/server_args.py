@@ -322,6 +322,9 @@ class ServerArgs:
     ssl_keyfile_password: Optional[str] = None
     enable_ssl_refresh: bool = False
 
+    # ZMQ CURVE authentication
+    zmq_curve_keys_dir: Optional[str] = None
+
     # Quantization and data type
     dtype: str = "auto"
     quantization: Optional[str] = None
@@ -747,6 +750,9 @@ class ServerArgs:
         # Validate SSL arguments early (before dummy-model short-circuit).
         self._handle_ssl_validation()
 
+        # Validate ZMQ CURVE arguments and propagate to env var.
+        self._handle_zmq_curve_validation()
+
         if self.model_path.lower() in ["none", "dummy"]:
             # Skip for dummy models
             return
@@ -900,6 +906,30 @@ class ServerArgs:
                 "--enable-ssl-refresh requires --ssl-certfile and --ssl-keyfile "
                 "to be specified."
             )
+
+    def _handle_zmq_curve_validation(self):
+        """Validate ZMQ CURVE arguments and propagate to the env var."""
+        if not self.zmq_curve_keys_dir:
+            return
+        import zmq as _zmq
+
+        if not _zmq.has("curve"):
+            raise ValueError(
+                "--zmq-curve-keys-dir requires a pyzmq/libzmq build with "
+                "CURVE support (libsodium). The current build does not "
+                "include it."
+            )
+        secret_file = os.path.join(self.zmq_curve_keys_dir, "cluster.key_secret")
+        if not os.path.isfile(secret_file):
+            raise ValueError(
+                f"CurveZMQ secret key file not found: '{secret_file}'. "
+                f"Generate keys with: "
+                f"python -m sglang.srt.utils.gen_zmq_keys "
+                f"--output {self.zmq_curve_keys_dir}"
+            )
+        from sglang.srt.environ import envs
+
+        envs.SGLANG_ZMQ_CURVE_KEYS_DIR.set(self.zmq_curve_keys_dir)
 
     def _handle_deprecated_args(self):
         # Handle deprecated tool call parsers
@@ -3739,6 +3769,17 @@ class ServerArgs:
             default=ServerArgs.enable_ssl_refresh,
             help="Enable automatic SSL certificate hot-reloading when cert/key "
             "files change on disk. Requires --ssl-certfile and --ssl-keyfile.",
+        )
+
+        # ZMQ CURVE authentication
+        parser.add_argument(
+            "--zmq-curve-keys-dir",
+            type=str,
+            default=ServerArgs.zmq_curve_keys_dir,
+            help="Directory containing CurveZMQ keypair (cluster.key_secret). "
+            "Enables CURVE encryption and authentication on all cross-machine "
+            "ZMQ sockets. Generate keys with: "
+            "python -m sglang.srt.utils.gen_zmq_keys",
         )
 
         # Quantization and data type

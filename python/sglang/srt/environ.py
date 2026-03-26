@@ -524,6 +524,9 @@ class Envs:
     # Elastic EP Backup Port
     SGLANG_BACKUP_PORT_BASE = EnvInt(10000)
 
+    # CurveZMQ
+    SGLANG_ZMQ_CURVE_KEYS_DIR = EnvStr("")
+
 
 envs = Envs()
 EnvField._allow_set_name = False

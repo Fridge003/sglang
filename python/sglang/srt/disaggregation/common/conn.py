@@ -361,9 +361,14 @@ class CommonKVManager(BaseKVManager):
 
     @cache
     def _connect(self, endpoint: str, is_ipv6: bool = False):
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         socket = zmq.Context().socket(zmq.PUSH)
         if is_ipv6:
             socket.setsockopt(zmq.IPV6, 1)
+        curve = get_curve_config()
+        if curve is not None:
+            apply_curve_client(socket, curve)
         socket.connect(endpoint)
         return socket
 
@@ -624,11 +629,16 @@ class CommonKVReceiver(BaseKVReceiver):
 
     @classmethod
     def _connect(cls, endpoint: str, is_ipv6: bool = False):
+        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
         with cls._global_lock:
             if endpoint not in cls._socket_cache:
                 sock = cls._ctx.socket(zmq.PUSH)
                 if is_ipv6:
                     sock.setsockopt(zmq.IPV6, 1)
+                curve = get_curve_config()
+                if curve is not None:
+                    apply_curve_client(sock, curve)
                 sock.connect(endpoint)
                 cls._socket_cache[endpoint] = sock
                 cls._socket_locks[endpoint] = threading.Lock()

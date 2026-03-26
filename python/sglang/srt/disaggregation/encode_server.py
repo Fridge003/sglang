@@ -1029,8 +1029,13 @@ class MMEncoder:
 
         # Use thread pool executor for parallel ZMQ send operations
         def send_with_socket():
+            from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
             sock = self.sync_context.socket(zmq.PUSH)
             config_socket(sock, zmq.PUSH)
+            curve = get_curve_config()
+            if curve is not None:
+                apply_curve_client(sock, curve)
             try:
                 sock.connect(endpoint)
                 if buffer is not None:

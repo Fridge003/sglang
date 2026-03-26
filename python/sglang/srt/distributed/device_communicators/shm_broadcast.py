@@ -219,6 +219,8 @@ class MessageQueue:
             self.current_idx = -1
 
         if n_remote_reader > 0:
+            from sglang.srt.utils.network import apply_curve_server, get_curve_config
+
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(XPUB)
@@ -227,6 +229,9 @@ class MessageQueue:
             na = NetworkAddress(connect_ip, remote_subscribe_port)
             if na.is_ipv6:
                 self.remote_socket.setsockopt(IPV6, 1)
+            curve = get_curve_config()
+            if curve is not None:
+                apply_curve_server(self.remote_socket, curve)
             address = na.to_tcp()
             logger.debug(f"class MessageQueue: Binding remote socket to {address=}")
             self.remote_socket.bind(address)
@@ -286,11 +291,16 @@ class MessageQueue:
 
             self.local_socket = None
 
+            from sglang.srt.utils.network import apply_curve_client, get_curve_config
+
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
             na = NetworkAddress(handle.connect_ip, handle.remote_subscribe_port)
             if na.is_ipv6:
                 self.remote_socket.setsockopt(IPV6, 1)
+            curve = get_curve_config()
+            if curve is not None:
+                apply_curve_client(self.remote_socket, curve)
             socket_addr = na.to_tcp()
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
