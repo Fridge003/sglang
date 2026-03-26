@@ -66,8 +66,10 @@ class RuntimeEndpoint(BaseBackend):
         self._assert_success(res)
 
     def get_server_info(self):
+        # TODO: Rename this method to `server_info` after the `/get_server_info` deprecation
+        # window ends, and keep a temporary alias for backward compatibility.
         res = http_request(
-            self.base_url + "/get_server_info",
+            self.base_url + "/server_info",
             api_key=self.api_key,
             verify=self.verify,
         )
@@ -530,8 +532,10 @@ class Runtime:
         return json.dumps(response.json())
 
     async def get_server_info(self):
+        # TODO: Rename this method to `server_info` after the `/get_server_info` deprecation
+        # window ends, and keep a temporary alias for backward compatibility.
         async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.url}/get_server_info") as response:
+            async with session.get(f"{self.url}/server_info") as response:
                 if response.status == 200:
                     return await response.json()
                 else:
