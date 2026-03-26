@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.srt.speculative.spec_utils import spec_need_hidden_states
+from sglang.srt.speculative.spec_utils import spec_need_hidden_states_in_future_map
 from sglang.srt.utils import is_cuda, is_hip
 
 if TYPE_CHECKING:
@@ -110,7 +110,7 @@ class FutureMap:
             device=self.device,
         )
 
-        if spec_need_hidden_states():
+        if spec_need_hidden_states_in_future_map():
             hidden_states0 = draft_input.hidden_states[0]
             self.hidden_states_buf = torch.empty(
                 (self.future_buffer_len, *hidden_states0.shape),
@@ -148,7 +148,7 @@ class FutureMap:
             draft_input.topk_index = self.topk_index_buf[indices]
             draft_input.verified_id = self.verified_id_buf[indices]
             draft_input.new_seq_lens = self.new_seq_lens_buf[indices]
-            if spec_need_hidden_states():
+            if spec_need_hidden_states_in_future_map():
                 draft_input.hidden_states = self.hidden_states_buf[indices]
 
     def is_empty_slice(self, s: slice) -> bool:
@@ -183,5 +183,5 @@ class FutureMap:
         self.topk_index_buf[intv] = draft_input.topk_index
         self.verified_id_buf[intv] = draft_input.verified_id
         self.new_seq_lens_buf[intv] = draft_input.new_seq_lens
-        if spec_need_hidden_states():
+        if spec_need_hidden_states_in_future_map():
             self.hidden_states_buf[intv] = draft_input.hidden_states

@@ -25,6 +25,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.model_executor.input_buffers import ForwardInputBuffers
 from sglang.srt.speculative.eagle_info import EagleDraftInput
+from sglang.srt.speculative.spec_utils import spec_need_hidden_states_in_future_map
 from sglang.srt.utils import (
     require_attn_tp_gather,
     require_gathered_buffer,
@@ -118,10 +119,13 @@ class EAGLEDraftCudaGraphRunner:
             extend_seq_lens = torch.ones((self.max_bs,), dtype=torch.int32)
             topk_p = torch.zeros((self.max_bs, self.topk), dtype=torch.float32)
             topk_index = torch.zeros((self.max_bs, self.topk), dtype=torch.int64)
-            hidden_states = torch.zeros(
-                (self.max_bs, self.model_runner.model_config.hidden_size),
-                dtype=self.model_runner.dtype,
-            )
+            if spec_need_hidden_states_in_future_map(self.model_runner.server_args):
+                hidden_states = torch.zeros(
+                    (self.max_bs, self.model_runner.model_config.hidden_size),
+                    dtype=self.model_runner.dtype,
+                )
+            else:
+                hidden_states = None
 
             if self.require_gathered_buffer:
                 if self.require_mlp_tp_gather:
@@ -229,7 +233,10 @@ class EAGLEDraftCudaGraphRunner:
         out_cache_loc = buffers.out_cache_loc[: num_tokens * self.speculative_num_steps]
         positions = buffers.positions[:num_tokens]
         mrope_positions = buffers.mrope_positions[:, :num_tokens]
-        hidden_states = buffers.hidden_states[:num_seqs]
+        if spec_need_hidden_states_in_future_map(self.model_runner.server_args):
+            hidden_states = buffers.hidden_states[:num_seqs]
+        else:
+            hidden_states = None
         topk_p = buffers.topk_p[:num_seqs]
         topk_index = buffers.topk_index[:num_seqs]
 
@@ -388,7 +395,8 @@ class EAGLEDraftCudaGraphRunner:
         buffers.positions[:raw_num_token].copy_(forward_batch.positions)
         buffers.topk_p[:raw_bs].copy_(forward_batch.spec_info.topk_p)
         buffers.topk_index[:raw_bs].copy_(forward_batch.spec_info.topk_index)
-        buffers.hidden_states[:raw_bs].copy_(forward_batch.spec_info.hidden_states)
+        if spec_need_hidden_states_in_future_map(self.model_runner.server_args):
+            buffers.hidden_states[:raw_bs].copy_(forward_batch.spec_info.hidden_states)
         buffers.req_pool_indices[:raw_bs].copy_(forward_batch.req_pool_indices)
 
         # TODO(ch-wan): support num_token_non_padded

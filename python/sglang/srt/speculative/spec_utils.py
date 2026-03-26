@@ -49,12 +49,60 @@ TREE_TRAVERSE_TIME_THRESHOLD = 1  # TODO: set this properly
 TREE_SPEC_KERNEL_AVAILABLE = _is_cuda  # This kernel is only available for CUDA now
 
 
-def spec_need_hidden_states(server_args: Optional[ServerArgs] = None) -> bool:
+def _get_spec_algorithm(server_args: ServerArgs):
+    from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+    return SpeculativeAlgorithm.from_string(server_args.speculative_algorithm)
+
+
+def spec_target_need_hidden_states(
+    server_args: Optional[ServerArgs] = None,
+) -> bool:
+    """Whether target verify must capture hidden states for the draft model.
+
+    True for EAGLE and MIMO (draft architecture consumes target hidden states).
+    False for Standalone (draft is an independent LLM).
+    """
     if server_args is None:
         server_args = get_global_server_args()
+    return not _get_spec_algorithm(server_args).is_standalone()
 
-    # TODO(lsyin): also skip when 1) step = 1 or 2) standalone draft model
-    return not server_args.enable_multi_layer_eagle
+
+def spec_draft_extend_need_hidden_states(
+    server_args: Optional[ServerArgs] = None,
+) -> bool:
+    """Whether draft extend must capture output hidden states.
+
+    True for EAGLE step>1 (cross-round chain to next tree draft) and
+    MIMO (layer chain + hidden-states pool for KV reversion).
+    False for EAGLE step=1 and Standalone.
+    """
+    if server_args is None:
+        server_args = get_global_server_args()
+    if server_args.enable_multi_layer_eagle:
+        return True
+    if server_args.speculative_num_steps <= 1:
+        return False
+    return not _get_spec_algorithm(server_args).is_standalone()
+
+
+def spec_need_hidden_states_in_future_map(
+    server_args: Optional[ServerArgs] = None,
+) -> bool:
+    """Whether FutureMap must cache draft hidden states across iterations.
+
+    True only for EAGLE chain (step>1): tree draft consumes draft-extend
+    output hidden states as seed, and overlap scheduling requires FutureMap
+    to bridge the async iteration boundary.
+    MIMO handles hidden states internally (not through FutureMap).
+    """
+    if server_args is None:
+        server_args = get_global_server_args()
+    if server_args.enable_multi_layer_eagle:
+        return False
+    if server_args.speculative_num_steps <= 1:
+        return False
+    return not _get_spec_algorithm(server_args).is_standalone()
 
 
 @triton.jit

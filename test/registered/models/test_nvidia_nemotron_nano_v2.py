@@ -1,5 +1,6 @@
 import unittest
 
+from sglang.srt.environ import envs
 from sglang.srt.utils import is_blackwell
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.kits.gsm8k_accuracy_kit import GSM8KMixin
@@ -33,22 +34,29 @@ class TestNvidiaNemotronNanoV2NVFP4(GSM8KMixin, DefaultServerBase):
     other_args = ["--max-mamba-cache-size", "256"]
 
 
-@unittest.skip(
-    "STANDALONE speculative decoding does not yet support target and draft models "
-    "with different hidden sizes (Nemotron-9B: 4480, Llama-3.2-1B: 2048)"
-)
 class TestNvidiaNemotronNanoV2SpeculativeDecoding(GSM8KMixin, DefaultServerBase):
     gsm8k_accuracy_thres = 0.87
     model = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+
+    @classmethod
+    def setUpClass(cls):
+        envs.SGLANG_ENABLE_SPEC_V2.set(True)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        envs.SGLANG_ENABLE_SPEC_V2.set(False)
+
     other_args = [
         "--speculative-algorithm",
         "STANDALONE",
         "--speculative-num-steps",
-        "2",
-        "--speculative-eagle-topk",
         "3",
+        "--speculative-eagle-topk",
+        "1",
         "--speculative-num-draft-tokens",
-        "5",
+        "4",
         "--speculative-draft-model-path",
         "meta-llama/Llama-3.2-1B",
         "--speculative-draft-load-format",
@@ -59,27 +67,35 @@ class TestNvidiaNemotronNanoV2SpeculativeDecoding(GSM8KMixin, DefaultServerBase)
         "2048",
         "--json-model-override-args",
         '{"vocab_size": 131072}',
+        "--disable-radix-cache",
     ]
 
 
-@unittest.skip(
-    "STANDALONE speculative decoding does not yet support target and draft models "
-    "with different hidden sizes (Nemotron-9B: 4480, Llama-3.2-1B: 2048)"
-)
 class TestNvidiaNemotronNanoV2SpeculativeDecodingBF16Cache(
     GSM8KMixin, DefaultServerBase
 ):
     gsm8k_accuracy_thres = 0.87
     model = "nvidia/NVIDIA-Nemotron-Nano-9B-v2"
+
+    @classmethod
+    def setUpClass(cls):
+        envs.SGLANG_ENABLE_SPEC_V2.set(True)
+        super().setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        super().tearDownClass()
+        envs.SGLANG_ENABLE_SPEC_V2.set(False)
+
     other_args = [
         "--speculative-algorithm",
         "STANDALONE",
         "--speculative-num-steps",
-        "2",
-        "--speculative-eagle-topk",
         "3",
+        "--speculative-eagle-topk",
+        "1",
         "--speculative-num-draft-tokens",
-        "5",
+        "4",
         "--speculative-draft-model-path",
         "meta-llama/Llama-3.2-1B",
         "--speculative-draft-load-format",
@@ -92,6 +108,7 @@ class TestNvidiaNemotronNanoV2SpeculativeDecodingBF16Cache(
         '{"vocab_size": 131072}',
         "--mamba-ssm-dtype",
         "bfloat16",
+        "--disable-radix-cache",
     ]
 
 

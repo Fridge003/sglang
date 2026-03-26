@@ -1182,6 +1182,9 @@ class CudaGraphRunner:
             or self.model_runner.spec_algorithm.is_standalone()
         ):
             from sglang.srt.speculative.eagle_info import EagleVerifyInput
+            from sglang.srt.speculative.spec_utils import (
+                spec_target_need_hidden_states,
+            )
 
             if self.model_runner.is_draft_worker:
                 raise RuntimeError("This should not happen.")
@@ -1197,7 +1200,11 @@ class CudaGraphRunner:
                     spec_steps=self.model_runner.server_args.speculative_num_steps,
                     topk=self.model_runner.server_args.speculative_eagle_topk,
                     draft_token_num=self.model_runner.server_args.speculative_num_draft_tokens,
-                    capture_hidden_mode=CaptureHiddenMode.FULL,
+                    capture_hidden_mode=(
+                        CaptureHiddenMode.FULL
+                        if spec_target_need_hidden_states(self.model_runner.server_args)
+                        else CaptureHiddenMode.NULL
+                    ),
                     seq_lens_sum=None,
                     seq_lens_cpu=None,
                 )

@@ -28,6 +28,7 @@ from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
 from sglang.srt.speculative.spec_utils import (
     SIMULATE_ACC_LEN,
     generate_simulated_accept_index,
+    spec_target_need_hidden_states,
 )
 from sglang.srt.utils.common import is_cuda, is_hip, is_npu, next_power_of_2
 
@@ -251,7 +252,11 @@ class EagleVerifyInputV2Mixin:
             if batch.forward_mode.is_idle()
             else ForwardMode.TARGET_VERIFY
         )
-        batch.capture_hidden_mode = CaptureHiddenMode.FULL
+        batch.capture_hidden_mode = (
+            CaptureHiddenMode.FULL
+            if spec_target_need_hidden_states()
+            else CaptureHiddenMode.NULL
+        )
         verify_forward_batch = ForwardBatch.init_new(batch, target_worker.model_runner)
 
         # Run attention backend plan and cuda graph preparation
