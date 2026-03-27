@@ -60,7 +60,7 @@ class SchedulerClient:
         self.server_args = None
 
     def initialize(self, server_args: ServerArgs):
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+        from sglang.srt.utils.network import connect_with_curve
 
         if self.context is not None and not self.context.closed:
             logger.warning("SchedulerClient is already initialized. Re-initializing.")
@@ -74,10 +74,7 @@ class SchedulerClient:
         self.scheduler_socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         scheduler_endpoint = self.server_args.scheduler_endpoint
-        curve = get_curve_config()
-        if curve is not None and scheduler_endpoint.startswith("tcp://"):
-            apply_curve_client(self.scheduler_socket, curve)
-        self.scheduler_socket.connect(scheduler_endpoint)
+        connect_with_curve(self.scheduler_socket, scheduler_endpoint)
         logger.debug(
             f"SchedulerClient connected to backend scheduler at {scheduler_endpoint}"
         )
@@ -96,7 +93,7 @@ class SchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+        from sglang.srt.utils.network import connect_with_curve
 
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
@@ -107,12 +104,9 @@ class SchedulerClient:
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
-        curve = get_curve_config()
-        if curve is not None and endpoint.startswith("tcp://"):
-            apply_curve_client(ping_socket, curve)
+        connect_with_curve(ping_socket, endpoint)
 
         try:
-            ping_socket.connect(endpoint)
             ping_socket.send_pyobj({"method": "ping"})
             ping_socket.recv_pyobj()
             return True
@@ -157,7 +151,7 @@ class AsyncSchedulerClient:
 
     async def forward(self, batch: Any) -> Any:
         """Sends a batch or request to the scheduler and waits for the response."""
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+        from sglang.srt.utils.network import connect_with_curve
 
         if self.context is None:
             raise RuntimeError(
@@ -169,10 +163,7 @@ class AsyncSchedulerClient:
         socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         endpoint = self.server_args.scheduler_endpoint
-        curve = get_curve_config()
-        if curve is not None and endpoint.startswith("tcp://"):
-            apply_curve_client(socket, curve)
-        socket.connect(endpoint)
+        connect_with_curve(socket, endpoint)
 
         try:
             await socket.send(pickle.dumps(batch))
@@ -188,7 +179,7 @@ class AsyncSchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+        from sglang.srt.utils.network import connect_with_curve
 
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
@@ -199,12 +190,9 @@ class AsyncSchedulerClient:
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
-        curve = get_curve_config()
-        if curve is not None and endpoint.startswith("tcp://"):
-            apply_curve_client(ping_socket, curve)
+        connect_with_curve(ping_socket, endpoint)
 
         try:
-            ping_socket.connect(endpoint)
             await ping_socket.send(pickle.dumps({"method": "ping"}))
             await ping_socket.recv()
             return True

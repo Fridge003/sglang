@@ -72,6 +72,24 @@ def get_curve_config() -> Optional[CurveConfig]:
     return _curve_config_cache
 
 
+def connect_with_curve(
+    socket: zmq.Socket,
+    endpoint: str,
+    curve: Optional[CurveConfig] = None,
+) -> None:
+    """Apply CURVE client auth (if configured) and connect *socket* to *endpoint*.
+
+    For TCP endpoints, CURVE is auto-applied when *curve* is supplied or
+    ``get_curve_config()`` returns a config.  Non-TCP endpoints (IPC, inproc)
+    are connected without CURVE.  Must be called BEFORE any send/recv.
+    """
+    if curve is None and endpoint.startswith("tcp://"):
+        curve = get_curve_config()
+    if curve is not None:
+        apply_curve_client(socket, curve)
+    socket.connect(endpoint)
+
+
 def get_open_port() -> int:
     port = os.getenv("SGLANG_PORT")
     if port is not None:

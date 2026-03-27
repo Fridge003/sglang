@@ -14,6 +14,7 @@ from sglang.srt.utils.network import (
     CurveConfig,
     apply_curve_client,
     apply_curve_server,
+    connect_with_curve,
     get_curve_config,
     get_zmq_socket,
     get_zmq_socket_on_host,
@@ -416,36 +417,144 @@ class TestSchedulerClientSecurity(CustomTestCase):
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
-    def test_scheduler_client_applies_curve(self):
-        """SchedulerClient.initialize must call apply_curve_client when CURVE is configured."""
+    def test_scheduler_client_uses_connect_with_curve(self):
+        """SchedulerClient.initialize must use connect_with_curve (not manual boilerplate)."""
         from unittest.mock import MagicMock, patch
 
-        tmp_dir = tempfile.mkdtemp()
+        mock_server_args = MagicMock()
+        mock_server_args.scheduler_endpoint = "tcp://127.0.0.1:9999"
+
+        client = self.sc_mod.SchedulerClient()
+        with patch(
+            "sglang.srt.utils.network.connect_with_curve"
+        ) as mock_connect:
+            client.initialize(mock_server_args)
+
+        mock_connect.assert_called_once()
+        call_args = mock_connect.call_args[0]
+        self.assertEqual(
+            call_args[1],
+            "tcp://127.0.0.1:9999",
+            "connect_with_curve must be called with the scheduler endpoint",
+        )
+        client.close()
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestConnectWithCurve(CustomTestCase):
+    """Verify connect_with_curve() applies CURVE for TCP and skips for IPC."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        generate_certificates(self.tmp_dir)
+        self.curve = CurveConfig.from_keys_dir(self.tmp_dir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_tcp_applies_curve_and_connects(self):
+        """connect_with_curve must apply CURVE client opts for TCP endpoints."""
+        from unittest.mock import patch
+
+        ctx = zmq.Context()
         try:
-            generate_certificates(tmp_dir)
-            curve = CurveConfig.from_keys_dir(tmp_dir)
+            server = ctx.socket(zmq.PULL)
+            apply_curve_server(server, self.curve)
+            port = server.bind_to_random_port("tcp://127.0.0.1")
 
-            mock_server_args = MagicMock()
-            mock_server_args.scheduler_endpoint = "tcp://127.0.0.1:9999"
-
-            client = self.sc_mod.SchedulerClient()
+            client = ctx.socket(zmq.PUSH)
+            client.setsockopt(zmq.LINGER, 0)
             with patch(
-                "sglang.srt.utils.network.get_curve_config", return_value=curve
-            ) as mock_get, patch(
-                "sglang.srt.utils.network.apply_curve_client"
-            ) as mock_apply:
-                client.initialize(mock_server_args)
+                "sglang.srt.utils.network.get_curve_config", return_value=self.curve
+            ):
+                connect_with_curve(client, f"tcp://127.0.0.1:{port}")
 
-            mock_apply.assert_called_once()
-            call_args = mock_apply.call_args
-            self.assertIs(
-                call_args[0][1],
-                curve,
-                "apply_curve_client must be called with the CurveConfig",
-            )
+            client.send(b"via-helper")
+            self.assertTrue(server.poll(timeout=3000))
+            msg = server.recv()
+            self.assertEqual(msg, b"via-helper")
+
             client.close()
+            server.close()
         finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            ctx.term()
+
+    def test_ipc_skips_curve(self):
+        """connect_with_curve must skip CURVE for IPC endpoints."""
+        from unittest.mock import MagicMock, patch
+
+        mock_socket = MagicMock()
+        with patch(
+            "sglang.srt.utils.network.get_curve_config", return_value=self.curve
+        ), patch("sglang.srt.utils.network.apply_curve_client") as mock_apply:
+            connect_with_curve(mock_socket, "ipc:///tmp/test.sock")
+
+        mock_apply.assert_not_called()
+        mock_socket.connect.assert_called_once_with("ipc:///tmp/test.sock")
+
+    def test_explicit_curve_config(self):
+        """connect_with_curve must use an explicitly provided CurveConfig."""
+        from unittest.mock import patch
+
+        ctx = zmq.Context()
+        try:
+            server = ctx.socket(zmq.PULL)
+            apply_curve_server(server, self.curve)
+            port = server.bind_to_random_port("tcp://127.0.0.1")
+
+            client = ctx.socket(zmq.PUSH)
+            client.setsockopt(zmq.LINGER, 0)
+            connect_with_curve(
+                client, f"tcp://127.0.0.1:{port}", curve=self.curve
+            )
+
+            client.send(b"explicit-curve")
+            self.assertTrue(server.poll(timeout=3000))
+            msg = server.recv()
+            self.assertEqual(msg, b"explicit-curve")
+
+            client.close()
+            server.close()
+        finally:
+            ctx.term()
+
+
+class TestMMSchedulerUsesSrtGetZmqSocket(CustomTestCase):
+    """Verify the multimodal scheduler imports get_zmq_socket from
+    srt/utils/network.py (the hardened version with CURVE support)."""
+
+    def test_mm_scheduler_imports_srt_get_zmq_socket(self):
+        """The multimodal scheduler must not use its own unhardened get_zmq_socket."""
+        import importlib.util
+        import sys
+        from types import ModuleType
+
+        mm_sched_path = os.path.join(
+            os.path.dirname(__file__),
+            "..",
+            "..",
+            "..",
+            "python",
+            "sglang",
+            "multimodal_gen",
+            "runtime",
+            "managers",
+            "scheduler.py",
+        )
+        mm_sched_path = os.path.abspath(mm_sched_path)
+        with open(mm_sched_path) as f:
+            source = f.read()
+
+        self.assertIn(
+            "from sglang.srt.utils.network import get_zmq_socket",
+            source,
+            "multimodal scheduler must import get_zmq_socket from srt.utils.network",
+        )
+        self.assertNotIn(
+            "from sglang.multimodal_gen.runtime.utils.common import get_zmq_socket",
+            source,
+            "multimodal scheduler must NOT import get_zmq_socket from multimodal_gen",
+        )
 
 
 class TestSafePickleLoad(CustomTestCase):
