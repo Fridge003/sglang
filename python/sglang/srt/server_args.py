@@ -918,6 +918,7 @@ class ServerArgs:
 
         if self.no_zmq_curve:
             envs.SGLANG_NO_ZMQ_CURVE.set(True)
+            logger.info("CurveZMQ: disabled via --no-zmq-curve")
             return
 
         if self.zmq_curve_keys_dir:
@@ -949,7 +950,22 @@ class ServerArgs:
                     "must be 40-character Z85-encoded strings "
                     "(as produced by zmq.curve_keypair())"
                 )
+            logger.info("CurveZMQ: using keypair from environment variables")
             return
+
+        import zmq as _zmq
+
+        if _zmq.has("curve"):
+            logger.info(
+                "CurveZMQ: enabled (auto-generating per-instance keypair). "
+                "Use --no-zmq-curve to disable."
+            )
+        else:
+            logger.warning(
+                "CurveZMQ disabled: this pyzmq/libzmq build lacks CURVE support "
+                "(libsodium missing). ZMQ sockets will be unauthenticated."
+            )
+            envs.SGLANG_NO_ZMQ_CURVE.set(True)
 
     def _handle_deprecated_args(self):
         # Handle deprecated tool call parsers
