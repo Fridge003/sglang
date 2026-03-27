@@ -252,8 +252,8 @@ class ZmqEventPublisher(EventPublisher):
         https://pyzmq.readthedocs.io/en/v19.0.0/morethanbindings.html#thread-safety
         """
         from sglang.srt.utils.network import (
-            apply_curve_client,
             apply_curve_server,
+            connect_with_curve,
             get_curve_config,
         )
 
@@ -262,8 +262,6 @@ class ZmqEventPublisher(EventPublisher):
         if self._pub is None:
             self._pub = self._ctx.socket(zmq.PUB)
             self._pub.set_hwm(self._hwm)
-            # Heuristic: bind if wildcard / * present, else connect.
-            # bind stable, connect volatile convention
             is_bind = (
                 "*" in self._endpoint
                 or "::" in self._endpoint
@@ -271,23 +269,16 @@ class ZmqEventPublisher(EventPublisher):
                 or self._endpoint.startswith("inproc://")
             )
             is_tcp = self._endpoint.startswith("tcp://")
-            if curve is not None and is_tcp:
-                if is_bind:
-                    apply_curve_server(self._pub, curve)
-                else:
-                    apply_curve_client(self._pub, curve)
             if is_bind:
+                if curve is not None and is_tcp:
+                    apply_curve_server(self._pub, curve)
                 logger.debug(
                     f"ZmqEventPublisher socket publisher_endpoint bind to {self._endpoint}"
                 )
                 self._pub.bind(self._endpoint)
             else:
-                self._pub.connect(self._endpoint)
+                connect_with_curve(self._pub, self._endpoint)
 
-        # Set up replay socket: use ROUTER
-        # 1) handles multiple REQ clients (identities)
-        # 2) lets us send back one request → many replies (streamed events)
-        # 3) works in our non‑blocking poll loop alongside PUB
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
             if (

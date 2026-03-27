@@ -291,19 +291,16 @@ class MessageQueue:
 
             self.local_socket = None
 
-            from sglang.srt.utils.network import apply_curve_client, get_curve_config
+            from sglang.srt.utils.network import connect_with_curve
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
             na = NetworkAddress(handle.connect_ip, handle.remote_subscribe_port)
             if na.is_ipv6:
                 self.remote_socket.setsockopt(IPV6, 1)
-            curve = get_curve_config()
-            if curve is not None:
-                apply_curve_client(self.remote_socket, curve)
             socket_addr = na.to_tcp()
             logger.debug("Connecting to %s", socket_addr)
-            self.remote_socket.connect(socket_addr)
+            connect_with_curve(self.remote_socket, socket_addr)
 
         return self
 

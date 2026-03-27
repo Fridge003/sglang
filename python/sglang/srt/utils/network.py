@@ -24,10 +24,16 @@ _LOCALHOST_ADDRS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 @dataclass(frozen=True)
 class CurveConfig:
-    """Holds a shared Curve25519 keypair for ZMQ CURVE authentication."""
+    """Holds a Curve25519 keypair for ZMQ CURVE authentication."""
 
     public_key: bytes
     secret_key: bytes
+
+    @classmethod
+    def generate(cls) -> CurveConfig:
+        """Generate a fresh Curve25519 keypair in memory (no files)."""
+        public_key, secret_key = zmq.curve_keypair()
+        return cls(public_key=public_key, secret_key=secret_key)
 
     @classmethod
     def from_keys_dir(cls, keys_dir: str) -> CurveConfig:
@@ -36,13 +42,28 @@ class CurveConfig:
         return cls(public_key=public_key, secret_key=secret_key)
 
     @classmethod
-    def from_env(cls) -> Optional[CurveConfig]:
+    def from_raw_env(cls) -> Optional[CurveConfig]:
+        """Load keypair from ``SGLANG_ZMQ_CURVE_PUBLIC_KEY`` / ``SECRET_KEY``."""
         from sglang.srt.environ import envs
 
+        pub = envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.get()
+        sec = envs.SGLANG_ZMQ_CURVE_SECRET_KEY.get()
+        if pub and sec:
+            return cls(public_key=pub.encode("ascii"), secret_key=sec.encode("ascii"))
+        return None
+
+    @classmethod
+    def from_env(cls) -> Optional[CurveConfig]:
+        """Load config with priority: raw env vars > keys dir > None."""
+        from sglang.srt.environ import envs
+
+        raw = cls.from_raw_env()
+        if raw is not None:
+            return raw
         keys_dir = envs.SGLANG_ZMQ_CURVE_KEYS_DIR.get()
-        if not keys_dir:
-            return None
-        return cls.from_keys_dir(keys_dir)
+        if keys_dir:
+            return cls.from_keys_dir(keys_dir)
+        return None
 
 
 def apply_curve_server(socket: zmq.Socket, curve: CurveConfig) -> None:
@@ -52,11 +73,20 @@ def apply_curve_server(socket: zmq.Socket, curve: CurveConfig) -> None:
     socket.curve_server = True
 
 
-def apply_curve_client(socket: zmq.Socket, curve: CurveConfig) -> None:
-    """Apply CURVE client options to *socket*.  Must be called BEFORE connect()."""
+def apply_curve_client(
+    socket: zmq.Socket,
+    curve: CurveConfig,
+    server_public_key: Optional[bytes] = None,
+) -> None:
+    """Apply CURVE client options to *socket*.  Must be called BEFORE connect().
+
+    *server_public_key* is the public key of the CURVE server being connected
+    to.  When ``None``, falls back to ``curve.public_key`` (shared-key model
+    for internal connections within the same instance).
+    """
     socket.curve_secretkey = curve.secret_key
     socket.curve_publickey = curve.public_key
-    socket.curve_serverkey = curve.public_key  # shared-key model
+    socket.curve_serverkey = server_public_key or curve.public_key
 
 
 _curve_config_cache: Optional[CurveConfig] = None
@@ -64,29 +94,60 @@ _curve_config_loaded: bool = False
 
 
 def get_curve_config() -> Optional[CurveConfig]:
-    """Return the cluster CurveConfig, or ``None`` when CURVE is disabled."""
+    """Return the instance CurveConfig, or ``None`` when CURVE is disabled.
+
+    On first call, loads from env/files or auto-generates a keypair.
+    Returns ``None`` only when CURVE is explicitly disabled via
+    ``SGLANG_NO_ZMQ_CURVE`` or ``zmq.has("curve")`` is false.
+    """
     global _curve_config_cache, _curve_config_loaded
     if not _curve_config_loaded:
-        _curve_config_cache = CurveConfig.from_env()
+        from sglang.srt.environ import envs
+
+        if envs.SGLANG_NO_ZMQ_CURVE.get():
+            _curve_config_cache = None
+        else:
+            _curve_config_cache = CurveConfig.from_env()
+            if _curve_config_cache is None:
+                if zmq.has("curve"):
+                    _curve_config_cache = CurveConfig.generate()
+                    logger.info("Auto-generated CurveZMQ keypair for this instance")
+                else:
+                    logger.warning(
+                        "CurveZMQ disabled: this pyzmq/libzmq build lacks CURVE "
+                        "support (libsodium missing)"
+                    )
         _curve_config_loaded = True
     return _curve_config_cache
+
+
+def set_curve_config(config: CurveConfig) -> None:
+    """Inject a CurveConfig (e.g. received from a multi-node broadcast)."""
+    global _curve_config_cache, _curve_config_loaded
+    _curve_config_cache = config
+    _curve_config_loaded = True
 
 
 def connect_with_curve(
     socket: zmq.Socket,
     endpoint: str,
+    server_public_key: Optional[bytes] = None,
     curve: Optional[CurveConfig] = None,
 ) -> None:
     """Apply CURVE client auth (if configured) and connect *socket* to *endpoint*.
 
     For TCP endpoints, CURVE is auto-applied when *curve* is supplied or
     ``get_curve_config()`` returns a config.  Non-TCP endpoints (IPC, inproc)
-    are connected without CURVE.  Must be called BEFORE any send/recv.
+    are connected without CURVE.
+
+    *server_public_key* is the remote server's public key for proper
+    asymmetric CURVE.  When ``None``, uses the local keypair's public key
+    (shared-key model for internal connections).
     """
     if curve is None and endpoint.startswith("tcp://"):
         curve = get_curve_config()
     if curve is not None:
-        apply_curve_client(socket, curve)
+        apply_curve_client(socket, curve, server_public_key)
     socket.connect(endpoint)
 
 
@@ -264,8 +325,7 @@ def get_zmq_socket_on_host(
     """Create, configure, and bind a ZeroMQ socket to a random TCP port.
 
     CURVE authentication is applied automatically when *curve* is supplied or
-    when ``get_curve_config()`` returns a config **and** *host* is not a
-    loopback address.
+    when ``get_curve_config()`` returns a config.
 
     Args:
         context: ZeroMQ context to create the socket from.
@@ -274,8 +334,7 @@ def get_zmq_socket_on_host(
             ``127.0.0.1`` (localhost-only) to avoid exposing unauthenticated
             sockets to the network (CVE-2026-3060).  Callers that need
             cross-machine reachability must pass an explicit host.
-        curve: Explicit CurveConfig.  When *None* the global config is used
-            for non-loopback hosts.
+        curve: Explicit CurveConfig.  When *None* the global config is used.
 
     Returns:
         Tuple of (port, socket) where port is the randomly assigned TCP port.
@@ -290,7 +349,7 @@ def get_zmq_socket_on_host(
     else:
         bind_host = f"tcp://{host}"
 
-    if curve is None and host not in _LOCALHOST_ADDRS:
+    if curve is None:
         curve = get_curve_config()
     if curve is not None:
         apply_curve_server(socket, curve)

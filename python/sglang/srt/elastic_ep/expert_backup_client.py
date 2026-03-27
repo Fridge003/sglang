@@ -53,26 +53,17 @@ class ExpertBackupClient:
         )
         logger.info(f"all_ips: {all_ips}")
 
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
-
-        curve = get_curve_config()
+        from sglang.srt.utils.network import connect_with_curve
 
         for i in range(self.engine_num):
             self.recv_list[i] = context.socket(zmq.SUB)
-            if curve is not None:
-                apply_curve_client(self.recv_list[i], curve)
-            self.recv_list[i].connect(
-                f"tcp://{all_ips[i * get_world_size() // server_args.nnodes]}:{PORT_BASE + i * 2 + 1}"
-            )
+            recv_endpoint = f"tcp://{all_ips[i * get_world_size() // server_args.nnodes]}:{PORT_BASE + i * 2 + 1}"
+            connect_with_curve(self.recv_list[i], recv_endpoint)
             self.recv_list[i].setsockopt(zmq.SUBSCRIBE, b"")
 
-            # Synchronization channel to notify the manager when this client is ready.
             self.ready_sockets[i] = context.socket(zmq.PUSH)
-            if curve is not None:
-                apply_curve_client(self.ready_sockets[i], curve)
-            self.ready_sockets[i].connect(
-                f"tcp://{all_ips[i * get_world_size() // server_args.nnodes]}:{PORT_BASE + i * 2}"
-            )
+            ready_endpoint = f"tcp://{all_ips[i * get_world_size() // server_args.nnodes]}:{PORT_BASE + i * 2}"
+            connect_with_curve(self.ready_sockets[i], ready_endpoint)
             self.ready_sockets[i].send_pyobj(UpdateExpertBackupReq())
 
         self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)

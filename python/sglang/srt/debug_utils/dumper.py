@@ -1078,14 +1078,12 @@ def _create_zmq_rpc_broadcast(
     print(f"[Dumper.ZmqRpc] rank={rank} all_addresses={all_addresses}")
 
     if rank == 0:
-        from sglang.srt.utils.network import apply_curve_client
+        from sglang.srt.utils.network import connect_with_curve
 
         handles = []
         for i, addr in enumerate(all_addresses):
             req_socket = ctx.socket(zmq.REQ)
-            if curve is not None:
-                apply_curve_client(req_socket, curve)
-            req_socket.connect(addr)
+            connect_with_curve(req_socket, addr)
             handles.append(_ZmqRpcHandle(req_socket, debug_name=f"rank-{i}"))
         return _ZmqRpcBroadcast(handles)
     else:

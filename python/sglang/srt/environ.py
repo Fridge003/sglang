@@ -526,6 +526,9 @@ class Envs:
 
     # CurveZMQ
     SGLANG_ZMQ_CURVE_KEYS_DIR = EnvStr("")
+    SGLANG_ZMQ_CURVE_PUBLIC_KEY = EnvStr("")
+    SGLANG_ZMQ_CURVE_SECRET_KEY = EnvStr("")
+    SGLANG_NO_ZMQ_CURVE = EnvBool(False)
 
 
 envs = Envs()

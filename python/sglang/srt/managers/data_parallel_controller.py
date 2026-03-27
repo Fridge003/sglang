@@ -320,21 +320,27 @@ class DataParallelController:
     def _broadcast_ports_as_server(
         self, endpoint: str, expected_clients: int, worker_ports: List[int]
     ) -> List[int]:
-        """Broadcast worker ports to all client nodes."""
+        """Broadcast worker ports (and CURVE keys) to all client nodes."""
         logger.debug(f"Broadcasting worker ports to {expected_clients} client nodes")
         logger.debug(f"Worker ports: {worker_ports}")
 
+        from sglang.srt.utils.network import get_curve_config
+
         rep_socket = get_zmq_socket(self.context, zmq.REP, endpoint, True)
+
+        curve = get_curve_config()
+        payload: dict = {"worker_ports": worker_ports}
+        if curve is not None:
+            payload["curve_public"] = curve.public_key
+            payload["curve_secret"] = curve.secret_key
 
         try:
             connected_clients = 0
             while connected_clients < expected_clients:
-                # Wait for client handshake
                 client_rank = rep_socket.recv().decode()
                 logger.debug(f"Received handshake from node {client_rank}")
 
-                # Send worker ports to client
-                rep_socket.send_pyobj(worker_ports)
+                rep_socket.send_pyobj(payload)
                 connected_clients += 1
                 logger.debug(
                     f"Sent worker ports to {connected_clients}/{expected_clients} nodes"
@@ -346,19 +352,33 @@ class DataParallelController:
             rep_socket.close()
 
     def _receive_ports_as_client(self, endpoint: str, node_rank: int) -> List[int]:
-        """Receive worker ports from the server node."""
-        logger.debug(f"Connecting to node 0 to receive worker ports")
+        """Receive worker ports (and CURVE keys) from the server node."""
+        logger.debug("Connecting to node 0 to receive worker ports")
 
         req_socket = get_zmq_socket(self.context, zmq.REQ, endpoint, False)
         req_socket.setsockopt(zmq.RCVTIMEO, 600 * 1000)  # 10 minute timeout
         req_socket.setsockopt(zmq.SNDTIMEO, 600 * 1000)
 
         try:
-            # Send handshake with our node rank
             req_socket.send(str(node_rank).encode())
 
-            # Receive worker ports
-            worker_ports = req_socket.recv_pyobj()
+            payload = req_socket.recv_pyobj()
+
+            if isinstance(payload, dict):
+                worker_ports = payload["worker_ports"]
+                if "curve_public" in payload and "curve_secret" in payload:
+                    from sglang.srt.utils.network import CurveConfig, set_curve_config
+
+                    set_curve_config(
+                        CurveConfig(
+                            public_key=payload["curve_public"],
+                            secret_key=payload["curve_secret"],
+                        )
+                    )
+                    logger.info("Received CurveZMQ keys from node 0")
+            else:
+                worker_ports = payload
+
             logger.debug(f"Received {len(worker_ports)} worker ports from node 0")
             return worker_ports
         except zmq.Again:

@@ -79,6 +79,7 @@ class PrefillServerInfo:
 class PrefillRankInfo:
     rank_ip: str
     rank_port: int
+    curve_public_key: Optional[str] = None
 
     def __post_init__(self):
         self.rank_ip = str(self.rank_ip)
@@ -126,6 +127,13 @@ class CommonKVManager(BaseKVManager):
             context, zmq.PULL, host=self.local_ip
         )
         logger.debug(f"kv manager bind to {self.local_ip}:{self.rank_port}")
+
+        from sglang.srt.utils.network import get_curve_config
+
+        curve = get_curve_config()
+        self.curve_public_key: Optional[str] = (
+            curve.public_key.decode("ascii") if curve is not None else None
+        )
 
         self.request_status: Dict[int, KVPoll] = {}
         self.failure_records: Dict[int, str] = {}
@@ -344,6 +352,7 @@ class CommonKVManager(BaseKVManager):
             "page_size": self.kv_args.page_size,
             "kv_cache_dtype": self.server_args.kv_cache_dtype,
             "load_balance_method": self.server_args.load_balance_method,
+            "curve_public_key": self.curve_public_key,
         }
 
         try:
@@ -360,16 +369,18 @@ class CommonKVManager(BaseKVManager):
             )
 
     @cache
-    def _connect(self, endpoint: str, is_ipv6: bool = False):
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+    def _connect(
+        self,
+        endpoint: str,
+        is_ipv6: bool = False,
+        server_public_key: Optional[bytes] = None,
+    ):
+        from sglang.srt.utils.network import connect_with_curve
 
         socket = zmq.Context().socket(zmq.PUSH)
         if is_ipv6:
             socket.setsockopt(zmq.IPV6, 1)
-        curve = get_curve_config()
-        if curve is not None:
-            apply_curve_client(socket, curve)
-        socket.connect(endpoint)
+        connect_with_curve(socket, endpoint, server_public_key=server_public_key)
         return socket
 
     def get_mha_kv_ptrs_with_pp(
@@ -628,18 +639,22 @@ class CommonKVReceiver(BaseKVReceiver):
             return {}
 
     @classmethod
-    def _connect(cls, endpoint: str, is_ipv6: bool = False):
-        from sglang.srt.utils.network import apply_curve_client, get_curve_config
+    def _connect(
+        cls,
+        endpoint: str,
+        is_ipv6: bool = False,
+        server_public_key: Optional[bytes] = None,
+    ):
+        from sglang.srt.utils.network import connect_with_curve
 
         with cls._global_lock:
             if endpoint not in cls._socket_cache:
                 sock = cls._ctx.socket(zmq.PUSH)
                 if is_ipv6:
                     sock.setsockopt(zmq.IPV6, 1)
-                curve = get_curve_config()
-                if curve is not None:
-                    apply_curve_client(sock, curve)
-                sock.connect(endpoint)
+                connect_with_curve(
+                    sock, endpoint, server_public_key=server_public_key
+                )
                 cls._socket_cache[endpoint] = sock
                 cls._socket_locks[endpoint] = threading.Lock()
             return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
@@ -649,7 +664,11 @@ class CommonKVReceiver(BaseKVReceiver):
         ip_address = bootstrap_info["rank_ip"]
         port = bootstrap_info["rank_port"]
         na = NetworkAddress(ip_address, port)
-        sock, lock = cls._connect(na.to_tcp(), is_ipv6=na.is_ipv6)
+        raw_key = bootstrap_info.get("curve_public_key")
+        server_pub = raw_key.encode("ascii") if raw_key else None
+        sock, lock = cls._connect(
+            na.to_tcp(), is_ipv6=na.is_ipv6, server_public_key=server_pub
+        )
         return sock, lock
 
     def _register_kv_args(self):
@@ -779,6 +798,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             tp_group_table[pp_rank] = PrefillRankInfo(
                 rank_ip=rank_ip,
                 rank_port=rank_port,
+                curve_public_key=data.get("curve_public_key"),
             )
 
             self._registered_count += 1
