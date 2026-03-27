@@ -834,7 +834,7 @@ class Scheduler(
         self.last_batch: Optional[ScheduleBatch] = None
         self.forward_ct = 0
         self.return_health_check_ipcs: Deque[Optional[str]] = deque()
-        self._pending_flush: Deque[Tuple[FlushCacheReqInput, float]] = deque()
+        self._pending_flush: Optional[Tuple[FlushCacheReqInput, float]] = None
         self.num_retracted_reqs: int = 0
         self.num_paused_reqs: int = 0
         self.session_controller = SessionController(self.tree_cache)
@@ -1674,8 +1674,7 @@ class Scheduler(
             if req.session:
                 continue
             # For non-session requests, clear features and mm_inputs
-            for item in mm_inputs.mm_items:
-                item.feature = None
+            mm_inputs.release_features()
             req.multimodal_inputs = None
 
     def handle_generate_request(
@@ -2785,38 +2784,40 @@ class Scheduler(
             )
 
     def _check_pending_flush(self):
-        if not self._pending_flush:
+        if self._pending_flush is None:
             return
+
+        pending_req, deadline = self._pending_flush
 
         if self.is_fully_idle():
             success = self.flush_cache()
-            while self._pending_flush:
-                pending_req, _ = self._pending_flush.popleft()
-                self.send_to_tokenizer.send_output(
-                    FlushCacheReqOutput(success=success), pending_req
-                )
+            self._pending_flush = None
+            self.send_to_tokenizer.send_output(
+                FlushCacheReqOutput(success=success), pending_req
+            )
             return
 
-        self._expire_timed_out_pending_flushes(time.monotonic())
-
-    def _expire_timed_out_pending_flushes(self, now: float):
-        remaining: Deque[Tuple[FlushCacheReqInput, float]] = deque()
-        while self._pending_flush:
-            pending_req, deadline = self._pending_flush.popleft()
-            if now >= deadline:
-                logging.warning(
-                    "Deferred flush_cache timed out while waiting for idle state."
-                )
-                self.send_to_tokenizer.send_output(
-                    FlushCacheReqOutput(success=False), pending_req
-                )
-            else:
-                remaining.append((pending_req, deadline))
-        self._pending_flush = remaining
+        if time.monotonic() >= deadline:
+            logging.warning(
+                "Deferred flush_cache timed out while waiting for idle state."
+            )
+            self._pending_flush = None
+            self.send_to_tokenizer.send_output(
+                FlushCacheReqOutput(
+                    success=False, message="Timed out waiting for idle state."
+                ),
+                pending_req,
+            )
 
     def flush_cache_wrapped(
         self, recv_req: FlushCacheReqInput
     ) -> Optional[FlushCacheReqOutput]:
+        if self._pending_flush is not None:
+            return FlushCacheReqOutput(
+                success=False,
+                message="Another flush_cache is already in progress.",
+            )
+
         timeout_s = float(recv_req.timeout_s or 0.0)
         if timeout_s <= 0.0:
             return FlushCacheReqOutput(success=self.flush_cache())
@@ -2824,7 +2825,7 @@ class Scheduler(
         if self.is_fully_idle():
             return FlushCacheReqOutput(success=self.flush_cache())
 
-        self._pending_flush.append((recv_req, time.monotonic() + timeout_s))
+        self._pending_flush = (recv_req, time.monotonic() + timeout_s)
         return None
 
     def clear_hicache_storage_wrapped(self, recv_req: ClearHiCacheReqInput):
@@ -3245,7 +3246,11 @@ class Scheduler(
             self.last_batch.filter_batch(
                 chunked_req_to_exclude=list(chunked_req_to_exclude)
             )
-            self.running_batch.merge_batch(self.last_batch)
+            if not self.last_batch.is_empty():
+                if self.running_batch.is_empty():
+                    self.running_batch = self.last_batch
+                else:
+                    self.running_batch.merge_batch(self.last_batch)
 
         self.last_batch = None
         self.cur_batch = None
