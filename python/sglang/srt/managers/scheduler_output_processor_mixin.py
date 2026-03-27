@@ -1119,7 +1119,7 @@ class SchedulerOutputProcessorMixin:
         dp_ranks = [self.dp_rank] * len(rids) if rids else None
 
         # Send to detokenizer
-        if reqs or is_idle_batch:
+        if rids or is_idle_batch:
             if self.model_config.is_multimodal_gen:
                 return
             self.send_to_detokenizer.send_output(
