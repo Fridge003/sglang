@@ -1511,6 +1511,7 @@ class ResumeMemoryOccupationReqOutput(BaseReq):
 @dataclass
 class CheckWeightsReqInput(BaseReq):
     action: str
+    dequant_mean_err_threshold: float | None = None
 
 
 @dataclass
