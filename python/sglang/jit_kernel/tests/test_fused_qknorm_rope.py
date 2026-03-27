@@ -9,6 +9,19 @@ import pytest
 import torch
 
 from sglang.jit_kernel.fused_qknorm_rope import fused_qk_norm_rope
+from sglang.test.ci.ci_register import register_cuda_ci
+
+register_cuda_ci(
+    est_time=64,
+    suite="stage-b-kernel-unit-1-gpu-large",
+    disabled="unknown est_time",
+)
+register_cuda_ci(
+    est_time=256,
+    suite="nightly-kernel-1-gpu",
+    nightly=True,
+    disabled="unknown est_time",
+)
 
 try:
     from sgl_kernel import fused_qk_norm_rope as fused_qk_norm_rope_aot
