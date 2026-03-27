@@ -47,7 +47,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -119,7 +119,7 @@ jobs:
           echo "${DIGEST}" > /tmp/digest-cu130-amd64-framework.txt
 
       - name: Upload digests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: digests-amd64
           path: /tmp/digest-*.txt
@@ -146,7 +146,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -218,7 +218,7 @@ jobs:
           echo "${DIGEST}" > /tmp/digest-cu130-arm64-framework.txt
 
       - name: Upload digests
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: digests-arm64
           path: /tmp/digest-*.txt
@@ -237,7 +237,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -265,13 +265,13 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Download amd64 digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: digests-amd64
           path: /tmp/digests/amd64
 
       - name: Download arm64 digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: digests-arm64
           path: /tmp/digests/arm64
