@@ -138,6 +138,12 @@ def _check_critical_weights_loaded(model: torch.nn.Module) -> None:
     have non-zero values, catching the problem at load time rather than after
     a long eval run produces 0.0 scores.
     """
+    # Skip for speculative draft models — their embeddings are intentionally
+    # zero-initialized during load_weights and populated later via
+    # set_embed_and_head() from the target model.
+    if hasattr(model, "set_embed_and_head"):
+        return
+
     params = dict(model.named_parameters())
 
     # Common names for the embedding layer across model architectures
