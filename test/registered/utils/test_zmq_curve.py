@@ -842,5 +842,298 @@ class TestBroadcastWorkerPortsKeyDistribution(CustomTestCase):
             _restore_curve_state(saved)
 
 
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
+    """Integration: spin up a real CommonKVBootstrapServer, register a prefill
+    worker with curve_public_key, and verify the decode-side GET returns it."""
+
+    def test_bootstrap_put_get_curve_key(self):
+        import requests as http_requests
+        from sglang.srt.utils.network import get_open_port
+
+        port = get_open_port()
+        from sglang.srt.disaggregation.common.conn import CommonKVBootstrapServer
+
+        server = CommonKVBootstrapServer(host="127.0.0.1", port=port)
+        time.sleep(0.5)  # let aiohttp start
+
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+
+            test_curve_key = "A" * 40
+            payload = {
+                "attn_tp_size": 1,
+                "attn_tp_rank": 0,
+                "attn_cp_size": 1,
+                "attn_cp_rank": 0,
+                "attn_dp_size": 1,
+                "attn_dp_rank": 0,
+                "pp_size": 1,
+                "pp_rank": 0,
+                "system_dp_size": 1,
+                "system_dp_rank": 0,
+                "rank_ip": "192.168.1.100",
+                "rank_port": 5555,
+                "page_size": 16,
+                "kv_cache_dtype": "auto",
+                "load_balance_method": "round_robin",
+                "curve_public_key": test_curve_key,
+            }
+            resp = http_requests.put(f"{base_url}/route", json=payload, timeout=5)
+            self.assertEqual(resp.status_code, 200)
+
+            get_resp = http_requests.get(
+                f"{base_url}/route",
+                params={
+                    "prefill_dp_rank": "0",
+                    "prefill_cp_rank": "0",
+                    "target_tp_rank": "0",
+                    "target_pp_rank": "0",
+                },
+                timeout=5,
+            )
+            self.assertEqual(get_resp.status_code, 200)
+            data = get_resp.json()
+            self.assertEqual(data["rank_ip"], "192.168.1.100")
+            self.assertEqual(data["rank_port"], 5555)
+            self.assertEqual(
+                data["curve_public_key"],
+                test_curve_key,
+                "curve_public_key must survive bootstrap PUT → GET round-trip",
+            )
+        finally:
+            server.close()
+
+    def test_bootstrap_put_get_without_curve_key(self):
+        """Backward compat: registrations without curve_public_key still work."""
+        import requests as http_requests
+        from sglang.srt.utils.network import get_open_port
+
+        port = get_open_port()
+        from sglang.srt.disaggregation.common.conn import CommonKVBootstrapServer
+
+        server = CommonKVBootstrapServer(host="127.0.0.1", port=port)
+        time.sleep(0.5)
+
+        try:
+            base_url = f"http://127.0.0.1:{port}"
+            payload = {
+                "attn_tp_size": 1,
+                "attn_tp_rank": 0,
+                "attn_cp_size": 1,
+                "attn_cp_rank": 0,
+                "attn_dp_size": 1,
+                "attn_dp_rank": 0,
+                "pp_size": 1,
+                "pp_rank": 0,
+                "system_dp_size": 1,
+                "system_dp_rank": 0,
+                "rank_ip": "10.0.0.1",
+                "rank_port": 6666,
+                "page_size": 16,
+                "kv_cache_dtype": "auto",
+            }
+            resp = http_requests.put(f"{base_url}/route", json=payload, timeout=5)
+            self.assertEqual(resp.status_code, 200)
+
+            get_resp = http_requests.get(
+                f"{base_url}/route",
+                params={
+                    "prefill_dp_rank": "0",
+                    "prefill_cp_rank": "0",
+                    "target_tp_rank": "0",
+                    "target_pp_rank": "0",
+                },
+                timeout=5,
+            )
+            self.assertEqual(get_resp.status_code, 200)
+            data = get_resp.json()
+            self.assertIsNone(data.get("curve_public_key"))
+        finally:
+            server.close()
+
+
+class TestTransferInfoFromZmq(CustomTestCase):
+    """Verify TransferInfo.from_zmq parses the curve_public_key frame."""
+
+    def test_with_curve_public_key(self):
+        import numpy as np
+        from sglang.srt.disaggregation.mooncake.conn import TransferInfo
+
+        kv_indices = np.array([1, 2, 3], dtype=np.int32)
+        curve_key = "B" * 40
+        msg = [
+            b"42",                              # room
+            b"192.168.1.1",                     # endpoint
+            b"5555",                            # dst_port
+            b"session-abc",                     # mooncake_session_id
+            kv_indices.tobytes(),               # dst_kv_indices
+            b"7",                               # dst_aux_index
+            b"",                                # dst_state_indices (empty)
+            b"2",                               # required_dst_info_num
+            curve_key.encode("ascii"),          # curve_public_key
+        ]
+        info = TransferInfo.from_zmq(msg)
+        self.assertEqual(info.room, 42)
+        self.assertEqual(info.endpoint, "192.168.1.1")
+        self.assertEqual(info.dst_port, 5555)
+        self.assertEqual(info.curve_public_key, curve_key)
+        self.assertFalse(info.is_dummy)
+
+    def test_without_curve_public_key(self):
+        import numpy as np
+        from sglang.srt.disaggregation.mooncake.conn import TransferInfo
+
+        kv_indices = np.array([10], dtype=np.int32)
+        msg = [
+            b"1",
+            b"10.0.0.2",
+            b"6000",
+            b"session-xyz",
+            kv_indices.tobytes(),
+            b"0",
+            b"",
+            b"1",
+        ]
+        info = TransferInfo.from_zmq(msg)
+        self.assertIsNone(info.curve_public_key)
+
+    def test_dummy_transfer_info(self):
+        from sglang.srt.disaggregation.mooncake.conn import TransferInfo
+
+        msg = [
+            b"99",
+            b"10.0.0.3",
+            b"7000",
+            b"session-dummy",
+            b"",                                # empty kv_indices → dummy
+            b"",                                # empty aux_index → dummy
+            b"",
+            b"1",
+            b"C" * 40,                          # curve key still present
+        ]
+        info = TransferInfo.from_zmq(msg)
+        self.assertTrue(info.is_dummy)
+        self.assertEqual(info.curve_public_key, "C" * 40)
+
+
+class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
+    """Verify KVArgsRegisterInfo.from_zmq parses the curve_public_key frame."""
+
+    def test_with_curve_public_key(self):
+        import struct
+        from sglang.srt.disaggregation.mooncake.conn import KVArgsRegisterInfo
+
+        curve_key = "D" * 40
+        msg = [
+            b"None",                                   # room
+            b"10.0.0.5",                                # endpoint
+            b"8000",                                    # dst_port
+            b"session-reg",                             # mooncake_session_id
+            struct.pack("Q", 0xDEAD),                   # dst_kv_ptrs
+            struct.pack("Q", 0xBEEF),                   # dst_aux_ptrs
+            struct.pack("Q", 0xCAFE),                   # dst_state_data_ptrs
+            b"0",                                       # dst_tp_rank
+            b"1",                                       # dst_attn_tp_size
+            b"128",                                     # dst_kv_item_len
+            b"",                                        # dst_state_item_lens
+            b"",                                        # dst_state_dim_per_tensor
+            curve_key.encode("ascii"),                  # curve_public_key
+        ]
+        info = KVArgsRegisterInfo.from_zmq(msg)
+        self.assertEqual(info.room, "None")
+        self.assertEqual(info.endpoint, "10.0.0.5")
+        self.assertEqual(info.curve_public_key, curve_key)
+
+    def test_without_curve_public_key(self):
+        import struct
+        from sglang.srt.disaggregation.mooncake.conn import KVArgsRegisterInfo
+
+        msg = [
+            b"None",
+            b"10.0.0.6",
+            b"9000",
+            b"session-noreg",
+            struct.pack("Q", 0x1234),
+            struct.pack("Q", 0x5678),
+            struct.pack("Q", 0x9ABC),
+            b"0",
+            b"2",
+            b"256",
+            b"",
+            b"",
+        ]
+        info = KVArgsRegisterInfo.from_zmq(msg)
+        self.assertIsNone(info.curve_public_key)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestDisaggZmqCurveHandshake(CustomTestCase):
+    """Integration: simulate prefill PULL + decode PUSH with different CURVE
+    keypairs using server_public_key routing (asymmetric CURVE)."""
+
+    def test_prefill_decode_zmq_with_curve(self):
+        prefill_cfg = CurveConfig.generate()
+        decode_cfg = CurveConfig.generate()
+
+        ctx = zmq.Context()
+        try:
+            prefill_pull = ctx.socket(zmq.PULL)
+            apply_curve_server(prefill_pull, prefill_cfg)
+            port = prefill_pull.bind_to_random_port("tcp://127.0.0.1")
+
+            decode_push = ctx.socket(zmq.PUSH)
+            decode_push.setsockopt(zmq.LINGER, 0)
+            apply_curve_client(
+                decode_push, decode_cfg, server_public_key=prefill_cfg.public_key
+            )
+            decode_push.connect(f"tcp://127.0.0.1:{port}")
+
+            decode_push.send_multipart([b"42", b"test-kv-data"])
+            self.assertTrue(prefill_pull.poll(timeout=3000))
+            msg = prefill_pull.recv_multipart()
+            self.assertEqual(msg, [b"42", b"test-kv-data"])
+
+            decode_push.close()
+            prefill_pull.close()
+        finally:
+            ctx.term()
+
+    def test_connect_with_curve_server_public_key(self):
+        """connect_with_curve with explicit server_public_key works across
+        different instance keypairs."""
+        prefill_cfg = CurveConfig.generate()
+        decode_cfg = CurveConfig.generate()
+
+        saved = _reset_curve_state()
+        try:
+            set_curve_config(decode_cfg)
+
+            ctx = zmq.Context()
+            try:
+                server = ctx.socket(zmq.PULL)
+                apply_curve_server(server, prefill_cfg)
+                port = server.bind_to_random_port("tcp://127.0.0.1")
+
+                client = ctx.socket(zmq.PUSH)
+                client.setsockopt(zmq.LINGER, 0)
+                connect_with_curve(
+                    client,
+                    f"tcp://127.0.0.1:{port}",
+                    server_public_key=prefill_cfg.public_key,
+                )
+
+                client.send(b"cross-key-msg")
+                self.assertTrue(server.poll(timeout=3000))
+                self.assertEqual(server.recv(), b"cross-key-msg")
+
+                client.close()
+                server.close()
+            finally:
+                ctx.term()
+        finally:
+            _restore_curve_state(saved)
+
+
 if __name__ == "__main__":
     unittest.main()
