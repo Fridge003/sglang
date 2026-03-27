@@ -138,13 +138,12 @@ def _postprocess_tensors(
         w_s = raw[name.replace("weight", "weight_scale_inv")]
 
         try:
-            # TODO this is only needed for Blackwell
-            w_s_inverse_transformed = inverse_transform_scale_ue8m0(
-                w_s, mn=w_q.shape[-2]
-            )
+            if w_s.dtype == torch.int32:
+                # UE8M0 packed format (Blackwell DeepGEMM)
+                w_s = inverse_transform_scale_ue8m0(w_s, mn=w_q.shape[-2])
             w_dequant = block_quant_dequant(
                 w_q,
-                w_s_inverse_transformed,
+                w_s,
                 # TODO do not hardcode
                 block_size=[128, 128],
                 dtype=torch.bfloat16,
