@@ -73,6 +73,7 @@ diffusion_common = [
   "imageio-ffmpeg==0.5.1",
   "moviepy>=2.0.0",
   "opencv-python-headless==4.10.0.84",
+  "peft>=0.18.0",
   "remote-pdb",
   "addict",
   "scikit-image==0.25.2",
