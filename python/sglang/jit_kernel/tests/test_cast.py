@@ -2,6 +2,19 @@ import pytest
 import torch
 
 from sglang.jit_kernel.cast import downcast_fp8
+from sglang.test.ci.ci_register import register_cuda_ci
+
+register_cuda_ci(
+    est_time=24,
+    suite="stage-b-kernel-unit-1-gpu-large",
+    disabled="unknown est_time",
+)
+register_cuda_ci(
+    est_time=120,
+    suite="nightly-kernel-1-gpu",
+    nightly=True,
+    disabled="unknown est_time",
+)
 
 DTYPES = [torch.bfloat16, torch.float16]
 

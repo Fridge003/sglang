@@ -9,6 +9,13 @@ from sglang.jit_kernel.benchmark.utils import (
     run_benchmark,
 )
 from sglang.jit_kernel.cast import downcast_fp8 as downcast_fp8_jit
+from sglang.test.ci.ci_register import register_cuda_ci
+
+register_cuda_ci(
+    est_time=13,
+    suite="stage-b-kernel-benchmark-1-gpu-large",
+    disabled="unknown est_time",
+)
 
 DEVICE = DEFAULT_DEVICE
 DTYPE = torch.bfloat16
