@@ -51,6 +51,11 @@ pub struct ModelInfo {
     pub is_generation: Option<bool>,
     pub model_type: Option<String>,
     pub architectures: Option<Vec<String>>,
+    /// Whether the model can understand image input (VLMs, image-to-video diffusion).
+    #[serde(default)]
+    pub has_image_understanding: Option<bool>,
+    /// Diffusion task type (e.g. "T2V", "I2V", "T2I"). Only set for diffusion workers.
+    pub task_type: Option<String>,
 }
 
 /// Fallback function to GET JSON from old endpoint (with "get_" prefix) for backward compatibility.
@@ -280,6 +285,15 @@ impl StepExecutor<LocalWorkerWorkflowData> for DiscoverMetadataStep {
                         if let Ok(json_str) = serde_json::to_string(&architectures) {
                             labels.insert("architectures".to_string(), json_str);
                         }
+                    }
+                    if let Some(has_image) = model_info.has_image_understanding {
+                        labels.insert(
+                            "has_image_understanding".to_string(),
+                            has_image.to_string(),
+                        );
+                    }
+                    if let Some(task_type) = model_info.task_type.filter(|s| !s.is_empty()) {
+                        labels.insert("task_type".to_string(), task_type);
                     }
                 }
 

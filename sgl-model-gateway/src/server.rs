@@ -28,6 +28,7 @@ use crate::{
     config::{RouterConfig, RoutingMode},
     core::{
         job_queue::{JobQueue, JobQueueConfig},
+        multipart::extract_model_from_multipart,
         steps::{TokenizerConfigRequest, WorkflowEngines},
         worker::WorkerType,
         worker_manager::WorkerManager,
@@ -91,35 +92,187 @@ async fn parse_reasoning(
     parse::parse_reasoning(&state.context, &req).await
 }
 
-/// Fallback handler for unmatched routes.
-/// Extracts `model` from query params and forwards the raw request body to the
-/// appropriate worker. This enables multipart/form-data endpoints like /v1/videos
-/// to work through the router without needing typed handlers for each path.
-async fn raw_proxy_fallback(
+async fn sink_handler() -> Response {
+    StatusCode::NOT_FOUND.into_response()
+}
+
+/// Read the full request body, capped at 500 MiB (covers large image/video uploads).
+async fn read_body(req: Request<axum::body::Body>) -> Result<bytes::Bytes, Response> {
+    axum::body::to_bytes(req.into_body(), 500 * 1024 * 1024)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Failed to read request body: {}", e),
+            )
+                .into_response()
+        })
+}
+
+/// Extract the `model` field from a diffusion request payload.
+///
+/// For `multipart/form-data` requests (image/video generation) the `model` field
+/// is a form field inside the body — we parse it from the raw bytes without
+/// re-encoding so the original body can be forwarded unchanged.
+///
+/// For `application/json` requests we read `model` from the top-level JSON key,
+/// matching the same pattern used by every LLM endpoint.
+fn extract_model_from_payload(
+    body: &bytes::Bytes,
+    content_type: &str,
+) -> Option<String> {
+    if content_type.contains("multipart/form-data") {
+        extract_model_from_multipart(body, content_type)
+    } else {
+        // JSON path — same as chat/completions
+        serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v.get("model")?.as_str().map(str::to_string))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diffusion endpoint handlers — /v1/videos and /v1/images/*
+//
+// These follow the same pattern as every other typed route: extract the model
+// identifier from the payload and forward the raw body to the selected worker.
+// No query-param hacks; the body is read once and forwarded unchanged.
+// ---------------------------------------------------------------------------
+
+/// POST /v1/videos — create a video generation job (multipart or JSON).
+async fn v1_videos_create(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
     req: Request<axum::body::Body>,
 ) -> Response {
     let route = req.uri().path().to_string();
     let method = req.method().clone();
-    let model_id = params.get("model").map(|s| s.as_str());
+    let content_type = req
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
     let headers = req.headers().clone();
 
-    // Read the raw body bytes
-    let body = match axum::body::to_bytes(req.into_body(), 500 * 1024 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("Failed to read request body: {}", e),
-            )
-                .into_response();
-        }
+    let body = match read_body(req).await {
+        Ok(b) => b,
+        Err(e) => return e,
     };
+
+    let model_id = extract_model_from_payload(&body, &content_type);
+    state
+        .router
+        .route_raw_request(Some(&headers), body, &route, model_id.as_deref(), &method)
+        .await
+}
+
+/// GET /v1/videos — list video jobs. No model needed; proxy to any worker.
+async fn v1_videos_list(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = req.uri().path_and_query().map(|p| p.as_str()).unwrap_or("/v1/videos").to_string();
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    state
+        .router
+        .route_raw_request(Some(&headers), bytes::Bytes::new(), &route, None, &method)
+        .await
+}
+
+/// GET /v1/videos/{id} — poll job status. Proxy to any worker.
+async fn v1_videos_get(
+    State(state): State<Arc<AppState>>,
+    Path(video_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = format!("/v1/videos/{}", video_id);
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    state
+        .router
+        .route_raw_request(Some(&headers), bytes::Bytes::new(), &route, None, &method)
+        .await
+}
+
+/// DELETE /v1/videos/{id} — cancel/delete a job.
+async fn v1_videos_delete(
+    State(state): State<Arc<AppState>>,
+    Path(video_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = format!("/v1/videos/{}", video_id);
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    state
+        .router
+        .route_raw_request(Some(&headers), bytes::Bytes::new(), &route, None, &method)
+        .await
+}
+
+/// GET /v1/videos/{id}/content — download completed video.
+async fn v1_videos_content(
+    State(state): State<Arc<AppState>>,
+    Path(video_id): Path<String>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = format!("/v1/videos/{}/content", video_id);
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+    state
+        .router
+        .route_raw_request(Some(&headers), bytes::Bytes::new(), &route, None, &method)
+        .await
+}
+
+/// POST /v1/images/edits — image editing (multipart/form-data).
+async fn v1_images_edits(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = "/v1/images/edits".to_string();
+    let method = req.method().clone();
+    let content_type = req
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let headers = req.headers().clone();
+
+    let body = match read_body(req).await {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let model_id = extract_model_from_multipart(&body, &content_type);
+    state
+        .router
+        .route_raw_request(Some(&headers), body, &route, model_id.as_deref(), &method)
+        .await
+}
+
+/// POST /v1/images/generations — image generation (JSON body, same as LLM routes).
+async fn v1_images_generations(
+    State(state): State<Arc<AppState>>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let route = "/v1/images/generations".to_string();
+    let method = req.method().clone();
+    let headers = req.headers().clone();
+
+    let body = match read_body(req).await {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let model_id = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(str::to_string));
 
     state
         .router
-        .route_raw_request(Some(&headers), body, &route, model_id, &method)
+        .route_raw_request(Some(&headers), body, &route, model_id.as_deref(), &method)
         .await
 }
 
@@ -617,6 +770,13 @@ pub fn build_app(
         // Tokenize / Detokenize endpoints
         .route("/v1/tokenize", post(v1_tokenize))
         .route("/v1/detokenize", post(v1_detokenize))
+        // Diffusion endpoints — video generation
+        .route("/v1/videos", post(v1_videos_create).get(v1_videos_list))
+        .route("/v1/videos/{video_id}", get(v1_videos_get).delete(v1_videos_delete))
+        .route("/v1/videos/{video_id}/content", get(v1_videos_content))
+        // Diffusion endpoints — image generation
+        .route("/v1/images/generations", post(v1_images_generations))
+        .route("/v1/images/edits", post(v1_images_edits))
         .route_layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::concurrency_limit_middleware,
@@ -723,7 +883,7 @@ pub fn build_app(
         ))
         .layer(middleware::RequestIdLayer::new(request_id_headers))
         .layer(create_cors_layer(cors_allowed_origins))
-        .fallback(raw_proxy_fallback)
+        .fallback(sink_handler)
         .with_state(app_state)
 }
 

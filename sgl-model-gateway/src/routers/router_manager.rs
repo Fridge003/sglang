@@ -443,15 +443,47 @@ impl RouterTrait for RouterManager {
         if model_names.is_empty() {
             (StatusCode::SERVICE_UNAVAILABLE, "No models available").into_response()
         } else {
-            // Convert model names to OpenAI-compatible model objects
             let models: Vec<Value> = model_names
                 .iter()
                 .map(|name| {
-                    serde_json::json!({
+                    // Look up the first healthy worker for this model to read its labels.
+                    let workers = self.worker_registry.get_by_model(name);
+                    let labels = workers
+                        .first()
+                        .map(|w| w.metadata().labels.clone())
+                        .unwrap_or_default();
+
+                    // Derive a clean capability string from what the worker reported:
+                    //   diffusion workers → "diffusion"
+                    //   VLMs (has_image_understanding=true) → "vlm"
+                    //   everything else → "llm"
+                    let raw_model_type = labels.get("model_type").map(String::as_str).unwrap_or("");
+                    let has_image = labels
+                        .get("has_image_understanding")
+                        .and_then(|v| v.parse::<bool>().ok())
+                        .unwrap_or(false);
+
+                    let capability = if raw_model_type == "diffusion" {
+                        "diffusion"
+                    } else if has_image {
+                        "vlm"
+                    } else {
+                        "llm"
+                    };
+
+                    let mut obj = serde_json::json!({
                         "id": name,
                         "object": "model",
-                        "owned_by": "local"
-                    })
+                        "owned_by": "local",
+                        "model_type": capability,
+                    });
+
+                    // Include task_type for diffusion models (e.g. "T2V", "I2V", "T2I").
+                    if let Some(task_type) = labels.get("task_type") {
+                        obj["task_type"] = Value::String(task_type.clone());
+                    }
+
+                    obj
                 })
                 .collect();
 

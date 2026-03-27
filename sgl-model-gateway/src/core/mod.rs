@@ -18,6 +18,7 @@ pub mod job_queue;
 pub mod metrics_aggregator;
 pub mod model_card;
 pub mod model_type;
+pub mod multipart;
 pub mod retry;
 pub mod steps;
 pub mod token_bucket;
