@@ -164,6 +164,9 @@ class ReqState:
     input_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
     output_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
 
+    # For return_prompt_token_ids: stores prompt token IDs captured after tokenization
+    prompt_token_ids: Optional[List[int]] = None
+
 
 class InputFormat(Enum):
     """Input format types for tokenization handling."""
@@ -521,6 +524,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 tokenized_obj = await self._tokenize_one_request(obj)
                 state = self.rid_to_state[obj.rid]
                 self._send_one_request(tokenized_obj)
+                if getattr(obj, "return_prompt_token_ids", False):
+                    state.prompt_token_ids = list(tokenized_obj.input_ids)
                 async for response in self._wait_one_response(obj, state, request):
                     yield response
             else:
@@ -1263,6 +1268,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     tmp_obj = obj[i]
                     state = self.rid_to_state[tmp_obj.rid]
                     state.obj = tmp_obj
+                    if getattr(tmp_obj, "return_prompt_token_ids", False):
+                        state.prompt_token_ids = list(tokenized_objs[i].input_ids)
                     generators.append(self._wait_one_response(tmp_obj, state, request))
                     rids.append(tmp_obj.rid)
             else:
@@ -1278,6 +1285,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                         state = self.rid_to_state[tmp_obj.rid]
                         state.obj = tmp_obj
                         self._send_one_request(tokenized_obj)
+                        if getattr(tmp_obj, "return_prompt_token_ids", False):
+                            state.prompt_token_ids = list(tokenized_obj.input_ids)
                         generators.append(
                             self._wait_one_response(tmp_obj, state, request)
                         )
@@ -1321,6 +1330,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     state = self.rid_to_state[tmp_obj.rid]
                     tokenized_obj.time_stats = state.time_stats
                     self._send_one_request(tokenized_obj)
+                    if getattr(tmp_obj, "return_prompt_token_ids", False):
+                        state.prompt_token_ids = list(tokenized_objs[i].input_ids)
                     generators.append(self._wait_one_response(tmp_obj, state, request))
                     rids.append(tmp_obj.rid)
 
@@ -1598,6 +1609,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
                 }
+                if state.prompt_token_ids is not None:
+                    out_dict["prompt_token_ids"] = state.prompt_token_ids
 
             elif isinstance(recv_obj, BatchTokenIDOutput):
                 is_stream = getattr(state.obj, "stream", False)
@@ -1613,6 +1626,8 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     "output_ids": output_token_ids,
                     "meta_info": meta_info,
                 }
+                if state.prompt_token_ids is not None:
+                    out_dict["prompt_token_ids"] = state.prompt_token_ids
             elif isinstance(recv_obj, BatchMultimodalOutput):
                 raise NotImplementedError("BatchMultimodalOut not implemented")
             else:
