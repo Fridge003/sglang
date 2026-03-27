@@ -89,6 +89,11 @@ def apply_curve_client(
     socket.curve_serverkey = server_public_key or curve.public_key
 
 
+_CURVE_DISABLED = object()
+"""Sentinel for ``get_zmq_socket(curve=_CURVE_DISABLED)`` to explicitly skip
+CURVE on a socket even when the global config is set (e.g. the bootstrap
+handshake that distributes CURVE keys to other nodes)."""
+
 _curve_config_cache: Optional[CurveConfig] = None
 _curve_config_loaded: bool = False
 
@@ -525,10 +530,13 @@ def get_zmq_socket(
 
     is_tcp = endpoint is None or endpoint.startswith("tcp://")
 
+    if curve is _CURVE_DISABLED:
+        curve = None
+    elif curve is None and is_tcp:
+        curve = get_curve_config()
+
     if endpoint is None:
         config_socket(socket, socket_type)
-        if curve is None and is_tcp:
-            curve = get_curve_config()
         if curve is not None:
             apply_curve_server(socket, curve)
         port = socket.bind_to_random_port("tcp://127.0.0.1")
@@ -539,8 +547,6 @@ def get_zmq_socket(
 
         config_socket(socket, socket_type)
 
-        if curve is None and is_tcp:
-            curve = get_curve_config()
         if curve is not None:
             if bind:
                 apply_curve_server(socket, curve)
