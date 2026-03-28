@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -rn \"try:\\\\|except\\\\|ImportError\" /Users/doug/sgl-workspace/sglang/python/sglang/srt/layers/moe/moe_runner/*.py)"
+    ]
+  }
+}

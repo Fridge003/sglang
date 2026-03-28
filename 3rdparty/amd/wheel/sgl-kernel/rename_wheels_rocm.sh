@@ -1,107 +1,70 @@
 #!/usr/bin/env bash
+# Align ROCm wheel filenames (+rocmXXX) with internal METADATA Version and WHEEL tags
+# after build (fixes pip "inconsistent version" when only the .whl name changed).
+# Unpack → patch WHEEL/METADATA → wheel pack (RECORD regenerated; no hand-editing).
 set -ex
 
 WHEEL_DIR="dist"
 
-# Function to update the version inside a wheel's METADATA and RECORD files
-update_wheel_metadata() {
-    local wheel_path="$1"
-    local version_suffix="$2"
-
-    if [[ -z "$version_suffix" ]]; then
-        return 0
+detect_rocm_suffix() {
+    local rocm_dir
+    rocm_dir=$(realpath /opt/rocm 2>/dev/null || realpath /opt/rocm-* 2>/dev/null | head -1)
+    if [[ -z "$rocm_dir" ]]; then
+        echo ""
+        return
     fi
-
-    local temp_dir
-    temp_dir=$(mktemp -d)
-    trap "rm -rf '$temp_dir'" RETURN
-
-    # Unzip the wheel
-    unzip -q "$wheel_path" -d "$temp_dir"
-
-    # Find the dist-info directory
-    local dist_info_dir
-    dist_info_dir=$(find "$temp_dir" -maxdepth 1 -type d -name "*.dist-info" | head -1)
-
-    if [[ -z "$dist_info_dir" ]]; then
-        echo "Warning: Could not find .dist-info directory in $wheel_path"
-        return 1
-    fi
-
-    local metadata_file="$dist_info_dir/METADATA"
-    local record_file="$dist_info_dir/RECORD"
-
-    if [[ ! -f "$metadata_file" ]]; then
-        echo "Warning: METADATA file not found in $wheel_path"
-        return 1
-    fi
-
-    # Update the Version field in METADATA
-    # Match "Version: X.Y.Z" and append the suffix
-    sed -i "s/^Version: \(.*\)$/Version: \1${version_suffix}/" "$metadata_file"
-
-    # Regenerate the RECORD file (contains checksums of all files)
-    # The RECORD file itself has an empty hash entry
-    local dist_info_name
-    dist_info_name=$(basename "$dist_info_dir")
-
-    # Remove old RECORD and regenerate
-    rm -f "$record_file"
-
-    # Generate new RECORD entries
-    while IFS= read -r -d '' file; do
-        local rel_path="${file#$temp_dir/}"
-        if [[ "$rel_path" == "$dist_info_name/RECORD" ]]; then
-            continue
-        fi
-        local hash
-        hash=$(openssl dgst -sha256 -binary "$file" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
-        local size
-        size=$(wc -c < "$file" | tr -d ' ')
-        echo "$rel_path,sha256=$hash,$size" >> "$record_file"
-    done < <(find "$temp_dir" -type f -print0)
-
-    # Add RECORD itself with empty hash
-    echo "$dist_info_name/RECORD,," >> "$record_file"
-
-    # Repack the wheel
-    rm -f "$wheel_path"
-    (cd "$temp_dir" && zip -q -r "$wheel_path" .)
+    local ver_abrv
+    ver_abrv=$(basename "$rocm_dir" | sed -e 's/rocm-//' -e 's/\./\//g' | tr -d '/')
+    echo "+rocm${ver_abrv}"
 }
 
-wheel_files=($WHEEL_DIR/*.whl)
-for wheel in "${wheel_files[@]}"; do
-    intermediate_wheel="${wheel/linux/manylinux2014}"
-    [[ "$intermediate_wheel" == *"+rocm"* ]] && continue
+ROCM_SUFFIX=$(detect_rocm_suffix)
 
-    # Extract the current python version from the wheel name
-    if [[ $intermediate_wheel =~ -cp([0-9]+)- ]]; then
-        cp_version="${BASH_REMATCH[1]}"
-    else
-        echo "Could not extract Python version from wheel name: $intermediate_wheel"
+patch_wheel_platform_tags() {
+    local wheel_file="$1"
+    sed -i \
+        -e 's/-linux_x86_64$/-manylinux2014_x86_64/' \
+        -e 's/-linux_aarch64$/-manylinux2014_aarch64/' \
+        "$wheel_file"
+}
+
+wheel_files=("$WHEEL_DIR"/*.whl)
+for wheel in "${wheel_files[@]}"; do
+    [[ -f "$wheel" ]] || continue
+    [[ "$wheel" == *"+rocm"* ]] && continue
+
+    if [[ -z "$ROCM_SUFFIX" ]]; then
         continue
     fi
 
-    # Detect ROCm version and add appropriate suffix
-    ver_abrv=$(realpath /opt/rocm-* | sed -e 's/.*-//' -e 's/\.//g')
-    version_suffix="+rocm${ver_abrv}"
-    new_wheel=${intermediate_wheel/-cp${cp_version}/+rocm${ver_abrv}-cp${cp_version}}
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf -- "$TMPDIR"' ERR
 
-    # First rename linux -> manylinux2014 if needed
-    if [[ "$wheel" != "$intermediate_wheel" ]]; then
-        mv -- "$wheel" "$intermediate_wheel"
-    fi
+    python3 -m wheel unpack "$wheel" --dest "$TMPDIR"
+    UNPACKED=$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -1)
+    DIST_INFO=$(find "$UNPACKED" -maxdepth 1 -type d -name "*.dist-info" | head -1)
+    WHEEL_META="${DIST_INFO}/WHEEL"
+    METADATA_FILE="${DIST_INFO}/METADATA"
 
-    # Update the metadata inside the wheel if we're adding a version suffix
-    if [[ -n "$version_suffix" ]]; then
-        echo "Updating METADATA in $intermediate_wheel with version suffix $version_suffix"
-        update_wheel_metadata "$(pwd)/$intermediate_wheel" "$version_suffix"
-    fi
+    patch_wheel_platform_tags "$WHEEL_META"
 
-    # Rename to final name with ROCm suffix
-    if [[ "$intermediate_wheel" != "$new_wheel" ]]; then
-        echo "Renaming $intermediate_wheel to $new_wheel"
-        mv -- "$intermediate_wheel" "$new_wheel"
+    ORIG_VERSION=$(grep '^Version:' "$METADATA_FILE" | head -1 | sed 's/^Version:[[:space:]]*//')
+    if [[ "$ORIG_VERSION" == *"$ROCM_SUFFIX"* ]]; then
+        echo "Skipping $wheel: version in METADATA is already suffixed."
+        rm -rf "$TMPDIR"
+        trap - ERR
+        continue
     fi
+    NEW_VERSION="${ORIG_VERSION}${ROCM_SUFFIX}"
+    sed -i "s/^Version:.*/Version: ${NEW_VERSION}/" "$METADATA_FILE"
+
+    OLD_BASE=$(basename "$DIST_INFO")
+    NEW_BASE="${OLD_BASE/${ORIG_VERSION}/${NEW_VERSION}}"
+    mv "$DIST_INFO" "${UNPACKED}/${NEW_BASE}"
+
+    rm -f "$wheel"
+    python3 -m wheel pack "$UNPACKED" --dest-dir "$WHEEL_DIR"
+    rm -rf "$TMPDIR"
+    trap - ERR
 done
 echo "Wheel renaming completed."
