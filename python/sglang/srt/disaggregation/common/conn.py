@@ -646,7 +646,7 @@ class CommonKVReceiver(BaseKVReceiver):
         is_ipv6: bool = False,
         server_public_key: Optional[bytes] = None,
     ):
-        cache_key = (endpoint, server_public_key)
+        cache_key = (endpoint, is_ipv6, server_public_key)
         with cls._global_lock:
             if cache_key not in cls._socket_cache:
                 sock = cls._ctx.socket(zmq.PUSH)
