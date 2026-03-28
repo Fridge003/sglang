@@ -553,7 +553,7 @@ def get_zmq_socket(
         config_socket(socket, socket_type)
         if curve is not None:
             apply_curve_server(socket, curve)
-        port = socket.bind_to_random_port("tcp://127.0.0.1")
+        port = socket.bind_to_random_port("tcp://*")
         return port, socket
     else:
         if endpoint.find("[") != -1:

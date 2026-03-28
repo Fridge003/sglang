@@ -229,13 +229,12 @@ class TestLocalhostBinding(CustomTestCase):
         finally:
             ctx.term()
 
-    def test_get_zmq_socket_random_port_binds_localhost(self):
+    def test_get_zmq_socket_random_port_binds_all_interfaces(self):
         ctx = zmq.Context()
         try:
             port, sock = get_zmq_socket(ctx, zmq.PULL)
             endpoint = sock.getsockopt_string(zmq.LAST_ENDPOINT)
-            self.assertIn("127.0.0.1", endpoint)
-            self.assertNotIn("0.0.0.0", endpoint)
+            self.assertIn("0.0.0.0", endpoint)
             sock.close()
         finally:
             ctx.term()
