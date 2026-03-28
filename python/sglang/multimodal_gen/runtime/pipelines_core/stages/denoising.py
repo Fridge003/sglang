@@ -1099,52 +1099,6 @@ class DenoisingStage(PipelineStage):
                             return_dict=False,
                         )[0]
 
-                        dump_path = os.environ.get(
-                            "SGLANG_DENOISING_DEBUG_DUMP_FIRST_STEP"
-                        )
-                        dump_step_indexes_raw = os.environ.get(
-                            "SGLANG_DENOISING_DEBUG_DUMP_STEP_INDEXES"
-                        )
-                        dump_step_indexes = {0}
-                        if dump_step_indexes_raw:
-                            dump_step_indexes = {
-                                int(part.strip())
-                                for part in dump_step_indexes_raw.split(",")
-                                if part.strip()
-                            }
-                        if dump_path and i in dump_step_indexes:
-                            resolved_dump_path = dump_path
-                            if len(dump_step_indexes) > 1:
-                                root, ext = os.path.splitext(dump_path)
-                                resolved_dump_path = f"{root}_step{i}{ext or '.pt'}"
-                            debug_payload = {
-                                "step_index": i,
-                                "timestep_host": t_host.detach().cpu(),
-                                "timestep_device": t_device.detach().cpu(),
-                                "timestep_forward": (
-                                    timestep.detach().cpu()
-                                    if isinstance(timestep, torch.Tensor)
-                                    else timestep
-                                ),
-                                "latent_model_input": latent_model_input.detach()
-                                .cpu(),
-                                "noise_pred": noise_pred.detach().cpu(),
-                                "latents_after_step": latents.detach().cpu(),
-                            }
-                            os.makedirs(
-                                os.path.dirname(resolved_dump_path) or ".",
-                                exist_ok=True,
-                            )
-                            torch.save(debug_payload, resolved_dump_path)
-                            if (
-                                os.environ.get(
-                                    "SGLANG_DENOISING_DEBUG_STOP_AFTER_FIRST_STEP"
-                                )
-                                == "1"
-                            ):
-                                batch.latents = latents
-                                return batch
-
                         latents = self.post_forward_for_ti2v_task(
                             batch, server_args, reserved_frames_mask, latents, z
                         )
