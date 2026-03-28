@@ -34,82 +34,6 @@ logger = init_logger(__name__)
 V = StageValidators
 
 
-class WanS2VExecutionStage(PipelineStage):
-    """Thin execution stage around the official Wan S2V engine."""
-
-    def __init__(self, engine):
-        super().__init__()
-        self.engine = engine
-
-    @property
-    def parallelism_type(self) -> StageParallelismType:
-        return StageParallelismType.MAIN_RANK_ONLY
-
-    def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
-        result = VerificationResult()
-        result.add_check("image_path", batch.image_path, V.not_none)
-        result.add_check("audio_path", batch.audio_path, V.not_none)
-        return result
-
-    def _get_single_path(self, value, field_name: str) -> str:
-        if isinstance(value, list):
-            if len(value) != 1:
-                raise ValueError(f"Wan S2V expects exactly one {field_name}")
-            value = value[0]
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"Wan S2V expects {field_name} as a non-empty string")
-        if not os.path.exists(value):
-            raise FileNotFoundError(f"{field_name} not found: {value}")
-        return value
-
-    def _normalize_output_video(self, output) -> torch.Tensor:
-        tensor = output if isinstance(output, torch.Tensor) else torch.as_tensor(output)
-        if tensor.ndim == 5 and tensor.shape[0] == 1:
-            tensor = tensor.squeeze(0)
-        if tensor.ndim != 4:
-            raise ValueError(
-                f"Official Wan S2V engine returned unexpected output shape: {tuple(tensor.shape)}"
-            )
-        if tensor.shape[0] not in (1, 3, 4) and tensor.shape[1] in (1, 3, 4):
-            tensor = tensor.permute(1, 0, 2, 3).contiguous()
-        return tensor.unsqueeze(0)
-
-    def forward(self, batch: Req, server_args: ServerArgs) -> Req:
-        image_path = self._get_single_path(batch.image_path, "image_path")
-        audio_path = self._get_single_path(batch.audio_path, "audio_path")
-        pose_video_path = batch.pose_video_path
-        if pose_video_path is not None:
-            pose_video_path = self._get_single_path(pose_video_path, "pose_video_path")
-
-        seed = batch.seed if batch.seed is not None else 42
-        prompt = batch.prompt or ""
-        output = self.engine.generate(
-            prompt=prompt,
-            image_path=image_path,
-            audio_path=audio_path,
-            pose_video_path=pose_video_path,
-            num_clip=batch.num_clip,
-            num_frames=batch.num_frames,
-            guidance_scale=batch.guidance_scale,
-            num_inference_steps=batch.num_inference_steps,
-            seed=seed,
-        )
-        if output is None:
-            raise RuntimeError("Official Wan S2V engine returned no output")
-        batch.output = self._normalize_output_video(output)
-        if sf is not None:
-            try:
-                audio_np, sample_rate = sf.read(
-                    audio_path, dtype="float32", always_2d=False
-                )
-                if audio_np is not None:
-                    batch.audio = torch.from_numpy(audio_np)
-                    batch.audio_sample_rate = int(sample_rate)
-            except Exception as exc:
-                logger.warning("Failed to load source audio for output muxing: %s", exc)
-        return batch
-
-
 class WanS2VBeforeDenoisingStage(PipelineStage):
     """Prepare Wan S2V conditions for the standard denoising loop."""
 
@@ -298,92 +222,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             return None, None
         return torch.from_numpy(audio_np), int(sample_rate)
 
-    def _maybe_debug_compare_with_official(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str,
-        audio_path: str,
-        pose_video_path: str | None,
-        infer_frames: int,
-        ref_pixel_values: torch.Tensor,
-        motion_pixels: torch.Tensor,
-        native_prompt_embeds: torch.Tensor,
-        native_negative_prompt_embeds: torch.Tensor,
-        native_ref_latents: torch.Tensor,
-        native_motion_latents: torch.Tensor,
-        native_cond_states: torch.Tensor,
-        native_audio_input: torch.Tensor,
-    ) -> None:
-        if os.environ.get("WAN_S2V_DEBUG_COMPARE_OFFICIAL") != "1":
-            return
-        engine = getattr(self.transformer, "engine", None)
-        if engine is None or getattr(engine, "text_encoder", None) is None:
-            logger.warning(
-                "WAN_S2V_DEBUG_COMPARE_OFFICIAL is set, but official components are unavailable"
-            )
-            return
-
-        def _report(name: str, native: torch.Tensor, official: torch.Tensor) -> None:
-            native = native.float().cpu()
-            official = official.float().cpu()
-            diff = (native - official).abs()
-            logger.info(
-                "[WanS2VDebug] %s shape=%s max_abs_diff=%.6f mean_abs_diff=%.6f",
-                name,
-                tuple(native.shape),
-                float(diff.max().item()),
-                float(diff.mean().item()),
-            )
-
-        offload_model = bool(self.transformer.config.get("offload_model", True))
-        official_prompt_embeds, official_negative_prompt_embeds = (
-            self.transformer._encode_prompts(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                offload_model=offload_model,
-            )
-        )
-        official_ref_latents = torch.stack(
-            engine.vae.encode(
-                ref_pixel_values.to(dtype=engine.vae.dtype, device=engine.vae.device)
-            )
-        )
-        official_motion_latents = torch.stack(
-            engine.vae.encode(
-                motion_pixels.to(dtype=engine.param_dtype, device=engine.device)
-            )
-        )
-        official_cond_states = engine.load_pose_cond(
-            pose_video=pose_video_path,
-            num_repeat=1,
-            infer_frames=infer_frames,
-            size=(
-                int(native_cond_states.shape[-2]) * 8,
-                int(native_cond_states.shape[-1]) * 8,
-            ),
-        )[0].to(dtype=engine.param_dtype, device=native_cond_states.device)
-        if pose_video_path is None:
-            official_cond_states = official_cond_states * 0
-        official_audio_input, _ = engine.encode_audio(
-            audio_path, infer_frames=infer_frames
-        )
-
-        _report("prompt_embeds", native_prompt_embeds, official_prompt_embeds[0])
-        _report(
-            "negative_prompt_embeds",
-            native_negative_prompt_embeds,
-            official_negative_prompt_embeds[0],
-        )
-        _report("ref_latents", native_ref_latents, official_ref_latents)
-        _report("motion_latents", native_motion_latents, official_motion_latents)
-        _report("cond_states", native_cond_states, official_cond_states)
-        _report(
-            "audio_input",
-            native_audio_input[..., :infer_frames],
-            official_audio_input[..., :infer_frames],
-        )
-
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         result = VerificationResult()
         result.add_check("image_path", batch.image_path, V.not_none)
@@ -409,54 +247,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
                 "Native Wan S2V standard denoising currently supports only a single clip"
             )
 
-        if not getattr(self.transformer, "uses_native_components", True):
-            negative_prompt = batch.negative_prompt
-            if not negative_prompt:
-                negative_prompt = self.transformer.get_default_negative_prompt()
-            prepared = self.transformer.prepare_reference_s2v_inputs(
-                prompt=batch.prompt or "",
-                negative_prompt=negative_prompt,
-                image_path=image_path,
-                audio_path=audio_path,
-                pose_video_path=pose_video_path,
-                num_frames=batch.num_frames,
-            )
-            latents = self.transformer.prepare_standard_s2v_latents(
-                latent_shape=prepared["latent_shape"],
-                generator=batch.generator,
-            )
-            prompt_embeds = prepared["prompt_embeds"]
-            negative_prompt_embeds = prepared["negative_prompt_embeds"]
-            if isinstance(prompt_embeds, list):
-                prompt_embeds = prompt_embeds[0]
-            if isinstance(negative_prompt_embeds, list):
-                negative_prompt_embeds = negative_prompt_embeds[0]
-            if prompt_embeds.ndim == 3 and prompt_embeds.shape[0] == 1:
-                prompt_embeds = prompt_embeds[0]
-            if (
-                negative_prompt_embeds.ndim == 3
-                and negative_prompt_embeds.shape[0] == 1
-            ):
-                negative_prompt_embeds = negative_prompt_embeds[0]
-            batch.prompt_embeds = [prompt_embeds]
-            if batch.do_classifier_free_guidance:
-                batch.negative_prompt_embeds = [negative_prompt_embeds]
-            batch.latents = latents
-            batch.raw_latent_shape = latents.shape
-            batch.height = prepared["height"]
-            batch.width = prepared["width"]
-            batch.audio, batch.audio_sample_rate = self._decode_source_audio(audio_path)
-            batch.extra["wan_s2v"] = {
-                "ref_latents": prepared["ref_latents"],
-                "motion_latents": prepared["motion_latents"],
-                "cond_states": prepared["cond_states"],
-                "audio_input": prepared["audio_input"],
-                "motion_frames": prepared["motion_frames"],
-                "drop_motion_frames": prepared["drop_motion_frames"],
-                "infer_frames": prepared["infer_frames"],
-            }
-            return batch
-
         infer_frames = self.transformer._normalize_infer_frames(batch.num_frames)
         height, width = self.transformer.get_generation_size(image_path=image_path)
 
@@ -472,19 +262,13 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         motion_latents = self._encode_video_to_latents(motion_pixels, server_args)
         lat_motion_frames = (motion_frames + 3) // 4
 
-        if getattr(self.transformer, "uses_native_components", True):
-            audio_input, max_num_repeat = self.audio_encoder.encode_audio(
-                audio_path,
-                infer_frames=infer_frames,
-                fps=self.transformer.fps,
-                dtype=self.transformer.param_dtype,
-                m=self.transformer.audio_sample_m,
-            )
-        else:
-            audio_input, max_num_repeat = self.transformer.encode_audio_reference(
-                audio_path=audio_path,
-                infer_frames=infer_frames,
-            )
+        audio_input, max_num_repeat = self.audio_encoder.encode_audio(
+            audio_path,
+            infer_frames=infer_frames,
+            fps=self.transformer.fps,
+            dtype=self.transformer.param_dtype,
+            m=self.transformer.audio_sample_m,
+        )
         if max_num_repeat < 1:
             raise ValueError(f"Audio path produced no valid clips: {audio_path}")
 
@@ -499,52 +283,11 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         if not negative_prompt:
             negative_prompt = self.transformer.get_default_negative_prompt()
 
-        if getattr(self.transformer, "uses_native_components", True):
-            prompt_embeds = self._encode_text_prompt(
-                batch.prompt or "", server_args=server_args
-            )
-            negative_prompt_embeds = self._encode_text_prompt(
-                negative_prompt, server_args=server_args
-            )
-        else:
-            prompt_embeds, negative_prompt_embeds = (
-                self.transformer.encode_prompts_reference(
-                    prompt=batch.prompt or "",
-                    negative_prompt=negative_prompt,
-                    offload_model=bool(
-                        self.transformer.config.get("offload_model", True)
-                    ),
-                )
-            )
-
-        debug_prompt_embeds = prompt_embeds
-        debug_negative_prompt_embeds = negative_prompt_embeds
-        if isinstance(debug_prompt_embeds, list):
-            debug_prompt_embeds = debug_prompt_embeds[0]
-        if isinstance(debug_negative_prompt_embeds, list):
-            debug_negative_prompt_embeds = debug_negative_prompt_embeds[0]
-        if debug_prompt_embeds.ndim == 3 and debug_prompt_embeds.shape[0] == 1:
-            debug_prompt_embeds = debug_prompt_embeds[0]
-        if (
-            debug_negative_prompt_embeds.ndim == 3
-            and debug_negative_prompt_embeds.shape[0] == 1
-        ):
-            debug_negative_prompt_embeds = debug_negative_prompt_embeds[0]
-
-        self._maybe_debug_compare_with_official(
-            prompt=batch.prompt or "",
-            negative_prompt=negative_prompt,
-            audio_path=audio_path,
-            pose_video_path=pose_video_path,
-            infer_frames=infer_frames,
-            ref_pixel_values=ref_pixel_values,
-            motion_pixels=motion_pixels,
-            native_prompt_embeds=debug_prompt_embeds,
-            native_negative_prompt_embeds=debug_negative_prompt_embeds,
-            native_ref_latents=ref_latents,
-            native_motion_latents=motion_latents,
-            native_cond_states=cond_states,
-            native_audio_input=audio_input,
+        prompt_embeds = self._encode_text_prompt(
+            batch.prompt or "", server_args=server_args
+        )
+        negative_prompt_embeds = self._encode_text_prompt(
+            negative_prompt, server_args=server_args
         )
 
         lat_target_frames = (infer_frames + 3 + motion_frames) // 4 - lat_motion_frames
@@ -590,10 +333,9 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
 class WanS2VDecodingStage(PipelineStage):
     """Decode Wan S2V latents using the official Wan VAE."""
 
-    def __init__(self, vae, transformer=None):
+    def __init__(self, vae):
         super().__init__()
         self.vae = vae
-        self.transformer = transformer
 
     @property
     def parallelism_type(self) -> StageParallelismType:
@@ -632,28 +374,6 @@ class WanS2VDecodingStage(PipelineStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         extra = batch.extra["wan_s2v"]
-        if self.transformer is not None and not getattr(
-            self.transformer, "uses_native_components", True
-        ):
-            batch.output = self.transformer.decode_reference_output(
-                latents=batch.latents,
-                ref_latents=extra["ref_latents"],
-                motion_latents=extra["motion_latents"],
-                infer_frames=extra["infer_frames"],
-                drop_motion_frames=extra["drop_motion_frames"],
-            )
-            debug_dump_path = os.environ.get("SGLANG_WAN_S2V_DEBUG_DUMP_DECODED_OUTPUT")
-            if debug_dump_path:
-                torch.save(
-                    {
-                        "output": batch.output.detach().float().cpu(),
-                        "infer_frames": int(extra["infer_frames"]),
-                        "drop_motion_frames": bool(extra["drop_motion_frames"]),
-                    },
-                    debug_dump_path,
-                )
-            batch.output = self._normalize_decoded_video(batch.output)
-            return batch
         if extra["drop_motion_frames"]:
             prefix_latents = extra["ref_latents"]
         else:
@@ -675,16 +395,6 @@ class WanS2VDecodingStage(PipelineStage):
         batch.output = batch.output[:, :, -extra["infer_frames"] :]
         if extra["drop_motion_frames"]:
             batch.output = batch.output[:, :, 3:]
-        debug_dump_path = os.environ.get("SGLANG_WAN_S2V_DEBUG_DUMP_DECODED_OUTPUT")
-        if debug_dump_path:
-            torch.save(
-                {
-                    "output": batch.output.detach().float().cpu(),
-                    "infer_frames": int(extra["infer_frames"]),
-                    "drop_motion_frames": bool(extra["drop_motion_frames"]),
-                },
-                debug_dump_path,
-            )
         batch.output = self._normalize_decoded_video(batch.output)
         if server_args.vae_cpu_offload and not hasattr(self.vae, "decode_video"):
             self.vae = self.vae.to("cpu")

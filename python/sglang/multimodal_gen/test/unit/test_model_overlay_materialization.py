@@ -219,16 +219,21 @@ def test_overlay_custom_materializer(monkeypatch, tmp_path):
         {
             "_class_name": "WanSpeechToVideoPipeline",
             "_diffusers_version": "0.35.0",
-            "transformer": ["diffusers", "WanS2VOfficialEngine"],
+            "transformer": ["diffusers", "WanS2VTransformer3DModel"],
+            "scheduler": ["diffusers", "WanS2VOfficialScheduler"],
         },
     )
     _write_json(
         overlay_repo / "transformer" / "config.json",
         {
-            "_class_name": "WanS2VOfficialEngine",
+            "_class_name": "WanS2VTransformer3DModel",
             "wan_code_root": "official_code",
             "wan_checkpoint_root": "checkpoints",
         },
+    )
+    _write_json(
+        overlay_repo / "scheduler" / "scheduler_config.json",
+        {"_class_name": "WanS2VOfficialScheduler"},
     )
     _write_json(
         overlay_repo / "_overlay" / "overlay_manifest.json",

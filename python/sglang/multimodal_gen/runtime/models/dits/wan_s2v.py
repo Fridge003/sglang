@@ -10,12 +10,6 @@ from typing import Any
 import numpy as np
 import torch
 from PIL import Image
-from torchvision import transforms
-
-try:
-    import soundfile as sf
-except ImportError:  # pragma: no cover
-    sf = None
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -37,9 +31,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         config: dict[str, Any],
         config_obj: Any,
         device: torch.device,
-        reference_text_encoder: Any | None = None,
-        reference_audio_encoder: Any | None = None,
-        reference_vae: Any | None = None,
     ) -> None:
         super().__init__()
         self.noise_model = noise_model
@@ -55,11 +46,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         self.fps = int(config_obj.sample_fps)
         self.audio_sample_m = 0
         self.supports_standard_denoising = True
-        self.uses_native_components = bool(config.get("use_native_components", True))
-        self.reference_text_encoder = reference_text_encoder
-        self.reference_audio_encoder = reference_audio_encoder
-        self.reference_vae = reference_vae
-        self.t5_cpu = bool(config.get("t5_cpu", False))
 
     @property
     def device(self):
@@ -346,7 +332,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
 
         config_obj = wan_configs[task_name]
         local_device = get_local_torch_device()
-        device_id = 0 if local_device.index is None else int(local_device.index)
         use_sp = (
             max(
                 getattr(server_args, "sp_degree", 1) or 1,
@@ -354,49 +339,27 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             )
             > 1
         )
-        reference_text_encoder = None
-        reference_audio_encoder = None
-        reference_vae = None
-        use_native_components = bool(config.get("use_native_components", True))
-        if not use_native_components:
-            engine = module_s2v.WanS2V(
-                config=config_obj,
-                checkpoint_dir=checkpoint_root,
-                device_id=device_id,
-                rank=0,
-                t5_fsdp=False,
-                dit_fsdp=False,
-                use_sp=use_sp,
-                t5_cpu=bool(config.get("t5_cpu", False)),
-                init_on_cpu=bool(config.get("init_on_cpu", True)),
-                convert_model_dtype=bool(config.get("convert_model_dtype", False)),
-            )
-            noise_model = engine.noise_model
-            reference_text_encoder = engine.text_encoder
-            reference_audio_encoder = engine.audio_encoder
-            reference_vae = engine.vae
-        else:
-            logger.info(
-                "Creating WanModel_S2V directly from %s without auxiliary official components",
-                checkpoint_root,
-            )
-            noise_model = module_s2v.WanModel_S2V.from_pretrained(
-                checkpoint_root,
-                torch_dtype=config_obj.param_dtype,
-                device_map=local_device,
-            )
-            noise_model.eval().requires_grad_(False)
-            if use_sp:
-                for block in noise_model.blocks:
-                    block.self_attn.forward = types.MethodType(
-                        module_s2v.sp_attn_forward_s2v, block.self_attn
-                    )
-                noise_model.use_context_parallel = True
+        logger.info(
+            "Creating WanModel_S2V directly from %s",
+            checkpoint_root,
+        )
+        noise_model = module_s2v.WanModel_S2V.from_pretrained(
+            checkpoint_root,
+            torch_dtype=config_obj.param_dtype,
+            device_map=local_device,
+        )
+        noise_model.eval().requires_grad_(False)
+        if use_sp:
+            for block in noise_model.blocks:
+                block.self_attn.forward = types.MethodType(
+                    module_s2v.sp_attn_forward_s2v, block.self_attn
+                )
+            noise_model.use_context_parallel = True
 
-            if bool(config.get("convert_model_dtype", False)):
-                noise_model.to(config_obj.param_dtype)
-            if not bool(config.get("init_on_cpu", True)) or use_sp:
-                noise_model.to(local_device)
+        if bool(config.get("convert_model_dtype", False)):
+            noise_model.to(config_obj.param_dtype)
+        if not bool(config.get("init_on_cpu", True)) or use_sp:
+            noise_model.to(local_device)
 
         return cls(
             noise_model=noise_model,
@@ -404,226 +367,10 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             config=config,
             config_obj=config_obj,
             device=local_device,
-            reference_text_encoder=reference_text_encoder,
-            reference_audio_encoder=reference_audio_encoder,
-            reference_vae=reference_vae,
         )
 
     def get_default_negative_prompt(self) -> str:
         return self.sample_neg_prompt
-
-    def encode_prompts_reference(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str,
-        offload_model: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.reference_text_encoder is None:
-            raise RuntimeError("Reference text encoder is not initialized")
-        if negative_prompt == "":
-            negative_prompt = self.sample_neg_prompt
-        if not self.t5_cpu:
-            self.reference_text_encoder.model.to(self.device)
-            context = self.reference_text_encoder([prompt], self.device)
-            context_null = self.reference_text_encoder([negative_prompt], self.device)
-            if offload_model:
-                self.reference_text_encoder.model.cpu()
-        else:
-            cpu_device = torch.device("cpu")
-            context = self.reference_text_encoder([prompt], cpu_device)
-            context_null = self.reference_text_encoder([negative_prompt], cpu_device)
-            context = [tensor.to(self.device) for tensor in context]
-            context_null = [tensor.to(self.device) for tensor in context_null]
-        return context[0:1], context_null[0:1]
-
-    def encode_audio_reference(
-        self,
-        *,
-        audio_path: str,
-        infer_frames: int,
-    ) -> tuple[torch.Tensor, int]:
-        if self.reference_audio_encoder is None:
-            raise RuntimeError("Reference audio encoder is not initialized")
-        embeddings = self.reference_audio_encoder.extract_audio_feat(
-            audio_path, return_all_layers=True
-        )
-        bucket, num_repeat = self.reference_audio_encoder.get_audio_embed_bucket_fps(
-            embeddings,
-            fps=self.fps,
-            batch_frames=infer_frames,
-            m=self.audio_sample_m,
-        )
-        bucket = bucket.to(self.device, self.param_dtype)
-        bucket = bucket.unsqueeze(0)
-        if bucket.ndim == 3:
-            bucket = bucket.permute(0, 2, 1)
-        elif bucket.ndim == 4:
-            bucket = bucket.permute(0, 2, 3, 1)
-        return bucket, num_repeat
-
-    def read_last_n_frames(
-        self,
-        video_path: str,
-        n_frames: int,
-        *,
-        target_fps: int = 16,
-        reverse: bool = False,
-    ):
-        from decord import VideoReader
-
-        vr = VideoReader(video_path)
-        original_fps = vr.get_avg_fps()
-        total_frames = len(vr)
-        interval = max(1, round(original_fps / target_fps))
-        required_span = (n_frames - 1) * interval
-        start_frame = max(0, total_frames - required_span - 1) if not reverse else 0
-        sampled_indices = []
-        for i in range(n_frames):
-            idx = start_frame + i * interval
-            if idx >= total_frames:
-                break
-            sampled_indices.append(idx)
-        return vr.get_batch(sampled_indices).asnumpy()
-
-    def load_pose_cond_reference(
-        self,
-        *,
-        pose_video: str | None,
-        num_repeat: int,
-        infer_frames: int,
-        size: tuple[int, int],
-    ) -> list[torch.Tensor]:
-        if self.reference_vae is None:
-            raise RuntimeError("Reference VAE is not initialized")
-
-        height, width = size
-        if pose_video is not None:
-            pose_seq = self.read_last_n_frames(
-                pose_video,
-                n_frames=infer_frames * num_repeat,
-                target_fps=self.fps,
-                reverse=True,
-            )
-            resize = transforms.Resize(min(height, width))
-            crop = transforms.CenterCrop((height, width))
-            cond_tensor = torch.from_numpy(pose_seq)
-            cond_tensor = cond_tensor.permute(0, 3, 1, 2) / 255.0 * 2 - 1.0
-            cond_tensor = crop(resize(cond_tensor)).permute(1, 0, 2, 3).unsqueeze(0)
-            padding_frames = num_repeat * infer_frames - cond_tensor.shape[2]
-            cond_tensor = torch.cat(
-                [
-                    cond_tensor,
-                    -torch.ones([1, 3, padding_frames, height, width]),
-                ],
-                dim=2,
-            )
-            cond_tensors = torch.chunk(cond_tensor, num_repeat, dim=2)
-        else:
-            cond_tensors = [-torch.ones([1, 3, infer_frames, height, width])]
-
-        conditions = []
-        for cond in cond_tensors:
-            cond = torch.cat([cond[:, :, 0:1].repeat(1, 1, 1, 1, 1), cond], dim=2)
-            cond_lat = torch.stack(
-                self.reference_vae.encode(
-                    cond.to(dtype=self.param_dtype, device=self.device)
-                )
-            )[:, :, 1:].cpu()
-            conditions.append(cond_lat)
-        return conditions
-
-    def prepare_reference_s2v_inputs(
-        self,
-        *,
-        prompt: str,
-        negative_prompt: str,
-        image_path: str,
-        audio_path: str,
-        pose_video_path: str | None,
-        num_frames: int,
-    ) -> dict[str, Any]:
-        if self.reference_vae is None:
-            raise RuntimeError("Reference VAE is not initialized")
-        infer_frames = self._normalize_infer_frames(num_frames)
-        height, width = self.get_generation_size(image_path=image_path)
-        resize = transforms.Resize(min(height, width))
-        crop = transforms.CenterCrop((height, width))
-        to_tensor = transforms.ToTensor()
-
-        model_pic = crop(resize(Image.open(image_path).convert("RGB")))
-        ref_pixel_values = to_tensor(model_pic).unsqueeze(1).unsqueeze(0) * 2 - 1.0
-        ref_pixel_values = ref_pixel_values.to(
-            dtype=self.reference_vae.dtype, device=self.reference_vae.device
-        )
-        ref_latents = torch.stack(self.reference_vae.encode(ref_pixel_values))
-
-        motion_frames = self.motion_frames
-        motion_pixels = torch.zeros(
-            [1, 3, motion_frames, height, width],
-            dtype=self.param_dtype,
-            device=self.device,
-        )
-        motion_latents = torch.stack(self.reference_vae.encode(motion_pixels))
-        lat_motion_frames = (motion_frames + 3) // 4
-
-        audio_input, max_num_repeat = self.encode_audio_reference(
-            audio_path=audio_path,
-            infer_frames=infer_frames,
-        )
-        if max_num_repeat < 1:
-            raise ValueError(f"Audio path produced no valid clips: {audio_path}")
-
-        cond_states = self.load_pose_cond_reference(
-            pose_video=pose_video_path,
-            num_repeat=1,
-            infer_frames=infer_frames,
-            size=(height, width),
-        )[0].to(dtype=self.param_dtype, device=self.device)
-        if pose_video_path is None:
-            cond_states = cond_states * 0
-
-        prompt_embeds, negative_prompt_embeds = self.encode_prompts_reference(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            offload_model=bool(self.config.get("offload_model", True)),
-        )
-        lat_target_frames = (infer_frames + 3 + motion_frames) // 4 - lat_motion_frames
-        return {
-            "height": int(height),
-            "width": int(width),
-            "infer_frames": int(infer_frames),
-            "latent_shape": (1, 16, lat_target_frames, height // 8, width // 8),
-            "prompt_embeds": prompt_embeds,
-            "negative_prompt_embeds": negative_prompt_embeds,
-            "ref_latents": ref_latents,
-            "motion_latents": motion_latents,
-            "cond_states": cond_states,
-            "audio_input": audio_input[..., :infer_frames],
-            "motion_frames": [motion_frames, lat_motion_frames],
-            "drop_motion_frames": bool(self.drop_first_motion),
-        }
-
-    def decode_reference_output(
-        self,
-        *,
-        latents: torch.Tensor,
-        ref_latents: torch.Tensor,
-        motion_latents: torch.Tensor,
-        infer_frames: int,
-        drop_motion_frames: bool,
-    ) -> torch.Tensor:
-        if self.reference_vae is None:
-            raise RuntimeError("Reference VAE is not initialized")
-        if drop_motion_frames:
-            decode_latents = torch.cat([ref_latents, latents], dim=2)
-        else:
-            decode_latents = torch.cat([motion_latents, latents], dim=2)
-        image = torch.stack(self.reference_vae.decode(decode_latents))
-        image = image[:, :, -infer_frames:]
-        if drop_motion_frames:
-            image = image[:, :, 3:]
-        return image
 
     def _normalize_infer_frames(self, num_frames: int) -> int:
         infer_frames = max(int(num_frames) - 1, 4)
