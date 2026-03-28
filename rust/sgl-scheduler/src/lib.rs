@@ -253,12 +253,13 @@ fn process_batch_result_decode_fast(
         if rd.is_null() { skipped[i] = true; continue; }
         req_dicts[i] = rd;
 
-        // Check skip conditions during extraction (free — we already have rd)
+        // Always check is_retracted (retraction can happen anytime due to KV cache pressure).
+        // Only check finished_reason when we know some reqs are pre-finished.
+        let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
+        if unsafe { is_true(ir) } { skipped[i] = true; continue; }
         if check_skip {
             let fr = unsafe { dict_get(rd, k_finished_reason.as_ptr()) };
             if unsafe { is_set(fr) } { skipped[i] = true; continue; }
-            let ir = unsafe { dict_get(rd, k_is_retracted.as_ptr()) };
-            if unsafe { is_true(ir) } { skipped[i] = true; continue; }
         }
 
         oids_ptrs[i] = unsafe { dict_get(rd, k_output_ids.as_ptr()) };

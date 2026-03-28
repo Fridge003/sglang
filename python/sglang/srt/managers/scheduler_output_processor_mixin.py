@@ -440,6 +440,10 @@ class SchedulerOutputProcessorMixin:
             logger.info("use fast: %.1fms", (_time.perf_counter() - _t0) * 1000)
             return
 
+        import time as _time
+
+        _t0 = _time.perf_counter()
+
         # Check finish condition
         for i, (req, next_token_id) in enumerate(zip(batch.reqs, next_token_ids)):
             req: Req
@@ -549,6 +553,7 @@ class SchedulerOutputProcessorMixin:
                 req.grammar.finished = req.finished()
 
         self.stream_output(batch.reqs, batch.return_logprob)
+        logger.info("use normal: %.1fms", (_time.perf_counter() - _t0) * 1000)
         self.token_to_kv_pool_allocator.free_group_end()
 
         self.forward_ct_decode = (self.forward_ct_decode + 1) % (1 << 30)
