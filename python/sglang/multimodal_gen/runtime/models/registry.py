@@ -371,7 +371,6 @@ class _ModelRegistry:
 
         normalized_arch = []
         for arch in architectures:
-            arch = _ALIAS_TO_MODEL.get(arch, arch)
             if arch not in self.registered_models:
                 registered_models = list(self.registered_models.keys())
                 raise Exception(
