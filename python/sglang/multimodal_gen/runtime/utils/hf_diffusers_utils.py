@@ -224,11 +224,16 @@ def _resolve_direct_overlay_repo(
         return overlay_spec, model_name_or_path, manifest
 
     try:
-        manifest_path = hf_hub_download(
-            repo_id=model_name_or_path,
-            filename="_overlay/overlay_manifest.json",
+        # Direct HF overlays may need auxiliary metadata such as custom
+        # materializers, so fetch the full metadata subset instead of only the
+        # manifest file.
+        overlay_dir = str(
+            snapshot_download(
+                repo_id=model_name_or_path,
+                allow_patterns=MODEL_OVERLAY_METADATA_PATTERNS,
+                max_workers=4,
+            )
         )
-        overlay_dir = os.path.dirname(os.path.dirname(manifest_path))
     except (
         RepositoryNotFoundError,
         RevisionNotFoundError,
