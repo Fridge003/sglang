@@ -54,8 +54,8 @@ from sglang.srt.utils.common import (
     maybe_reindex_device_id,
 )
 from sglang.srt.utils.network import (
+    CURVE_DISABLED,
     NetworkAddress,
-    _CURVE_DISABLED,
     bind_port,
     get_zmq_socket,
 )
@@ -289,18 +289,13 @@ class DataParallelController:
     def _broadcast_worker_ports(
         self, server_args: ServerArgs, worker_ports: Optional[List[int]] = None
     ) -> List[int]:
-        """Broadcast worker ports from node 0 to all other nodes.
+        """Broadcast worker ports (and CURVE keys) from node 0 to all others.
 
-        Node 0 acts as the server, waiting for all other nodes to connect and
-        sending them the pre-allocated worker ports. Other nodes act as clients,
-        connecting to node 0 to receive their copy of the worker ports.
-
-        When CurveZMQ is enabled, a two-phase bootstrap is used so that the
-        CURVE secret key is never sent in plaintext:
-
-        - Phase 1 (plaintext): distribute only node 0's CURVE *public* key.
-        - Phase 2 (CURVE-protected): distribute the secret key and worker ports
-          over a channel encrypted with the public key from Phase 1.
+        Node 0 serves a plaintext REP socket. Each client node connects,
+        receives the worker ports and (when CURVE is enabled) node 0's
+        keypair so that all subsequent ZMQ connections use the same
+        shared-key CURVE config.  The plaintext bootstrap has the same
+        threat model as NCCL's ``init_process_group`` rendezvous.
 
         Args:
             server_args: Server arguments containing node configuration.
@@ -328,79 +323,31 @@ class DataParallelController:
     def _broadcast_ports_as_server(
         self, na: NetworkAddress, expected_clients: int, worker_ports: List[int]
     ) -> List[int]:
-        """Broadcast worker ports (and CURVE keys) to all client nodes.
-
-        Uses a two-phase handshake when CURVE is enabled so that the secret
-        key is transmitted over an encrypted channel rather than in plaintext.
-        """
-        from sglang.srt.utils.network import get_curve_config, get_open_port
+        """Send worker ports and CURVE keys to all client nodes."""
+        from sglang.srt.utils.network import get_curve_config
 
         curve = get_curve_config()
         endpoint = na.to_tcp()
 
-        if curve is None:
-            # No CURVE — single plaintext exchange (original behavior).
-            socket = get_zmq_socket(
-                self.context, zmq.REP, endpoint, True, curve=_CURVE_DISABLED
+        socket = get_zmq_socket(
+            self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED
+        )
+        payload = {"worker_ports": worker_ports}
+        if curve is not None:
+            payload["curve_public"] = curve.public_key
+            payload["curve_secret"] = curve.secret_key
+            logger.info(
+                "Multi-node bootstrap: distributing CurveZMQ keys on %s",
+                endpoint,
             )
-            try:
-                for _ in range(expected_clients):
-                    client_rank = socket.recv().decode()
-                    logger.debug(f"Received handshake from node {client_rank}")
-                    socket.send_pyobj({"worker_ports": worker_ports})
-            finally:
-                socket.close()
-            return worker_ports
 
-        # --- Phase 1: plaintext socket, sends only the public key -----------
-        phase2_port = get_open_port()
-
-        phase1_socket = get_zmq_socket(
-            self.context, zmq.REP, endpoint, True, curve=_CURVE_DISABLED
-        )
-        logger.info(
-            "Multi-node bootstrap phase 1: distributing CurveZMQ public key "
-            "over plaintext handshake on %s (short-lived)",
-            endpoint,
-        )
         try:
-            phase1_payload = {
-                "curve_public": curve.public_key,
-                "phase2_port": phase2_port,
-            }
             for _ in range(expected_clients):
-                client_rank = phase1_socket.recv().decode()
-                logger.debug(
-                    "Phase 1: received handshake from node %s", client_rank
-                )
-                phase1_socket.send_pyobj(phase1_payload)
+                client_rank = socket.recv().decode()
+                logger.debug("Received handshake from node %s", client_rank)
+                socket.send_pyobj(payload)
         finally:
-            phase1_socket.close()
-
-        # --- Phase 2: CURVE-protected socket, sends secret key + ports ------
-        phase2_na = NetworkAddress(na.host, phase2_port)
-        phase2_endpoint = phase2_na.to_tcp()
-        phase2_socket = get_zmq_socket(
-            self.context, zmq.REP, phase2_endpoint, True
-        )
-        logger.info(
-            "Multi-node bootstrap phase 2: distributing CurveZMQ secret key "
-            "over CURVE-protected channel on %s",
-            phase2_endpoint,
-        )
-        try:
-            phase2_payload = {
-                "worker_ports": worker_ports,
-                "curve_secret": curve.secret_key,
-            }
-            for _ in range(expected_clients):
-                client_rank = phase2_socket.recv().decode()
-                logger.debug(
-                    "Phase 2: received handshake from node %s", client_rank
-                )
-                phase2_socket.send_pyobj(phase2_payload)
-        finally:
-            phase2_socket.close()
+            socket.close()
 
         logger.debug("Worker port broadcast completed")
         return worker_ports
@@ -408,90 +355,44 @@ class DataParallelController:
     def _receive_ports_as_client(
         self, na: NetworkAddress, node_rank: int
     ) -> List[int]:
-        """Receive worker ports (and CURVE keys) from the server node.
-
-        Uses a two-phase handshake when CURVE is enabled: first receives the
-        server's public key over plaintext, then connects with CURVE to
-        receive the secret key and worker ports.
-        """
-        from sglang.srt.utils.network import (
-            CurveConfig,
-            apply_curve_client,
-            config_socket,
-            get_curve_config,
-            set_curve_config,
-        )
+        """Receive worker ports and CURVE keys from node 0."""
+        from sglang.srt.utils.network import CurveConfig, set_curve_config
 
         endpoint = na.to_tcp()
         timeout_ms = 600 * 1000  # 10 minutes
 
-        # --- Phase 1: plaintext, receive server public key ------------------
-        logger.debug("Connecting to node 0 (phase 1) to receive CURVE public key")
-        phase1_socket = get_zmq_socket(
-            self.context, zmq.REQ, endpoint, False, curve=_CURVE_DISABLED
+        logger.debug("Connecting to node 0 to receive worker ports")
+        socket = get_zmq_socket(
+            self.context, zmq.REQ, endpoint, False, curve=CURVE_DISABLED
         )
-        phase1_socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        phase1_socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
 
         try:
-            phase1_socket.send(str(node_rank).encode())
-            phase1_payload = phase1_socket.recv_pyobj()
+            socket.send(str(node_rank).encode())
+            payload = socket.recv_pyobj()
         except zmq.Again:
-            logger.error("Timeout waiting for phase 1 handshake from node 0")
+            logger.error("Timeout waiting for bootstrap handshake from node 0")
             raise RuntimeError(
-                "Failed to receive CURVE public key from node 0 within timeout"
+                "Failed to receive worker ports from node 0 within timeout"
             )
         finally:
-            phase1_socket.close()
+            socket.close()
 
-        if not isinstance(phase1_payload, dict):
-            # Legacy server that sends worker_ports directly (no CURVE).
-            return phase1_payload
+        if not isinstance(payload, dict):
+            return payload
 
-        server_public_key = phase1_payload.get("curve_public")
-        phase2_port = phase1_payload.get("phase2_port")
+        worker_ports = payload["worker_ports"]
 
-        if server_public_key is None:
-            # CURVE disabled on node 0.
-            return phase1_payload["worker_ports"]
-
-        # --- Phase 2: CURVE-protected, receive secret key + ports -----------
-        logger.debug(
-            "Connecting to node 0 (phase 2) over CURVE on port %s", phase2_port
-        )
-        phase2_na = NetworkAddress(na.host, phase2_port)
-        phase2_endpoint = phase2_na.to_tcp()
-
-        phase2_socket = self.context.socket(zmq.REQ)
-        config_socket(phase2_socket, zmq.REQ)
-        phase2_socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        phase2_socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
-
-        local_curve = get_curve_config()
-        apply_curve_client(phase2_socket, local_curve, server_public_key)
-        phase2_socket.connect(phase2_endpoint)
-
-        try:
-            phase2_socket.send(str(node_rank).encode())
-            phase2_payload = phase2_socket.recv_pyobj()
-        except zmq.Again:
-            logger.error("Timeout waiting for phase 2 handshake from node 0")
-            raise RuntimeError(
-                "Failed to receive CURVE secret key from node 0 within timeout"
+        curve_public = payload.get("curve_public")
+        curve_secret = payload.get("curve_secret")
+        if curve_public is not None and curve_secret is not None:
+            set_curve_config(
+                CurveConfig(public_key=curve_public, secret_key=curve_secret)
             )
-        finally:
-            phase2_socket.close()
+            logger.info("Received CurveZMQ keys from node 0")
 
-        worker_ports = phase2_payload["worker_ports"]
-        set_curve_config(
-            CurveConfig(
-                public_key=server_public_key,
-                secret_key=phase2_payload["curve_secret"],
-            )
-        )
-        logger.info("Received CurveZMQ keys from node 0 (two-phase bootstrap)")
-
-        logger.debug(f"Received {len(worker_ports)} worker ports from node 0")
+        logger.debug("Received %d worker ports from node 0", len(worker_ports))
         return worker_ports
 
     def launch_dp_attention_schedulers(

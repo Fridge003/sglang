@@ -4,6 +4,7 @@ import ipaddress
 import logging
 import os
 import socket
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -89,11 +90,12 @@ def apply_curve_client(
     socket.curve_serverkey = server_public_key or curve.public_key
 
 
-_CURVE_DISABLED = object()
-"""Sentinel for ``get_zmq_socket(curve=_CURVE_DISABLED)`` to explicitly skip
+CURVE_DISABLED = object()
+"""Sentinel for ``get_zmq_socket(curve=CURVE_DISABLED)`` to explicitly skip
 CURVE on a socket even when the global config is set (e.g. the bootstrap
 handshake that distributes CURVE keys to other nodes)."""
 
+_curve_config_lock = threading.Lock()
 _curve_config_cache: Optional[CurveConfig] = None
 _curve_config_loaded: bool = False
 
@@ -106,7 +108,11 @@ def get_curve_config() -> Optional[CurveConfig]:
     ``SGLANG_NO_ZMQ_CURVE`` or ``zmq.has("curve")`` is false.
     """
     global _curve_config_cache, _curve_config_loaded
-    if not _curve_config_loaded:
+    if _curve_config_loaded:
+        return _curve_config_cache
+    with _curve_config_lock:
+        if _curve_config_loaded:
+            return _curve_config_cache
         from sglang.srt.environ import envs
 
         if envs.SGLANG_NO_ZMQ_CURVE.get():
@@ -129,8 +135,9 @@ def get_curve_config() -> Optional[CurveConfig]:
 def set_curve_config(config: CurveConfig) -> None:
     """Inject a CurveConfig (e.g. received from a multi-node broadcast)."""
     global _curve_config_cache, _curve_config_loaded
-    _curve_config_cache = config
-    _curve_config_loaded = True
+    with _curve_config_lock:
+        _curve_config_cache = config
+        _curve_config_loaded = True
 
 
 def connect_with_curve(
@@ -530,7 +537,7 @@ def get_zmq_socket(
 
     is_tcp = endpoint is None or endpoint.startswith("tcp://")
 
-    if curve is _CURVE_DISABLED:
+    if curve is CURVE_DISABLED:
         curve = None
     elif curve is None and is_tcp:
         curve = get_curve_config()

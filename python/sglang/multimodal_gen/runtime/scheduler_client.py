@@ -6,6 +6,11 @@ import zmq.asyncio
 
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.srt.utils.network import (
+    apply_curve_server,
+    connect_with_curve,
+    get_curve_config,
+)
 
 logger = init_logger(__name__)
 
@@ -15,8 +20,6 @@ async def run_zeromq_broker(server_args: ServerArgs):
     This function runs as a background task in the FastAPI process.
     It listens for TCP requests from offline clients (e.g., DiffGenerator).
     """
-    from sglang.srt.utils.network import apply_curve_server, get_curve_config
-
     ctx = zmq.asyncio.Context()
     socket = ctx.socket(zmq.REP)
     curve = get_curve_config()
@@ -60,8 +63,6 @@ class SchedulerClient:
         self.server_args = None
 
     def initialize(self, server_args: ServerArgs):
-        from sglang.srt.utils.network import connect_with_curve
-
         if self.context is not None and not self.context.closed:
             logger.warning("SchedulerClient is already initialized. Re-initializing.")
             self.close()
@@ -93,8 +94,6 @@ class SchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
-        from sglang.srt.utils.network import connect_with_curve
-
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
             return False
@@ -151,8 +150,6 @@ class AsyncSchedulerClient:
 
     async def forward(self, batch: Any) -> Any:
         """Sends a batch or request to the scheduler and waits for the response."""
-        from sglang.srt.utils.network import connect_with_curve
-
         if self.context is None:
             raise RuntimeError(
                 "AsyncSchedulerClient is not initialized. Call initialize() first."
@@ -179,8 +176,6 @@ class AsyncSchedulerClient:
         """
         Checks if the scheduler server is alive using a temporary socket.
         """
-        from sglang.srt.utils.network import connect_with_curve
-
         if self.context is None or self.context.closed:
             logger.error("Cannot ping: client is not initialized.")
             return False

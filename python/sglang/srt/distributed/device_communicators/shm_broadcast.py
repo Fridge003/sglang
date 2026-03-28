@@ -16,7 +16,14 @@ from torch.distributed import ProcessGroup
 from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
-from sglang.srt.utils.network import NetworkAddress, get_local_ip_auto, get_open_port
+from sglang.srt.utils.network import (
+    NetworkAddress,
+    apply_curve_server,
+    connect_with_curve,
+    get_curve_config,
+    get_local_ip_auto,
+    get_open_port,
+)
 
 # SGLANG_RINGBUFFER_WARNING_INTERVAL can be set to 60
 SGLANG_RINGBUFFER_WARNING_INTERVAL = int(
@@ -219,8 +226,6 @@ class MessageQueue:
             self.current_idx = -1
 
         if n_remote_reader > 0:
-            from sglang.srt.utils.network import apply_curve_server, get_curve_config
-
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
             self.remote_socket = context.socket(XPUB)
@@ -290,8 +295,6 @@ class MessageQueue:
             self._is_remote_reader = True
 
             self.local_socket = None
-
-            from sglang.srt.utils.network import connect_with_curve
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")

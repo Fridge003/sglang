@@ -336,8 +336,8 @@ class TestSchedulerClientSecurity(CustomTestCase):
         mock_ctx = MagicMock()
         mock_ctx.socket.return_value = mock_socket
 
-        with patch("zmq.asyncio.Context", return_value=mock_ctx), patch(
-            "sglang.srt.utils.network.get_curve_config", return_value=None
+        with patch("zmq.asyncio.Context", return_value=mock_ctx), patch.object(
+            self.sc_mod, "get_curve_config", return_value=None
         ):
             try:
                 asyncio.run(
@@ -372,8 +372,8 @@ class TestSchedulerClientSecurity(CustomTestCase):
             mock_server_args = MagicMock()
             mock_server_args.broker_port = 0
 
-            with patch("zmq.asyncio.Context", return_value=mock_ctx), patch(
-                "sglang.srt.utils.network.get_curve_config", return_value=curve
+            with patch("zmq.asyncio.Context", return_value=mock_ctx), patch.object(
+                self.sc_mod, "get_curve_config", return_value=curve
             ):
                 try:
                     asyncio.run(
@@ -435,8 +435,8 @@ class TestSchedulerClientSecurity(CustomTestCase):
         mock_server_args.scheduler_endpoint = "tcp://127.0.0.1:9999"
 
         client = self.sc_mod.SchedulerClient()
-        with patch(
-            "sglang.srt.utils.network.connect_with_curve"
+        with patch.object(
+            self.sc_mod, "connect_with_curve"
         ) as mock_connect:
             client.initialize(mock_server_args)
 

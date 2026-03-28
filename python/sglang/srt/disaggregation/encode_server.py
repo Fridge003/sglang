@@ -52,6 +52,7 @@ from sglang.srt.utils import (
 from sglang.srt.utils.network import (
     NetworkAddress,
     config_socket,
+    connect_with_curve,
     get_local_ip_auto,
     get_zmq_socket,
 )
@@ -1029,8 +1030,6 @@ class MMEncoder:
 
         # Use thread pool executor for parallel ZMQ send operations
         def send_with_socket():
-            from sglang.srt.utils.network import connect_with_curve
-
             sock = self.sync_context.socket(zmq.PUSH)
             config_socket(sock, zmq.PUSH)
             try:

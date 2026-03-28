@@ -37,6 +37,8 @@ from sglang.srt.layers.dp_attention import (
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils.network import (
     NetworkAddress,
+    connect_with_curve,
+    get_curve_config,
     get_local_ip_auto,
     get_zmq_socket_on_host,
 )
@@ -127,8 +129,6 @@ class CommonKVManager(BaseKVManager):
             context, zmq.PULL, host=self.local_ip
         )
         logger.debug(f"kv manager bind to {self.local_ip}:{self.rank_port}")
-
-        from sglang.srt.utils.network import get_curve_config
 
         curve = get_curve_config()
         self.curve_public_key: Optional[str] = (
@@ -375,8 +375,6 @@ class CommonKVManager(BaseKVManager):
         is_ipv6: bool = False,
         server_public_key: Optional[bytes] = None,
     ):
-        from sglang.srt.utils.network import connect_with_curve
-
         socket = zmq.Context().socket(zmq.PUSH)
         if is_ipv6:
             socket.setsockopt(zmq.IPV6, 1)
@@ -645,8 +643,6 @@ class CommonKVReceiver(BaseKVReceiver):
         is_ipv6: bool = False,
         server_public_key: Optional[bytes] = None,
     ):
-        from sglang.srt.utils.network import connect_with_curve
-
         with cls._global_lock:
             if endpoint not in cls._socket_cache:
                 sock = cls._ctx.socket(zmq.PUSH)
