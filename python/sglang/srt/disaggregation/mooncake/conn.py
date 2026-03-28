@@ -77,6 +77,13 @@ class TransferInfo:
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
+        """Deserialize from a ZMQ multi-part message.
+
+        Wire format (positional indices):
+          [0] room, [1] endpoint, [2] dst_port, [3] mooncake_session_id,
+          [4] dst_kv_indices, [5] dst_aux_index, [6] dst_state_indices,
+          [7] required_dst_info_num, [8] curve_public_key (optional)
+        """
         if msg[4] == b"" and msg[5] == b"":
             is_dummy = True
             dst_kv_indices = np.array([], dtype=np.int32)
@@ -125,6 +132,15 @@ class KVArgsRegisterInfo:
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]):
+        """Deserialize from a ZMQ multi-part message.
+
+        Wire format (positional indices):
+          [0] room, [1] endpoint, [2] dst_port, [3] mooncake_session_id,
+          [4] dst_kv_ptrs, [5] dst_aux_ptrs, [6] dst_state_data_ptrs,
+          [7] dst_tp_rank, [8] dst_attn_tp_size, [9] dst_kv_item_len,
+          [10] dst_state_item_lens, [11] dst_state_dim_per_tensor,
+          [12] curve_public_key (optional)
+        """
         curve_key = msg[12].decode("ascii") if len(msg) > 12 and msg[12] else None
         return cls(
             room=str(msg[0].decode("ascii")),

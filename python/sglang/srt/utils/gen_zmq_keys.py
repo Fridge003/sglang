@@ -45,6 +45,11 @@ def generate_certificates(output_dir: str) -> None:
 
     zmq.auth.create_certificates(output_dir, "cluster")
 
+    # Restrict the secret key file to owner-only so other users on the same
+    # machine cannot read it and impersonate a cluster node.
+    secret_file = os.path.join(output_dir, "cluster.key_secret")
+    os.chmod(secret_file, 0o600)
+
     print(f"CurveZMQ keypair generated in: {output_dir}")
     print()
     print("Files created:")

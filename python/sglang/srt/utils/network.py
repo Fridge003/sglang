@@ -20,9 +20,6 @@ logger = logging.getLogger(__name__)
 # CurveZMQ helpers
 # ---------------------------------------------------------------------------
 
-_LOCALHOST_ADDRS = frozenset({"127.0.0.1", "::1", "localhost"})
-
-
 @dataclass(frozen=True)
 class CurveConfig:
     """Holds a Curve25519 keypair for ZMQ CURVE authentication."""
@@ -90,10 +87,20 @@ def apply_curve_client(
     socket.curve_serverkey = server_public_key or curve.public_key
 
 
-CURVE_DISABLED = object()
-"""Sentinel for ``get_zmq_socket(curve=CURVE_DISABLED)`` to explicitly skip
-CURVE on a socket even when the global config is set (e.g. the bootstrap
-handshake that distributes CURVE keys to other nodes)."""
+class _CurveDisabled:
+    """Sentinel to explicitly skip CURVE on a socket even when the global
+    config is set (e.g. the bootstrap handshake that distributes CURVE keys
+    to other nodes).  Use via the module-level ``CURVE_DISABLED`` constant."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+
+CURVE_DISABLED = _CurveDisabled()
 
 _curve_config_lock = threading.Lock()
 _curve_config_cache: Optional[CurveConfig] = None
@@ -332,7 +339,7 @@ def get_zmq_socket_on_host(
     context: zmq.Context,
     socket_type: zmq.SocketType,
     host: Optional[str] = None,
-    curve: Optional[CurveConfig] = None,
+    curve: Optional[Union[CurveConfig, _CurveDisabled]] = None,
 ) -> Tuple[int, zmq.Socket]:
     """Create, configure, and bind a ZeroMQ socket to a random TCP port.
 
@@ -391,7 +398,7 @@ def config_socket(socket, socket_type: zmq.SocketType):
         set_send_opt()
     elif socket_type == zmq.PULL:
         set_recv_opt()
-    elif socket_type in [zmq.DEALER, zmq.REQ, zmq.REP]:
+    elif socket_type in [zmq.DEALER, zmq.REQ, zmq.REP, zmq.ROUTER]:
         set_send_opt()
         set_recv_opt()
     else:
@@ -513,7 +520,7 @@ def get_zmq_socket(
     socket_type: zmq.SocketType,
     endpoint: Optional[str] = None,
     bind: bool = True,
-    curve: Optional[CurveConfig] = None,
+    curve: Optional[Union[CurveConfig, _CurveDisabled]] = None,
 ) -> Union[zmq.Socket, Tuple[int, zmq.Socket]]:
     """Create and configure a ZeroMQ socket.
 

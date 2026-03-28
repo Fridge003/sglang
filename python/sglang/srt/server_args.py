@@ -909,10 +909,12 @@ class ServerArgs:
             )
 
     def _handle_zmq_curve_validation(self):
-        """Validate ZMQ CURVE arguments and propagate to the env var.
+        """Validate ZMQ CURVE CLI arguments and propagate to env vars.
 
-        Priority: --no-zmq-curve > --zmq-curve-keys-dir > env var raw keys
-        > auto-generate.  CURVE is on by default when libzmq supports it.
+        Only performs early validation of user-supplied arguments (file
+        existence, key format).  The actual CURVE config loading, key
+        generation, and libzmq capability detection are handled by
+        ``get_curve_config()`` in ``network.py`` (single source of truth).
         """
         from sglang.srt.environ import envs
 
@@ -950,22 +952,6 @@ class ServerArgs:
                     "must be 40-character Z85-encoded strings "
                     "(as produced by zmq.curve_keypair())"
                 )
-            logger.info("CurveZMQ: using keypair from environment variables")
-            return
-
-        import zmq as _zmq
-
-        if _zmq.has("curve"):
-            logger.info(
-                "CurveZMQ: enabled (auto-generating per-instance keypair). "
-                "Use --no-zmq-curve to disable."
-            )
-        else:
-            logger.warning(
-                "CurveZMQ disabled: this pyzmq/libzmq build lacks CURVE support "
-                "(libsodium missing). ZMQ sockets will be unauthenticated."
-            )
-            envs.SGLANG_NO_ZMQ_CURVE.set(True)
 
     def _handle_deprecated_args(self):
         # Handle deprecated tool call parsers

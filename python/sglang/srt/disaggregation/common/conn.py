@@ -6,7 +6,6 @@ import logging
 import threading
 import time
 from collections import defaultdict
-from functools import cache
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 import numpy as np
@@ -134,6 +133,8 @@ class CommonKVManager(BaseKVManager):
         self.curve_public_key: Optional[str] = (
             curve.public_key.decode("ascii") if curve is not None else None
         )
+
+        self._socket_cache: Dict[tuple, zmq.Socket] = {}
 
         self.request_status: Dict[int, KVPoll] = {}
         self.failure_records: Dict[int, str] = {}
@@ -368,18 +369,20 @@ class CommonKVManager(BaseKVManager):
                 f"Prefill instance failed to register to bootstrap server: {e}"
             )
 
-    @cache
     def _connect(
         self,
         endpoint: str,
         is_ipv6: bool = False,
         server_public_key: Optional[bytes] = None,
     ):
-        socket = zmq.Context().socket(zmq.PUSH)
-        if is_ipv6:
-            socket.setsockopt(zmq.IPV6, 1)
-        connect_with_curve(socket, endpoint, server_public_key=server_public_key)
-        return socket
+        cache_key = (endpoint, is_ipv6, server_public_key)
+        if cache_key not in self._socket_cache:
+            socket = zmq.Context().socket(zmq.PUSH)
+            if is_ipv6:
+                socket.setsockopt(zmq.IPV6, 1)
+            connect_with_curve(socket, endpoint, server_public_key=server_public_key)
+            self._socket_cache[cache_key] = socket
+        return self._socket_cache[cache_key]
 
     def get_mha_kv_ptrs_with_pp(
         self, src_kv_ptrs: List[int], dst_kv_ptrs: List[int]
@@ -643,17 +646,18 @@ class CommonKVReceiver(BaseKVReceiver):
         is_ipv6: bool = False,
         server_public_key: Optional[bytes] = None,
     ):
+        cache_key = (endpoint, server_public_key)
         with cls._global_lock:
-            if endpoint not in cls._socket_cache:
+            if cache_key not in cls._socket_cache:
                 sock = cls._ctx.socket(zmq.PUSH)
                 if is_ipv6:
                     sock.setsockopt(zmq.IPV6, 1)
                 connect_with_curve(
                     sock, endpoint, server_public_key=server_public_key
                 )
-                cls._socket_cache[endpoint] = sock
-                cls._socket_locks[endpoint] = threading.Lock()
-            return cls._socket_cache[endpoint], cls._socket_locks[endpoint]
+                cls._socket_cache[cache_key] = sock
+                cls._socket_locks[cache_key] = threading.Lock()
+            return cls._socket_cache[cache_key], cls._socket_locks[cache_key]
 
     @classmethod
     def _connect_to_bootstrap_server(cls, bootstrap_info: dict):
