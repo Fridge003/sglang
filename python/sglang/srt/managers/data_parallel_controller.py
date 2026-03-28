@@ -289,13 +289,12 @@ class DataParallelController:
     def _broadcast_worker_ports(
         self, server_args: ServerArgs, worker_ports: Optional[List[int]] = None
     ) -> List[int]:
-        """Broadcast worker ports (and CURVE keys) from node 0 to all others.
+        """Broadcast worker ports and Node 0's CURVE public key to all others.
 
-        Node 0 serves a plaintext REP socket. Each client node connects,
-        receives the worker ports and (when CURVE is enabled) node 0's
-        keypair so that all subsequent ZMQ connections use the same
-        shared-key CURVE config.  The plaintext bootstrap has the same
-        threat model as NCCL's ``init_process_group`` rendezvous.
+        Each node auto-generates its own CURVE keypair.  The bootstrap only
+        distributes Node 0's *public* key so that non-zero nodes can
+        authenticate CURVE connections to Node 0's server sockets.  No
+        secret key is ever sent over the network.
 
         Args:
             server_args: Server arguments containing node configuration.
@@ -323,28 +322,34 @@ class DataParallelController:
     def _broadcast_ports_as_server(
         self, na: NetworkAddress, expected_clients: int, worker_ports: List[int]
     ) -> List[int]:
-        """Send worker ports and CURVE keys to all client nodes."""
-        from sglang.srt.utils.network import get_curve_config
+        """Broadcast worker ports and Node 0's CURVE public key to all clients.
+
+        The secret key is never sent.  Each node keeps its own auto-generated
+        keypair; clients only need Node 0's public key to authenticate
+        subsequent CURVE connections.
+        """
+        from sglang.srt.utils.network import get_curve_config, set_server_public_key
 
         curve = get_curve_config()
         endpoint = na.to_tcp()
 
-        socket = get_zmq_socket(
-            self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED
-        )
         payload = {"worker_ports": worker_ports}
+
         if curve is not None:
+            set_server_public_key(curve.public_key)
             payload["curve_public"] = curve.public_key
-            payload["curve_secret"] = curve.secret_key
             logger.info(
-                "Multi-node bootstrap: distributing CurveZMQ keys on %s",
+                "Multi-node bootstrap: distributing CurveZMQ public key on %s",
                 endpoint,
             )
 
+        socket = get_zmq_socket(
+            self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED
+        )
         try:
             for _ in range(expected_clients):
                 client_rank = socket.recv().decode()
-                logger.debug("Received handshake from node %s", client_rank)
+                logger.debug("Bootstrap handshake from node %s", client_rank)
                 socket.send_pyobj(payload)
         finally:
             socket.close()
@@ -353,13 +358,19 @@ class DataParallelController:
         return worker_ports
 
     def _receive_ports_as_client(self, na: NetworkAddress, node_rank: int) -> List[int]:
-        """Receive worker ports and CURVE keys from node 0."""
-        from sglang.srt.utils.network import CurveConfig, set_curve_config
+        """Receive worker ports and Node 0's CURVE public key.
+
+        Each node keeps its own auto-generated keypair.  Node 0's public key
+        is stored via ``set_server_public_key()`` so that subsequent CURVE
+        client connections authenticate against Node 0's identity.  The env
+        var propagation ensures spawned scheduler subprocesses inherit it.
+        """
+        from sglang.srt.utils.network import set_server_public_key
 
         endpoint = na.to_tcp()
         timeout_ms = 600 * 1000  # 10 minutes
 
-        logger.debug("Connecting to node 0 to receive worker ports")
+        logger.debug("Connecting to node 0 for bootstrap")
         socket = get_zmq_socket(
             self.context, zmq.REQ, endpoint, False, curve=CURVE_DISABLED
         )
@@ -372,7 +383,7 @@ class DataParallelController:
         except zmq.Again:
             logger.error("Timeout waiting for bootstrap handshake from node 0")
             raise RuntimeError(
-                "Failed to receive worker ports from node 0 within timeout"
+                "Failed to receive bootstrap data from node 0 within timeout"
             )
         finally:
             socket.close()
@@ -381,14 +392,11 @@ class DataParallelController:
             return payload
 
         worker_ports = payload["worker_ports"]
-
         curve_public = payload.get("curve_public")
-        curve_secret = payload.get("curve_secret")
-        if curve_public is not None and curve_secret is not None:
-            set_curve_config(
-                CurveConfig(public_key=curve_public, secret_key=curve_secret)
-            )
-            logger.info("Received CurveZMQ keys from node 0")
+
+        if curve_public is not None:
+            set_server_public_key(curve_public)
+            logger.info("Stored node 0's CurveZMQ public key (per-node keypair model)")
 
         logger.debug("Received %d worker ports from node 0", len(worker_ports))
         return worker_ports

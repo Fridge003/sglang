@@ -2,6 +2,7 @@ import os
 import pickle
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 
@@ -13,11 +14,14 @@ from sglang.srt.utils.network import (
     CurveConfig,
     apply_curve_client,
     apply_curve_server,
+    config_socket,
     connect_with_curve,
     get_curve_config,
+    get_server_public_key,
     get_zmq_socket,
     get_zmq_socket_on_host,
     set_curve_config,
+    set_server_public_key,
 )
 from sglang.test.ci.ci_register import register_cpu_ci
 from sglang.test.test_utils import CustomTestCase
@@ -79,19 +83,38 @@ class TestCurveConfig(CustomTestCase):
 
 
 def _reset_curve_state():
-    """Reset global CurveConfig cache so get_curve_config() re-evaluates."""
+    """Reset global CurveConfig and server-public-key caches."""
     import sglang.srt.utils.network as net_mod
 
-    saved = (net_mod._curve_config_cache, net_mod._curve_config_loaded)
+    saved = (
+        net_mod._curve_config_cache,
+        net_mod._curve_config_loaded,
+        net_mod._server_public_key,
+        net_mod._server_public_key_loaded,
+        os.environ.get("SGLANG_ZMQ_SERVER_PUBLIC_KEY"),
+    )
     net_mod._curve_config_cache = None
     net_mod._curve_config_loaded = False
+    net_mod._server_public_key = None
+    net_mod._server_public_key_loaded = False
+    os.environ.pop("SGLANG_ZMQ_SERVER_PUBLIC_KEY", None)
     return saved
 
 
 def _restore_curve_state(saved):
     import sglang.srt.utils.network as net_mod
 
-    net_mod._curve_config_cache, net_mod._curve_config_loaded = saved
+    (
+        net_mod._curve_config_cache,
+        net_mod._curve_config_loaded,
+        net_mod._server_public_key,
+        net_mod._server_public_key_loaded,
+        env_val,
+    ) = saved
+    if env_val is not None:
+        os.environ["SGLANG_ZMQ_SERVER_PUBLIC_KEY"] = env_val
+    else:
+        os.environ.pop("SGLANG_ZMQ_SERVER_PUBLIC_KEY", None)
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -802,25 +825,20 @@ class TestDisaggregationMetadataRoundTrip(CustomTestCase):
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
 class TestBroadcastWorkerPortsKeyDistribution(CustomTestCase):
-    """Verify _broadcast_worker_ports payload includes CURVE keys."""
+    """Verify single-phase bootstrap payload shape (per-node keypair model)."""
 
-    def test_broadcast_payload_structure(self):
+    def test_payload_has_public_key_only(self):
+        """Bootstrap payload carries public key + worker_ports, never secret."""
         cfg = CurveConfig.generate()
         payload = {
             "worker_ports": [10000, 10001],
             "curve_public": cfg.public_key,
-            "curve_secret": cfg.secret_key,
         }
         self.assertIn("curve_public", payload)
-        self.assertIn("curve_secret", payload)
-        self.assertEqual(payload["worker_ports"], [10000, 10001])
-
-        received = CurveConfig(
-            public_key=payload["curve_public"],
-            secret_key=payload["curve_secret"],
-        )
-        self.assertEqual(received.public_key, cfg.public_key)
-        self.assertEqual(received.secret_key, cfg.secret_key)
+        self.assertIn("worker_ports", payload)
+        self.assertNotIn("curve_secret", payload)
+        self.assertNotIn("phase2_port", payload)
+        self.assertEqual(payload["curve_public"], cfg.public_key)
 
     def test_set_curve_config_from_broadcast(self):
         saved = _reset_curve_state()
@@ -830,6 +848,174 @@ class TestBroadcastWorkerPortsKeyDistribution(CustomTestCase):
             result = get_curve_config()
             self.assertEqual(result.public_key, cfg.public_key)
             self.assertEqual(result.secret_key, cfg.secret_key)
+        finally:
+            _restore_curve_state(saved)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestSinglePhaseBootstrap(CustomTestCase):
+    """Integration: single-phase bootstrap distributes public key only."""
+
+    def test_public_key_exchange(self):
+        """Server sends public key in plaintext; client stores it."""
+        server_curve = CurveConfig.generate()
+        worker_ports = [10000, 10001, 10002]
+
+        saved = _reset_curve_state()
+        set_curve_config(server_curve)
+
+        ctx = zmq.Context()
+        results = {}
+        error_box = [None]
+
+        server_socket = ctx.socket(zmq.REP)
+        config_socket(server_socket, zmq.REP)
+        port = server_socket.bind_to_random_port("tcp://127.0.0.1")
+
+        payload = {
+            "worker_ports": worker_ports,
+            "curve_public": server_curve.public_key,
+        }
+
+        def client_fn():
+            try:
+                cctx = zmq.Context()
+                req = cctx.socket(zmq.REQ)
+                config_socket(req, zmq.REQ)
+                req.connect(f"tcp://127.0.0.1:{port}")
+                req.send(b"1")
+                received = req.recv_pyobj()
+                req.close()
+                results["payload"] = received
+                cctx.term()
+            except Exception as e:
+                error_box[0] = e
+
+        t = threading.Thread(target=client_fn)
+        t.start()
+
+        server_socket.recv()
+        server_socket.send_pyobj(payload)
+        server_socket.close()
+
+        t.join(timeout=10)
+        ctx.term()
+        _restore_curve_state(saved)
+
+        self.assertIsNone(error_box[0], f"Client thread failed: {error_box[0]}")
+        self.assertNotIn("curve_secret", results["payload"])
+        self.assertNotIn("phase2_port", results["payload"])
+        self.assertIn("curve_public", results["payload"])
+        self.assertIn("worker_ports", results["payload"])
+        self.assertEqual(results["payload"]["curve_public"], server_curve.public_key)
+        self.assertEqual(results["payload"]["worker_ports"], worker_ports)
+
+    def test_per_node_keypair_communication(self):
+        """After bootstrap, PUSH/PULL works with per-node keypairs via global."""
+        server_curve = CurveConfig.generate()
+        client_curve = CurveConfig.generate()
+        self.assertNotEqual(server_curve.public_key, client_curve.public_key)
+
+        saved = _reset_curve_state()
+        try:
+            set_server_public_key(server_curve.public_key)
+
+            ctx = zmq.Context()
+            pull = ctx.socket(zmq.PULL)
+            apply_curve_server(pull, server_curve)
+            port = pull.bind_to_random_port("tcp://127.0.0.1")
+
+            push = ctx.socket(zmq.PUSH)
+            push.setsockopt(zmq.LINGER, 0)
+            apply_curve_client(push, client_curve)
+            push.connect(f"tcp://127.0.0.1:{port}")
+
+            push.send(b"per-node-ok")
+            self.assertTrue(pull.poll(timeout=3000))
+            msg = pull.recv()
+            self.assertEqual(msg, b"per-node-ok")
+
+            push.close()
+            pull.close()
+            ctx.term()
+        finally:
+            _restore_curve_state(saved)
+
+    def test_server_public_key_env_propagation(self):
+        """set_server_public_key stores to env; get reads from env on miss."""
+        saved = _reset_curve_state()
+        try:
+            key = CurveConfig.generate().public_key
+            set_server_public_key(key)
+            self.assertEqual(
+                os.environ.get("SGLANG_ZMQ_SERVER_PUBLIC_KEY"),
+                key.decode("ascii"),
+            )
+            self.assertEqual(get_server_public_key(), key)
+
+            import sglang.srt.utils.network as net_mod
+
+            net_mod._server_public_key = None
+            net_mod._server_public_key_loaded = False
+
+            self.assertEqual(get_server_public_key(), key)
+        finally:
+            _restore_curve_state(saved)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestRequireServerKey(CustomTestCase):
+    """Verify require_server_key fail-fast for cross-node connections."""
+
+    def test_raises_when_no_server_key(self):
+        """require_server_key=True raises if no server key is available."""
+        saved = _reset_curve_state()
+        try:
+            cfg = CurveConfig.generate()
+            with self.assertRaises(ValueError):
+                apply_curve_client(
+                    zmq.Context().socket(zmq.PUSH),
+                    cfg,
+                    require_server_key=True,
+                )
+        finally:
+            _restore_curve_state(saved)
+
+    def test_passes_with_global_server_key(self):
+        """require_server_key=True succeeds after set_server_public_key."""
+        saved = _reset_curve_state()
+        try:
+            server_cfg = CurveConfig.generate()
+            client_cfg = CurveConfig.generate()
+            set_server_public_key(server_cfg.public_key)
+
+            ctx = zmq.Context()
+            sock = ctx.socket(zmq.PUSH)
+            sock.setsockopt(zmq.LINGER, 0)
+            apply_curve_client(sock, client_cfg, require_server_key=True)
+            sock.close()
+            ctx.term()
+        finally:
+            _restore_curve_state(saved)
+
+    def test_passes_with_explicit_server_key(self):
+        """require_server_key=True succeeds with explicit server_public_key."""
+        saved = _reset_curve_state()
+        try:
+            server_cfg = CurveConfig.generate()
+            client_cfg = CurveConfig.generate()
+
+            ctx = zmq.Context()
+            sock = ctx.socket(zmq.PUSH)
+            sock.setsockopt(zmq.LINGER, 0)
+            apply_curve_client(
+                sock,
+                client_cfg,
+                server_public_key=server_cfg.public_key,
+                require_server_key=True,
+            )
+            sock.close()
+            ctx.term()
         finally:
             _restore_curve_state(saved)
 
