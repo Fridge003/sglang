@@ -75,21 +75,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
     """
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
-    _aliases = ["WanS2VOfficialScheduler"]
     order = 1
-
-    @classmethod
-    def from_component_path(
-        cls,
-        component_model_path: str,
-        server_args,
-        config: dict[str, Any],
-    ):
-        del component_model_path, server_args
-        scheduler_config = dict(config)
-        scheduler_config.pop("wan_code_root", None)
-        scheduler_config.pop("wan_task_name", None)
-        return cls(**scheduler_config)
 
     @register_to_config
     def __init__(
