@@ -555,9 +555,7 @@ class MooncakeKVManager(CommonKVManager):
             data = AuxDataCodec.serialize_data_from_buffer(src_addr, length)
 
             decode_pub = (
-                req.curve_public_key.encode("ascii")
-                if req.curve_public_key
-                else None
+                req.curve_public_key.encode("ascii") if req.curve_public_key else None
             )
             self.send_aux_data_to_endpoint(
                 remote=req.endpoint,

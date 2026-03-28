@@ -352,9 +352,7 @@ class DataParallelController:
         logger.debug("Worker port broadcast completed")
         return worker_ports
 
-    def _receive_ports_as_client(
-        self, na: NetworkAddress, node_rank: int
-    ) -> List[int]:
+    def _receive_ports_as_client(self, na: NetworkAddress, node_rank: int) -> List[int]:
         """Receive worker ports and CURVE keys from node 0."""
         from sglang.srt.utils.network import CurveConfig, set_curve_config
 

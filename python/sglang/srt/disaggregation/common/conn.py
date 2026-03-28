@@ -652,9 +652,7 @@ class CommonKVReceiver(BaseKVReceiver):
                 sock = cls._ctx.socket(zmq.PUSH)
                 if is_ipv6:
                     sock.setsockopt(zmq.IPV6, 1)
-                connect_with_curve(
-                    sock, endpoint, server_public_key=server_public_key
-                )
+                connect_with_curve(sock, endpoint, server_public_key=server_public_key)
                 cls._socket_cache[cache_key] = sock
                 cls._socket_locks[cache_key] = threading.Lock()
             return cls._socket_cache[cache_key], cls._socket_locks[cache_key]

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 # CurveZMQ helpers
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class CurveConfig:
     """Holds a Curve25519 keypair for ZMQ CURVE authentication."""

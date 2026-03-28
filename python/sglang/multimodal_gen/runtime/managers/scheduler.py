@@ -33,9 +33,9 @@ from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
     set_global_server_args,
 )
-from sglang.srt.utils.network import get_zmq_socket
 from sglang.multimodal_gen.runtime.utils.distributed import broadcast_pyobj
 from sglang.multimodal_gen.runtime.utils.logging_utils import GREEN, RESET, init_logger
+from sglang.srt.utils.network import get_zmq_socket
 
 logger = init_logger(__name__)
 

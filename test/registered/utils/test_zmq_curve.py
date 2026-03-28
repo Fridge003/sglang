@@ -2,13 +2,12 @@ import os
 import pickle
 import shutil
 import tempfile
-import threading
 import time
 import unittest
 
 import zmq
 
-from sglang.srt.utils.common import SafeUnpickler, safe_pickle_load
+from sglang.srt.utils.common import safe_pickle_load
 from sglang.srt.utils.gen_zmq_keys import generate_certificates
 from sglang.srt.utils.network import (
     CurveConfig,
@@ -434,9 +433,7 @@ class TestSchedulerClientSecurity(CustomTestCase):
         mock_server_args.scheduler_endpoint = "tcp://127.0.0.1:9999"
 
         client = self.sc_mod.SchedulerClient()
-        with patch.object(
-            self.sc_mod, "connect_with_curve"
-        ) as mock_connect:
+        with patch.object(self.sc_mod, "connect_with_curve") as mock_connect:
             client.initialize(mock_server_args)
 
         mock_connect.assert_called_once()
@@ -503,7 +500,6 @@ class TestConnectWithCurve(CustomTestCase):
 
     def test_explicit_curve_config(self):
         """connect_with_curve must use an explicitly provided CurveConfig."""
-        from unittest.mock import patch
 
         ctx = zmq.Context()
         try:
@@ -513,9 +509,7 @@ class TestConnectWithCurve(CustomTestCase):
 
             client = ctx.socket(zmq.PUSH)
             client.setsockopt(zmq.LINGER, 0)
-            connect_with_curve(
-                client, f"tcp://127.0.0.1:{port}", curve=self.curve
-            )
+            connect_with_curve(client, f"tcp://127.0.0.1:{port}", curve=self.curve)
 
             client.send(b"explicit-curve")
             self.assertTrue(server.poll(timeout=3000))
@@ -534,9 +528,6 @@ class TestMMSchedulerUsesSrtGetZmqSocket(CustomTestCase):
 
     def test_mm_scheduler_imports_srt_get_zmq_socket(self):
         """The multimodal scheduler must not use its own unhardened get_zmq_socket."""
-        import importlib.util
-        import sys
-        from types import ModuleType
 
         mm_sched_path = os.path.join(
             os.path.dirname(__file__),
@@ -767,7 +758,9 @@ class TestPerInstanceKeyExchange(CustomTestCase):
 
             client = ctx.socket(zmq.PUSH)
             client.setsockopt(zmq.LINGER, 0)
-            apply_curve_client(client, client_cfg, server_public_key=server_cfg.public_key)
+            apply_curve_client(
+                client, client_cfg, server_public_key=server_cfg.public_key
+            )
             client.connect(f"tcp://127.0.0.1:{port}")
 
             client.send(b"cross-instance-msg")
@@ -848,6 +841,7 @@ class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
 
     def test_bootstrap_put_get_curve_key(self):
         import requests as http_requests
+
         from sglang.srt.utils.network import get_open_port
 
         port = get_open_port()
@@ -906,6 +900,7 @@ class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
     def test_bootstrap_put_get_without_curve_key(self):
         """Backward compat: registrations without curve_public_key still work."""
         import requests as http_requests
+
         from sglang.srt.utils.network import get_open_port
 
         port = get_open_port()
@@ -957,20 +952,21 @@ class TestTransferInfoFromZmq(CustomTestCase):
 
     def test_with_curve_public_key(self):
         import numpy as np
+
         from sglang.srt.disaggregation.mooncake.conn import TransferInfo
 
         kv_indices = np.array([1, 2, 3], dtype=np.int32)
         curve_key = "B" * 40
         msg = [
-            b"42",                              # room
-            b"192.168.1.1",                     # endpoint
-            b"5555",                            # dst_port
-            b"session-abc",                     # mooncake_session_id
-            kv_indices.tobytes(),               # dst_kv_indices
-            b"7",                               # dst_aux_index
-            b"",                                # dst_state_indices (empty)
-            b"2",                               # required_dst_info_num
-            curve_key.encode("ascii"),          # curve_public_key
+            b"42",  # room
+            b"192.168.1.1",  # endpoint
+            b"5555",  # dst_port
+            b"session-abc",  # mooncake_session_id
+            kv_indices.tobytes(),  # dst_kv_indices
+            b"7",  # dst_aux_index
+            b"",  # dst_state_indices (empty)
+            b"2",  # required_dst_info_num
+            curve_key.encode("ascii"),  # curve_public_key
         ]
         info = TransferInfo.from_zmq(msg)
         self.assertEqual(info.room, 42)
@@ -981,6 +977,7 @@ class TestTransferInfoFromZmq(CustomTestCase):
 
     def test_without_curve_public_key(self):
         import numpy as np
+
         from sglang.srt.disaggregation.mooncake.conn import TransferInfo
 
         kv_indices = np.array([10], dtype=np.int32)
@@ -1005,11 +1002,11 @@ class TestTransferInfoFromZmq(CustomTestCase):
             b"10.0.0.3",
             b"7000",
             b"session-dummy",
-            b"",                                # empty kv_indices → dummy
-            b"",                                # empty aux_index → dummy
+            b"",  # empty kv_indices → dummy
+            b"",  # empty aux_index → dummy
             b"",
             b"1",
-            b"C" * 40,                          # curve key still present
+            b"C" * 40,  # curve key still present
         ]
         info = TransferInfo.from_zmq(msg)
         self.assertTrue(info.is_dummy)
@@ -1021,23 +1018,24 @@ class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
 
     def test_with_curve_public_key(self):
         import struct
+
         from sglang.srt.disaggregation.mooncake.conn import KVArgsRegisterInfo
 
         curve_key = "D" * 40
         msg = [
-            b"None",                                   # room
-            b"10.0.0.5",                                # endpoint
-            b"8000",                                    # dst_port
-            b"session-reg",                             # mooncake_session_id
-            struct.pack("Q", 0xDEAD),                   # dst_kv_ptrs
-            struct.pack("Q", 0xBEEF),                   # dst_aux_ptrs
-            struct.pack("Q", 0xCAFE),                   # dst_state_data_ptrs
-            b"0",                                       # dst_tp_rank
-            b"1",                                       # dst_attn_tp_size
-            b"128",                                     # dst_kv_item_len
-            b"",                                        # dst_state_item_lens
-            b"",                                        # dst_state_dim_per_tensor
-            curve_key.encode("ascii"),                  # curve_public_key
+            b"None",  # room
+            b"10.0.0.5",  # endpoint
+            b"8000",  # dst_port
+            b"session-reg",  # mooncake_session_id
+            struct.pack("Q", 0xDEAD),  # dst_kv_ptrs
+            struct.pack("Q", 0xBEEF),  # dst_aux_ptrs
+            struct.pack("Q", 0xCAFE),  # dst_state_data_ptrs
+            b"0",  # dst_tp_rank
+            b"1",  # dst_attn_tp_size
+            b"128",  # dst_kv_item_len
+            b"",  # dst_state_item_lens
+            b"",  # dst_state_dim_per_tensor
+            curve_key.encode("ascii"),  # curve_public_key
         ]
         info = KVArgsRegisterInfo.from_zmq(msg)
         self.assertEqual(info.room, "None")
@@ -1046,6 +1044,7 @@ class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
 
     def test_without_curve_public_key(self):
         import struct
+
         from sglang.srt.disaggregation.mooncake.conn import KVArgsRegisterInfo
 
         msg = [

@@ -281,10 +281,7 @@ class ZmqEventPublisher(EventPublisher):
 
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)
-            if (
-                curve is not None
-                and self._replay_endpoint.startswith("tcp://")
-            ):
+            if curve is not None and self._replay_endpoint.startswith("tcp://"):
                 apply_curve_server(self._replay, curve)
             logger.debug(
                 f"ZmqEventPublisher socket replay_endpoint bind to {self._replay_endpoint}"
