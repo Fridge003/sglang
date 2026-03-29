@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import os
 from copy import deepcopy
 
 import numpy as np
@@ -113,23 +112,6 @@ def rope_precompute(x, grid_sizes, freqs, start=None):
                 output[i, seq_bucket[-1] : seq_bucket[-1] + seq_len] = freqs_i
         seq_bucket.append(seq_bucket[-1] + seq_len)
     return output
-
-
-def _gather_debug_tensor(x, grid_sizes, num_replicated_suffix):
-    if get_sp_world_size() == 1:
-        return x
-    while isinstance(grid_sizes, list):
-        grid_sizes = grid_sizes[-1]
-    local_video_len = x.shape[1] - num_replicated_suffix
-    num_frames = int(grid_sizes[0, 0].item())
-    local_tokens_per_frame = local_video_len // num_frames
-    video = x[:, :local_video_len].view(
-        x.shape[0], num_frames, local_tokens_per_frame, x.shape[2]
-    )
-    video = sequence_model_parallel_all_gather(video.contiguous(), dim=2)
-    return torch.cat(
-        [video.reshape(x.shape[0], -1, x.shape[2]), x[:, local_video_len:]], dim=1
-    )
 
 
 class WanRMSNorm(nn.Module):
@@ -548,22 +530,6 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         context_lens,
         num_replicated_suffix=0,
     ):
-        debug_dump_dir = os.getenv("SGLANG_WAN_S2V_INTERNAL_DUMP_DIR")
-        debug_block_idx = int(os.getenv("SGLANG_WAN_S2V_INTERNAL_DUMP_BLOCK_IDX", "-1"))
-        debug_enabled = (
-            debug_dump_dir
-            and getattr(self, "_debug_dump_enabled", False)
-            and getattr(self, "_debug_block_idx", -1) == debug_block_idx
-        )
-        dump_rank = get_sp_group().rank_in_group if get_sp_world_size() > 1 else 0
-
-        def dump_tensor(name, tensor):
-            if not debug_enabled or dump_rank != 0:
-                return
-            tensor = _gather_debug_tensor(tensor, grid_sizes, num_replicated_suffix)
-            os.makedirs(debug_dump_dir, exist_ok=True)
-            torch.save(tensor.detach().cpu(), os.path.join(debug_dump_dir, name))
-
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
@@ -579,22 +545,17 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        dump_tensor("self_attn.pt", y)
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[2][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
-        dump_tensor("post_self_residual.pt", x)
         cross = self.cross_attn(self.norm3(x), context, context_lens)
-        dump_tensor("cross_attn.pt", cross)
         x = x + cross
         norm2_x = self.norm2(x).float()
         norm2_x = torch.cat([norm2_x[:, seg_idx[i]:seg_idx[i+1]] * (1 + e[4][:, i:i+1]) + e[3][:, i:i+1] for i in range(2)], dim=1)
         y = self.ffn(norm2_x)
-        dump_tensor("ffn.pt", y)
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[5][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
-        dump_tensor("block_out.pt", x)
         return x
 
 
@@ -642,9 +603,6 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             )
             for _ in range(num_layers)
         ])
-        for idx, block in enumerate(self.blocks):
-            block._debug_block_idx = idx
-            block._debug_dump_enabled = False
         self.head = HeadS2V(dim, out_dim, patch_size, eps)
         d = dim // num_heads
         self.freqs = torch.cat([rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1)
@@ -669,18 +627,6 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             raise NotImplementedError('Native Wan S2V motioner path is not implemented')
         if enable_framepack:
             self.frame_packer = FramePackMotioner(inner_dim=self.dim, num_heads=self.num_heads, zip_frame_buckets=[1, 2, 16], drop_mode=framepack_drop_mode)
-        self._debug_block_dump_dir = os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_DIR")
-        self._debug_block_dump_call_idx = int(
-            os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_CALL_IDX", "0")
-        )
-        block_indexes = os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_INDEXES")
-        self._debug_block_dump_indexes = (
-            {int(index) for index in block_indexes.split(",")}
-            if block_indexes
-            else None
-        )
-        self._forward_call_idx = 0
-
     def zero_init_weights(self):
         with torch.no_grad():
             self.trainable_cond_mask = zero_module(self.trainable_cond_mask)
@@ -849,46 +795,9 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             context_lens=None,
             num_replicated_suffix=condition_suffix_len if sequence_shard_enabled else 0,
         )
-        dump_this_call = (
-            self._debug_block_dump_dir is not None
-            and self._forward_call_idx == self._debug_block_dump_call_idx
-        )
-        for block in self.blocks:
-            block._debug_dump_enabled = dump_this_call
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
-            if dump_this_call and (
-                self._debug_block_dump_indexes is None
-                or idx in self._debug_block_dump_indexes
-            ):
-                dump_x = x
-                if sequence_shard_enabled:
-                    dump_video = dump_x[:, : self.local_original_seq_len].view(
-                        dump_x.shape[0],
-                        num_frames,
-                        self.local_original_seq_len // num_frames,
-                        dump_x.shape[2],
-                    )
-                    dump_video = sequence_model_parallel_all_gather(
-                        dump_video.contiguous(), dim=2
-                    )
-                    dump_x = torch.cat(
-                        [
-                            dump_video.reshape(dump_x.shape[0], -1, dump_x.shape[2]),
-                            dump_x[:, self.local_original_seq_len :],
-                        ],
-                        dim=1,
-                    )
-                if not sequence_shard_enabled or get_sp_group().rank_in_group == 0:
-                    os.makedirs(self._debug_block_dump_dir, exist_ok=True)
-                    torch.save(
-                        dump_x.detach().cpu(),
-                        os.path.join(
-                            self._debug_block_dump_dir,
-                            f"call_{self._forward_call_idx:02d}_block_{idx:02d}.pt",
-                        ),
-                    )
         if sequence_shard_enabled:
             x_video = x[:, : self.local_original_seq_len].view(
                 x.shape[0], num_frames, self.local_original_seq_len // num_frames, x.shape[2]
@@ -899,7 +808,6 @@ class WanModelS2V(ModelMixin, ConfigMixin):
                 x = x[:, :seq_len_full]
         x = x[:, : self.original_seq_len]
         x = self.head(x, e)
-        self._forward_call_idx += 1
         x = self.unpatchify(x, original_grid_sizes)
         return [u.float() for u in x]
 
