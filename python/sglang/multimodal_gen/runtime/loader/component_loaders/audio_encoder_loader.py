@@ -26,12 +26,6 @@ class AudioEncoderLoader(ComponentLoader):
                 f"Audio encoder config at {component_model_path} does not contain _class_name"
             )
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
-        if hasattr(model_cls, "from_component_path"):
-            return model_cls.from_component_path(
-                component_model_path=component_model_path,
-                server_args=server_args,
-                config=config,
-            )
         encoder_config = getattr(server_args.pipeline_config, "audio_encoder_config")
         encoder_config.update_model_arch(config)
         target_device = self.target_device(self.should_offload(server_args))

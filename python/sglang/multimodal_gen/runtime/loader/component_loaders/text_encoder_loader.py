@@ -123,7 +123,7 @@ class TextEncoderLoader(ComponentLoader):
         allow_patterns = ["*.safetensors", "*.bin"]
 
         if fall_back_to_pt:
-            allow_patterns += ["*.pt"]
+            allow_patterns += ["*.pt", "*.pth"]
 
         if allow_patterns_overrides is not None:
             allow_patterns = allow_patterns_overrides
@@ -208,14 +208,6 @@ class TextEncoderLoader(ComponentLoader):
                 f"Text encoder config at {component_model_path} does not contain _class_name"
             )
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
-        if hasattr(model_cls, "from_component_path"):
-            engine_config = dict(model_config)
-            engine_config.pop("_class_name", None)
-            return model_cls.from_component_path(
-                component_model_path=component_model_path,
-                server_args=server_args,
-                config=engine_config,
-            )
 
         diffusers_pretrained_config = get_config(
             component_model_path, trust_remote_code=True

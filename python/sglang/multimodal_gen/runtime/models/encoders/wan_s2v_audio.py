@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import os
 
 import numpy as np
 import torch
@@ -12,7 +11,6 @@ from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 from sglang.multimodal_gen.configs.models.encoders.wan_s2v_audio import (
     WanS2VAudioEncoderConfig,
 )
-from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.models.encoders.base import AudioEncoder
 
 try:
@@ -83,46 +81,6 @@ class WanS2VAudioEncoder(AudioEncoder):
         self.model = self.model.to(target_device)
         self.video_rate = config.arch_config.video_rate
         self.sample_rate = config.arch_config.sample_rate
-
-    @staticmethod
-    def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:
-        if not path_value:
-            raise ValueError(
-                "WanS2VAudioEncoder config is missing a required Wan checkpoint path"
-            )
-        path_value = os.path.expanduser(path_value)
-        if os.path.isabs(path_value):
-            resolved = path_value
-        else:
-            resolved = os.path.join(component_model_path, path_value)
-        if not os.path.exists(resolved):
-            raise ValueError(f"Resolved path does not exist: {resolved}")
-        return resolved
-
-    @classmethod
-    def from_component_path(
-        cls,
-        component_model_path: str,
-        server_args,
-        config: dict[str, str],
-    ):
-        checkpoint_root = cls._resolve_existing_path(
-            component_model_path, config.get("wan_checkpoint_root")
-        )
-        wav2vec_root = os.path.join(
-            checkpoint_root, "wav2vec2-large-xlsr-53-english"
-        )
-        target_device = (
-            torch.device("cpu")
-            if bool(getattr(server_args, "audio_encoder_cpu_offload", False))
-            else get_local_torch_device()
-        )
-        return cls(
-            config=WanS2VAudioEncoderConfig(),
-            component_model_path=wav2vec_root,
-            torch_dtype=torch.float32,
-            target_device=target_device,
-        )
 
     @property
     def device(self) -> torch.device:
