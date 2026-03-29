@@ -1363,6 +1363,17 @@ class WanS2VTransformer3DModel(WanModelS2V, OffloadableDiTMixin):
         self.supports_standard_denoising = True
 
     def post_load_weights(self) -> None:
+        if isinstance(self.freqs, torch.Tensor) and self.freqs.is_meta:
+            d = self.dim // self.num_heads
+            device = next(self.parameters()).device
+            self.freqs = torch.cat(
+                [
+                    rope_params(1024, d - 4 * (d // 6)),
+                    rope_params(1024, 2 * (d // 6)),
+                    rope_params(1024, 2 * (d // 6)),
+                ],
+                dim=1,
+            ).to(device=device)
         return None
 
     def get_default_negative_prompt(self) -> str:
