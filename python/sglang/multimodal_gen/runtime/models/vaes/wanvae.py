@@ -66,6 +66,9 @@ from sglang.multimodal_gen.runtime.models.vaes.parallel.wan_dist_utils import (
     split_for_parallel_decode,
     split_for_parallel_encode,
 )
+from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+
+logger = init_logger(__name__)
 
 CACHE_T = 2
 
@@ -951,6 +954,12 @@ class AutoencoderKLWan(ParallelTiledVAE):
         model = cls(vae_config).to(
             device=target_device,
             dtype=target_dtype,
+        )
+        logger.info(
+            "Loaded Wan VAE config: use_parallel_encode=%s use_parallel_decode=%s encoder_conv=%s",
+            getattr(vae_config, "use_parallel_encode", None),
+            getattr(vae_config, "use_parallel_decode", None),
+            type(getattr(getattr(model, "encoder", None), "conv_in", None)).__name__,
         )
 
         official_state = torch.load(vae_path, map_location="cpu")
