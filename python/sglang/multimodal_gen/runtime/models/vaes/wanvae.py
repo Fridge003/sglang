@@ -17,7 +17,9 @@
 # limitations under the License.
 
 import contextvars
+import os
 from contextlib import contextmanager
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -29,6 +31,7 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_sp_parallel_rank,
     get_sp_world_size,
 )
+from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.activation import get_act_fn
 from sglang.multimodal_gen.runtime.models.vaes.common import (
     DiagonalGaussianDistribution,
@@ -809,6 +812,158 @@ class AutoencoderKLWan(ParallelTiledVAE):
     """
 
     _supports_gradient_checkpointing = False
+    _aliases = ["WanS2VOfficialVAE"]
+
+    @staticmethod
+    def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:
+        if not path_value:
+            raise ValueError("Wan VAE config is missing a required path")
+        path_value = os.path.expanduser(path_value)
+        if os.path.isabs(path_value):
+            resolved = path_value
+        else:
+            resolved = os.path.join(component_model_path, path_value)
+        if not os.path.exists(resolved):
+            raise ValueError(f"Resolved path does not exist: {resolved}")
+        return resolved
+
+    @staticmethod
+    def _remap_official_state_key(key: str) -> str:
+        if key == "encoder.conv1.weight":
+            return "encoder.conv_in.weight"
+        if key == "encoder.conv1.bias":
+            return "encoder.conv_in.bias"
+        if key == "decoder.conv1.weight":
+            return "decoder.conv_in.weight"
+        if key == "decoder.conv1.bias":
+            return "decoder.conv_in.bias"
+        if key == "conv1.weight":
+            return "quant_conv.weight"
+        if key == "conv1.bias":
+            return "quant_conv.bias"
+        if key == "conv2.weight":
+            return "post_quant_conv.weight"
+        if key == "conv2.bias":
+            return "post_quant_conv.bias"
+
+        if key.startswith("encoder.downsamples."):
+            key = key.replace("encoder.downsamples.", "encoder.down_blocks.", 1)
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            key = key.replace(".shortcut.", ".conv_shortcut.")
+            return key
+
+        if key.startswith("encoder.middle.0."):
+            key = key.replace("encoder.middle.0.", "encoder.mid_block.resnets.0.", 1)
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            return key
+
+        if key.startswith("encoder.middle.1."):
+            return key.replace("encoder.middle.1.", "encoder.mid_block.attentions.0.", 1)
+
+        if key.startswith("encoder.middle.2."):
+            key = key.replace("encoder.middle.2.", "encoder.mid_block.resnets.1.", 1)
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            return key
+
+        if key.startswith("encoder.head.0.gamma"):
+            return key.replace("encoder.head.0.gamma", "encoder.norm_out.gamma", 1)
+        if key.startswith("encoder.head.2."):
+            return key.replace("encoder.head.2.", "encoder.conv_out.", 1)
+
+        if key.startswith("decoder.middle.0."):
+            key = key.replace("decoder.middle.0.", "decoder.mid_block.resnets.0.", 1)
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            return key
+
+        if key.startswith("decoder.middle.1."):
+            return key.replace("decoder.middle.1.", "decoder.mid_block.attentions.0.", 1)
+
+        if key.startswith("decoder.middle.2."):
+            key = key.replace("decoder.middle.2.", "decoder.mid_block.resnets.1.", 1)
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            return key
+
+        if key.startswith("decoder.upsamples."):
+            parts = key.split(".")
+            flat_idx = int(parts[2])
+            block_idx = flat_idx // 4
+            block_offset = flat_idx % 4
+            if block_idx == 3:
+                block_offset = flat_idx - 12
+            prefix = f"decoder.up_blocks.{block_idx}."
+            suffix = ".".join(parts[3:])
+            if block_idx < 3 and block_offset == 3:
+                return prefix + "upsamplers.0." + suffix
+            res_idx = block_offset
+            key = prefix + f"resnets.{res_idx}." + suffix
+            key = key.replace(".residual.0.gamma", ".norm1.gamma")
+            key = key.replace(".residual.2.", ".conv1.")
+            key = key.replace(".residual.3.gamma", ".norm2.gamma")
+            key = key.replace(".residual.6.", ".conv2.")
+            key = key.replace(".shortcut.", ".conv_shortcut.")
+            return key
+
+        if key.startswith("decoder.head.0.gamma"):
+            return key.replace("decoder.head.0.gamma", "decoder.norm_out.gamma", 1)
+        if key.startswith("decoder.head.2."):
+            return key.replace("decoder.head.2.", "decoder.conv_out.", 1)
+
+        return key
+
+    @classmethod
+    def from_component_path(
+        cls,
+        component_model_path: str,
+        server_args,
+        config: dict[str, Any],
+    ):
+        checkpoint_root = cls._resolve_existing_path(
+            component_model_path, config.get("wan_checkpoint_root")
+        )
+        vae_path = os.path.join(checkpoint_root, config.get("vae_checkpoint", "Wan2.1_VAE.pth"))
+
+        vae_config = server_args.pipeline_config.vae_config
+        vae_precision = server_args.pipeline_config.vae_precision
+        target_device = (
+            torch.device("cpu")
+            if bool(getattr(server_args, "vae_cpu_offload", False))
+            else get_local_torch_device()
+        )
+        target_dtype = {
+            "bf16": torch.bfloat16,
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+        }[vae_precision]
+        model = cls(vae_config).to(
+            device=target_device,
+            dtype=target_dtype,
+        )
+
+        official_state = torch.load(vae_path, map_location="cpu")
+        remapped_state = {
+            cls._remap_official_state_key(key): value
+            for key, value in official_state.items()
+        }
+        model.load_state_dict(remapped_state, strict=True)
+        # The official checkpoint is fp32. Force the fully-loaded module back to the
+        # requested runtime dtype so decode paths don't keep mixed fp32/bf16 params.
+        model = model.to(device=target_device, dtype=target_dtype)
+        return model.eval()
 
     def __init__(
         self,

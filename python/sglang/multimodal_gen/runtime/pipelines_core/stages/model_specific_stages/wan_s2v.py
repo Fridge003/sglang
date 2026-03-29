@@ -407,7 +407,16 @@ class WanS2VDecodingStage(PipelineStage):
         if hasattr(self.vae, "decode_video"):
             batch.output = self.vae.decode_video(decode_latents)
         else:
-            self.vae = self.vae.to(get_local_torch_device())
+            vae_dtype = torch.float32
+            if server_args.pipeline_config.vae_precision == "bf16":
+                vae_dtype = torch.bfloat16
+            elif server_args.pipeline_config.vae_precision == "fp16":
+                vae_dtype = torch.float16
+            self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
+            decode_latents = decode_latents.to(
+                device=get_local_torch_device(),
+                dtype=vae_dtype,
+            )
             batch.output = self.vae.decode(decode_latents)
         batch.output = batch.output[:, :, -extra["infer_frames"] :]
         if extra["drop_motion_frames"]:
