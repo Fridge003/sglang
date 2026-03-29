@@ -14,10 +14,12 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange
 
 from sglang.multimodal_gen.runtime.distributed import (
-    get_ring_parallel_world_size,
     get_sp_group,
     get_sp_world_size,
     sequence_model_parallel_all_gather,
+)
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_ring_parallel_world_size,
 )
 from sglang.multimodal_gen.runtime.layers.attention.layer import (
     USPAttention,
