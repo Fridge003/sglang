@@ -599,6 +599,12 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         self._debug_block_dump_call_idx = int(
             os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_CALL_IDX", "0")
         )
+        block_indexes = os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_INDEXES")
+        self._debug_block_dump_indexes = (
+            {int(index) for index in block_indexes.split(",")}
+            if block_indexes
+            else None
+        )
         self._forward_call_idx = 0
 
     def zero_init_weights(self):
@@ -776,7 +782,10 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
-            if dump_this_call:
+            if dump_this_call and (
+                self._debug_block_dump_indexes is None
+                or idx in self._debug_block_dump_indexes
+            ):
                 dump_x = x
                 if sequence_shard_enabled:
                     dump_video = dump_x[:, : self.local_original_seq_len].view(
