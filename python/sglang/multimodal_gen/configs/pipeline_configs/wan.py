@@ -285,6 +285,7 @@ class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
         default_factory=WanS2VAudioEncoderConfig
     )
     audio_encoder_precision: str = "fp32"
+    vae_precision: str = "bf16"
     flow_shift: float | None = 3.0
     task_type: ModelTaskType = ModelTaskType.S2V
     vae_stride = (4, 8, 8)
