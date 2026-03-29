@@ -1078,6 +1078,26 @@ class AutoencoderKLWan(ParallelTiledVAE):
 
         return enc
 
+    def encode_video(self, x: torch.Tensor) -> torch.Tensor:
+        self.clear_cache()
+        if self.config.patch_size is not None:
+            x = patchify(x, patch_size=self.config.patch_size)
+        with forward_context(
+            feat_cache_arg=self._enc_feat_map, feat_idx_arg=self._enc_conv_idx
+        ):
+            t = x.shape[2]
+            iter_ = 1 + (t - 1) // 4
+            for i in range(iter_):
+                feat_idx.set(0)
+                if i == 0:
+                    out = self.encoder(x[:, :, :1, :, :])
+                else:
+                    out_ = self.encoder(x[:, :, 1 + 4 * (i - 1) : 1 + 4 * i, :, :])
+                    out = torch.cat([out, out_], 2)
+        enc = self.quant_conv(out)
+        self.clear_cache()
+        return enc[:, : self.z_dim]
+
     def _encode(self, x: torch.Tensor, first_frame=False) -> torch.Tensor:
         with forward_context(first_frame_arg=first_frame):
             out = self.encoder(x)
