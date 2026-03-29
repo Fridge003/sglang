@@ -812,7 +812,6 @@ class AutoencoderKLWan(ParallelTiledVAE):
     """
 
     _supports_gradient_checkpointing = False
-    _aliases = ["WanS2VOfficialVAE"]
 
     @staticmethod
     def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:

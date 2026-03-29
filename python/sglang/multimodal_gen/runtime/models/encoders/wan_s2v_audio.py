@@ -61,8 +61,6 @@ def linear_interpolation(
 
 
 class WanS2VAudioEncoder(AudioEncoder):
-    _aliases = ["WanS2VOfficialAudioEncoder"]
-
     def __init__(
         self,
         config: WanS2VAudioEncoderConfig,

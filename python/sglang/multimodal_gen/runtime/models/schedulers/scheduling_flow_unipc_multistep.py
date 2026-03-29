@@ -78,7 +78,6 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
     """
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
-    _aliases = ["WanS2VOfficialScheduler"]
     order = 1
 
     @classmethod

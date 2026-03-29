@@ -676,8 +676,6 @@ class T5EncoderModel(TextEncoder):
 
 
 class UMT5EncoderModel(TextEncoder):
-    _aliases = ["WanS2VOfficialTextEncoder"]
-
     def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__(config)
 
