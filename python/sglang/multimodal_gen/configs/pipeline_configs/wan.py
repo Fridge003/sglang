@@ -331,6 +331,9 @@ class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
     def __post_init__(self) -> None:
         self.vae_config.load_encoder = True
         self.vae_config.load_decoder = True
+        self.vae_config.use_feature_cache = False
+        self.vae_config.use_parallel_encode = False
+        self.vae_config.use_parallel_decode = False
 
 
 # =============================================
