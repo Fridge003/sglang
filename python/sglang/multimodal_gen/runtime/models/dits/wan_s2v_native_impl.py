@@ -56,7 +56,7 @@ def rope_apply(x, grid_sizes, freqs):
         x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
         x_i = torch.cat([x_i, x[i, seq_len:]])
         output.append(x_i)
-    return torch.stack(output).float()
+    return torch.stack(output).to(dtype=x.dtype)
 
 
 @amp.autocast(enabled=False)
@@ -115,7 +115,10 @@ class WanRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        return x.float() * torch.rsqrt(x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps).type_as(x) * self.weight
+        out = x.float() * torch.rsqrt(
+            x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
+        )
+        return out.to(dtype=x.dtype) * self.weight.to(dtype=x.dtype)
 
 
 class WanLayerNorm(nn.LayerNorm):
