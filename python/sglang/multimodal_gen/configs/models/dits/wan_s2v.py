@@ -18,33 +18,33 @@ class WanS2VArchConfig(WanVideoArchConfig):
     out_channels: int = 16
     text_dim: int = 4096
     freq_dim: int = 256
-    hidden_size: int = 2048
-    num_attention_heads: int = 16
+    hidden_size: int = 5120
+    num_attention_heads: int = 40
     attention_head_dim: int = 128
-    ffn_dim: int = 8192
-    num_layers: int = 32
+    ffn_dim: int = 13824
+    num_layers: int = 40
     cross_attn_norm: bool = True
-    qk_norm: str = "rms_norm_across_heads"
+    qk_norm: bool = True
     eps: float = 1e-6
 
     # S2V-specific conditioning controls from the official implementation.
     cond_dim: int = 16
-    audio_dim: int = 5120
+    audio_dim: int = 1024
     num_audio_token: int = 4
-    enable_adain: bool = False
+    enable_adain: bool = True
     adain_mode: str = "attn_norm"
     audio_inject_layers: list[int] = field(
-        default_factory=lambda: [0, 4, 8, 12, 16, 20, 24, 27]
+        default_factory=lambda: [0, 4, 8, 12, 16, 20, 24, 27, 30, 33, 36, 39]
     )
-    zero_init: bool = False
-    zero_timestep: bool = False
+    zero_init: bool = True
+    zero_timestep: bool = True
     enable_motioner: bool = False
     add_last_motion: bool = True
     enable_tsm: bool = False
     trainable_token_pos_emb: bool = False
     motion_token_num: int = 1024
-    enable_framepack: bool = False
-    framepack_drop_mode: str = "drop"
+    enable_framepack: bool = True
+    framepack_drop_mode: str = "padd"
     model_type: str = "s2v"
 
     def __post_init__(self) -> None:
