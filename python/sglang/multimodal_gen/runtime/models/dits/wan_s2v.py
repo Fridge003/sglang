@@ -9,11 +9,13 @@ import numpy as np
 import torch
 from PIL import Image
 
+from sglang.multimodal_gen.configs.models.dits import WanS2VConfig
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.models.dits.wan_s2v_native_impl import (
     WanModelS2V,
     set_flash_attention_impl,
 )
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -28,6 +30,12 @@ _WAN_S2V_SAMPLE_NEG_PROMPT = (
 class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
     _aliases = ["WanS2VTransformer3DModel"]
     _sdpa_warned_padding_mask = False
+    _fsdp_shard_conditions = WanS2VConfig()._fsdp_shard_conditions
+    _compile_conditions = WanS2VConfig()._compile_conditions
+    _supported_attention_backends = WanS2VConfig()._supported_attention_backends
+    param_names_mapping = WanS2VConfig().param_names_mapping
+    reverse_param_names_mapping = WanS2VConfig().reverse_param_names_mapping
+    lora_param_names_mapping = WanS2VConfig().lora_param_names_mapping
     layer_names = ["blocks"]
 
     def __init__(
@@ -226,16 +234,18 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         return x.unflatten(0, (b, lq)).type(out_dtype)
 
     @classmethod
-    def _patch_attention_backend(cls, backend: str):
-        if backend not in {"auto", "flash", "sdpa"}:
-            raise ValueError(f"Unsupported Wan attention backend: {backend}")
-
-        if backend == "flash":
+    def _patch_attention_backend(cls, backend: AttentionBackendEnum):
+        if backend == AttentionBackendEnum.FA:
             set_flash_attention_impl(cls._compatible_flash_attention)
             logger.info("Using native Wan S2V flash attention backend (compat)")
             return
 
-        if backend == "auto":
+        if backend == AttentionBackendEnum.TORCH_SDPA:
+            logger.info("Patching native Wan S2V attention backend to SDPA fallback")
+            set_flash_attention_impl(cls._sdpa_flash_attention)
+            return
+
+        if backend == AttentionBackendEnum.NO_ATTENTION:
             try:
                 has_fa2 = (
                     getattr(
@@ -262,22 +272,44 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
                 set_flash_attention_impl(cls._compatible_flash_attention)
                 logger.info("Using native Wan S2V flash attention backend (auto compat)")
                 return
-            backend = "sdpa"
+            backend = AttentionBackendEnum.TORCH_SDPA
 
+        if backend != AttentionBackendEnum.TORCH_SDPA:
+            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
         logger.info("Patching native Wan S2V attention backend to SDPA fallback")
         set_flash_attention_impl(cls._sdpa_flash_attention)
 
     @classmethod
-    def _resolve_attention_backend(cls, server_args, config: dict[str, Any]) -> str:
+    def _resolve_attention_backend(
+        cls, server_args, config: dict[str, Any]
+    ) -> AttentionBackendEnum:
         backend = getattr(server_args, "attention_backend", None)
-        if backend is None:
-            return str(config.get("attention_backend", "auto")).lower()
-        backend = str(backend).lower()
-        if backend in {"torch_sdpa", "sdpa"}:
-            return "sdpa"
-        if backend in {"fa", "flash", "flashattention", "flash_attention"}:
-            return "flash"
-        return backend
+        backend = str(config.get("attention_backend", "auto") if backend is None else backend).lower()
+
+        # Keep the resolver aligned with WanTransformer3DModel: normalize the
+        # public CLI/backend names first, then validate against the model's
+        # supported backend set.
+        backend_aliases = {
+            "auto": AttentionBackendEnum.NO_ATTENTION,
+            "fa": AttentionBackendEnum.FA,
+            "fa2": AttentionBackendEnum.FA,
+            "flash": AttentionBackendEnum.FA,
+            "flashattention": AttentionBackendEnum.FA,
+            "flash_attention": AttentionBackendEnum.FA,
+            "torch_sdpa": AttentionBackendEnum.TORCH_SDPA,
+            "sdpa": AttentionBackendEnum.TORCH_SDPA,
+        }
+        backend_enum = backend_aliases.get(backend)
+        if backend_enum is None:
+            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
+        if (
+            backend_enum not in cls._supported_attention_backends
+            and backend_enum is not AttentionBackendEnum.NO_ATTENTION
+        ):
+            raise ValueError(
+                f"Wan S2V attention backend {backend_enum} is not supported"
+            )
+        return backend_enum
 
     @staticmethod
     def _build_runtime_config(config: dict[str, Any]) -> types.SimpleNamespace:
@@ -306,11 +338,12 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         )
 
         config = dict(config)
-        config["attention_backend"] = cls._resolve_attention_backend(
+        attention_backend = cls._resolve_attention_backend(
             server_args, config
         )
+        config["attention_backend"] = str(attention_backend)
         config_obj = cls._build_runtime_config(config)
-        cls._patch_attention_backend(config["attention_backend"])
+        cls._patch_attention_backend(attention_backend)
         local_device = get_local_torch_device()
         use_sp = (
             max(
