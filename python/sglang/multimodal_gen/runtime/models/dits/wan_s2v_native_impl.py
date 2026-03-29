@@ -14,15 +14,11 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange
 
 from sglang.multimodal_gen.runtime.distributed import (
-    get_ring_parallel_world_size,
     get_sp_group,
     get_sp_world_size,
     sequence_model_parallel_all_gather,
 )
-from sglang.multimodal_gen.runtime.layers.attention.layer import (
-    USPAttention,
-    UlyssesAttention,
-)
+from sglang.multimodal_gen.runtime.layers.attention.layer import USPAttention
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
@@ -159,12 +155,6 @@ class WanSelfAttention(nn.Module):
             supported_attention_backends=supported_attention_backends,
             skip_sequence_parallel=skip_sequence_parallel,
         )
-        self.ulysses_attn = UlyssesAttention(
-            num_heads=num_heads,
-            head_size=self.head_dim,
-            causal=False,
-            supported_attention_backends=supported_attention_backends,
-        )
 
     def forward(self, x, seq_lens, grid_sizes, freqs, num_replicated_suffix=0):
         del seq_lens
@@ -172,34 +162,12 @@ class WanSelfAttention(nn.Module):
         q = self.norm_q(self.q(x)).view(b, s, n, d)
         k = self.norm_k(self.k(x)).view(b, s, n, d)
         v = self.v(x).view(b, s, n, d)
-        q = rope_apply(q, grid_sizes, freqs)
-        k = rope_apply(k, grid_sizes, freqs)
-        if (
-            num_replicated_suffix > 0
-            and get_sp_world_size() > 1
-            and get_ring_parallel_world_size() == 1
-            and not self.attn.skip_sequence_parallel
-        ):
-            q_shard, q_rep = q[:, :-num_replicated_suffix], q[:, -num_replicated_suffix:]
-            k_shard, k_rep = k[:, :-num_replicated_suffix], k[:, -num_replicated_suffix:]
-            v_shard, v_rep = v[:, :-num_replicated_suffix], v[:, -num_replicated_suffix:]
-            x, x_rep = self.ulysses_attn(
-                q_shard,
-                k_shard,
-                v_shard,
-                replicated_q=q_rep,
-                replicated_k=k_rep,
-                replicated_v=v_rep,
-            )
-            assert x_rep is not None
-            x = torch.cat([x, x_rep], dim=1)
-        else:
-            x = self.attn(
-                q,
-                k,
-                v,
-                num_replicated_suffix=num_replicated_suffix,
-            )
+        x = self.attn(
+            rope_apply(q, grid_sizes, freqs),
+            rope_apply(k, grid_sizes, freqs),
+            v,
+            num_replicated_suffix=num_replicated_suffix,
+        )
         return self.o(x.flatten(2))
 
 
