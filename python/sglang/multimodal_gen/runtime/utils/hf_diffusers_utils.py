@@ -46,6 +46,10 @@ from sglang.multimodal_gen.runtime.loader.utils import _clean_hf_config_inplace
 from sglang.multimodal_gen.runtime.loader.weight_utils import get_lock
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.model_overlay import (
+    maybe_load_overlay_model_index,
+    maybe_resolve_overlay_model_path,
+)
 from sglang.srt.environ import envs
 from sglang.utils import is_in_ci
 
@@ -936,6 +940,14 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
 
     from huggingface_hub.errors import EntryNotFoundError
 
+    overlay_config = maybe_load_overlay_model_index(
+        model_name_or_path,
+        snapshot_download_fn=snapshot_download,
+        hf_hub_download_fn=hf_hub_download,
+    )
+    if overlay_config is not None:
+        return overlay_config
+
     # If it's a local path, verify it directly
     if os.path.exists(model_name_or_path):
         manifest = _load_overlay_manifest_if_present(model_name_or_path)
@@ -1040,6 +1052,19 @@ def maybe_download_model(
     Returns:
         Local path to the model
     """
+    if force_diffusers_model and not skip_overlay_resolution:
+        overlay_model_path = maybe_resolve_overlay_model_path(
+            model_name_or_path,
+            local_dir=local_dir,
+            download=download,
+            allow_patterns=allow_patterns,
+            snapshot_download_fn=snapshot_download,
+            hf_hub_download_fn=hf_hub_download,
+            verify_diffusers_model_complete_fn=_verify_diffusers_model_complete,
+            base_model_download_fn=maybe_download_model,
+        )
+        if overlay_model_path is not None:
+            return overlay_model_path
 
     overlay_spec = None
     if (
