@@ -73,7 +73,24 @@ class WanS2VOfficialTextEncoder(TextEncoder):
         return cls(config=T5Config(), helper=helper)
 
     def encode_prompt(self, prompt: str, device: torch.device) -> torch.Tensor:
-        return self.helper([prompt], device)[0]
+        prompt_embeds = self.helper([prompt], device)[0]
+        dump_dir = os.getenv("SGLANG_WAN_S2V_DEBUG_TEXT_DUMP_DIR")
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            ids, mask = self.helper.tokenizer(
+                [prompt], return_mask=True, add_special_tokens=True
+            )
+            torch.save(
+                {
+                    "source": "official",
+                    "prompt": prompt,
+                    "input_ids": ids.cpu(),
+                    "attention_mask": mask.cpu(),
+                    "prompt_embeds": prompt_embeds.detach().float().cpu(),
+                },
+                os.path.join(dump_dir, "official_text.pt"),
+            )
+        return prompt_embeds
 
     def forward(
         self,

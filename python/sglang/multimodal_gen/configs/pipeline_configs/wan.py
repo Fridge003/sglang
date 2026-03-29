@@ -272,6 +272,9 @@ class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
     text_encoder_configs: tuple[EncoderConfig, ...] = field(
         default_factory=lambda: (_make_wan_s2v_text_encoder_config(),)
     )
+    text_encoder_precisions: tuple[str, ...] = field(
+        default_factory=lambda: ("bf16",)
+    )
     preprocess_text_funcs: tuple[Callable[[str], str], ...] = field(
         default_factory=lambda: (_wan_whitespace_clean,)
     )

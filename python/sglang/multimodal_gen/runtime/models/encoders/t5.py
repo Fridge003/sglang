@@ -22,8 +22,10 @@
 """PyTorch T5 & UMT5 model."""
 
 import math
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -31,8 +33,8 @@ from torch import nn
 
 from sglang.multimodal_gen.configs.models.encoders import BaseEncoderOutput, T5Config
 from sglang.multimodal_gen.runtime.distributed import _get_folding_tp_group
+from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.activation import get_act_fn
-from sglang.multimodal_gen.runtime.layers.layernorm import RMSNorm
 from sglang.multimodal_gen.runtime.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -44,8 +46,10 @@ from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from sglang.multimodal_gen.runtime.loader.weight_utils import default_weight_loader
+from sglang.multimodal_gen.runtime.loader.weight_utils import pt_weights_iterator
 from sglang.multimodal_gen.runtime.models.encoders.base import TextEncoder
 from sglang.multimodal_gen.runtime.platforms import current_platform
+from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
 
 class AttentionType:
@@ -67,6 +71,21 @@ class AttentionType:
 @dataclass
 class AttentionMetadata:
     attn_bias: torch.Tensor
+
+
+class T5LayerNorm(nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.eps = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states * torch.rsqrt(
+            hidden_states.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
+        )
+        if self.weight.dtype in (torch.float16, torch.bfloat16):
+            hidden_states = hidden_states.to(self.weight.dtype)
+        return self.weight * hidden_states
 
 
 class T5DenseActDense(nn.Module):
@@ -148,7 +167,7 @@ class T5LayerFF(nn.Module):
         else:
             self.DenseReluDense = T5DenseActDense(config, quant_config=quant_config)
 
-        self.layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(self, hidden_states) -> torch.Tensor:
         forwarded_states = self.layer_norm(hidden_states)
@@ -392,7 +411,7 @@ class T5LayerSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.SelfAttention",
         )
-        self.layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -426,7 +445,7 @@ class T5LayerCrossAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.EncDecAttention",
         )
-        self.layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -544,7 +563,9 @@ class T5Stack(nn.Module):
                     for i in range(n_layers)
                 ]
             )
-        self.final_layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.final_layer_norm = T5LayerNorm(
+            config.d_model, eps=config.layer_norm_epsilon
+        )
 
     def forward(
         self,
@@ -655,6 +676,7 @@ class T5EncoderModel(TextEncoder):
 
 
 class UMT5EncoderModel(TextEncoder):
+    _aliases = ["WanS2VOfficialTextEncoder"]
 
     def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__(config)
@@ -677,6 +699,63 @@ class UMT5EncoderModel(TextEncoder):
             prefix=f"{prefix}.encoder",
             is_umt5=True,
         )
+
+    @staticmethod
+    def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:
+        if not path_value:
+            raise ValueError(
+                "UMT5EncoderModel config is missing a required Wan checkpoint path"
+            )
+        path_value = os.path.expanduser(path_value)
+        if os.path.isabs(path_value):
+            resolved = path_value
+        else:
+            resolved = os.path.join(component_model_path, path_value)
+        if not os.path.exists(resolved):
+            raise ValueError(f"Resolved path does not exist: {resolved}")
+        return resolved
+
+    @classmethod
+    def from_component_path(
+        cls,
+        component_model_path: str,
+        server_args,
+        config: dict[str, Any],
+    ):
+        checkpoint_root = cls._resolve_existing_path(
+            component_model_path, config.get("wan_checkpoint_root")
+        )
+        weights_path = os.path.join(
+            checkpoint_root, "models_t5_umt5-xxl-enc-bf16.pth"
+        )
+        if not os.path.exists(weights_path):
+            raise ValueError(f"UMT5 checkpoint not found: {weights_path}")
+
+        encoder_config = server_args.pipeline_config.text_encoder_configs[0]
+        model = cls(encoder_config)
+        loaded_weights = model.load_weights(
+            pt_weights_iterator(
+                [weights_path],
+                to_cpu=bool(server_args.text_encoder_cpu_offload),
+            )
+        )
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        missing_weights = weights_to_load - loaded_weights
+        if missing_weights:
+            raise ValueError(
+                "Following UMT5 weights were not initialized from checkpoint: "
+                f"{sorted(missing_weights)}"
+            )
+
+        target_device = (
+            torch.device("cpu")
+            if bool(server_args.text_encoder_cpu_offload)
+            else get_local_torch_device()
+        )
+        target_dtype = PRECISION_TO_TYPE[
+            server_args.pipeline_config.text_encoder_precisions[0]
+        ]
+        return model.to(device=target_device, dtype=target_dtype)
 
     def get_input_embeddings(self):
         return self.shared

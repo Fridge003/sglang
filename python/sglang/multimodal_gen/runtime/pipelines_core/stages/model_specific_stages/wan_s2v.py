@@ -103,6 +103,23 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         )
         prompt_embeds = postprocess_func(outputs, text_inputs)
         attention_mask = text_inputs.get("attention_mask")
+        dump_dir = os.getenv("SGLANG_WAN_S2V_DEBUG_TEXT_DUMP_DIR")
+        if dump_dir:
+            os.makedirs(dump_dir, exist_ok=True)
+            torch.save(
+                {
+                    "source": "native",
+                    "prompt": processed_prompt,
+                    "input_ids": text_inputs["input_ids"].detach().cpu(),
+                    "attention_mask": (
+                        attention_mask.detach().cpu()
+                        if attention_mask is not None
+                        else None
+                    ),
+                    "prompt_embeds": prompt_embeds.detach().float().cpu(),
+                },
+                os.path.join(dump_dir, "native_text.pt"),
+            )
         if (
             attention_mask is not None
             and prompt_embeds.ndim == 3

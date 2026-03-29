@@ -9,6 +9,7 @@ information based on model paths or other identifiers.
 
 import dataclasses
 import importlib
+import os
 import pkgutil
 import sys
 from functools import lru_cache

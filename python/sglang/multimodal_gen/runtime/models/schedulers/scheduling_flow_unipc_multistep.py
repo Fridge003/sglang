@@ -566,10 +566,13 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         x = last_sample
         x_t = this_sample
         model_t = this_model_output
+        m0 = m0.to(device=this_sample.device)
+        model_t = model_t.to(device=this_sample.device)
 
+        sigmas = self.sigmas.to(device=this_sample.device)
         sigma_t, sigma_s0 = (
-            self.sigmas[self.step_index],
-            self.sigmas[self.step_index - 1],
+            sigmas[self.step_index],
+            sigmas[self.step_index - 1],
         )  # pyright: ignore
         alpha_t, sigma_t = self._sigma_to_alpha_sigma_t(sigma_t)
         alpha_s0, sigma_s0 = self._sigma_to_alpha_sigma_t(sigma_s0)
@@ -589,7 +592,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             # order == 2 -> only one historical point is used
             si = self.step_index - 2  # i = 1
             mi = model_output_list[-2]
-            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si])
+            alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(sigmas[si])
             lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
             rk = (lambda_si - lambda_s0) / h  # 0-dim tensor on device
             # rks = [rk, 1.0] but keep it on device without list->tensor sync
@@ -603,7 +606,7 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
             for i in range(1, order):
                 si = self.step_index - (i + 1)
                 mi = model_output_list[-(i + 1)]
-                alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(self.sigmas[si])
+                alpha_si, sigma_si = self._sigma_to_alpha_sigma_t(sigmas[si])
                 lambda_si = torch.log(alpha_si) - torch.log(sigma_si)
                 rk = (lambda_si - lambda_s0) / h
                 rks_list.append(rk)
@@ -662,7 +665,9 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         if self.predict_x0:
             x_t_ = sigma_t / sigma_s0 * x - alpha_t * h_phi_1 * m0
             if D1s is not None:
-                corr_res = torch.einsum("k,bkc...->bc...", rhos_c[:-1], D1s)
+                corr_res = torch.einsum(
+                    "k,bkc...->bc...", rhos_c[:-1].to(device), D1s.to(device)
+                )
             else:
                 corr_res = 0
             D1_t = model_t - m0
@@ -670,7 +675,9 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
         else:
             x_t_ = alpha_t / alpha_s0 * x - sigma_t * h_phi_1 * m0
             if D1s is not None:
-                corr_res = torch.einsum("k,bkc...->bc...", rhos_c[:-1], D1s)
+                corr_res = torch.einsum(
+                    "k,bkc...->bc...", rhos_c[:-1].to(device), D1s.to(device)
+                )
             else:
                 corr_res = 0
             D1_t = model_t - m0
