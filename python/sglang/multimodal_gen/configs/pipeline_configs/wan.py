@@ -175,7 +175,9 @@ class WanI2V480PConfig(WanT2V480PConfig, WanI2VCommonConfig):
     def __post_init__(self) -> None:
         self.vae_config.load_encoder = True
         self.vae_config.load_decoder = True
-        self.vae_config.use_feature_cache = False
+        # Official Wan S2V VAE encode/decode uses temporal cache with 1,4,4... chunks.
+        # Keeping this on avoids the huge full-video conv path for motion latents.
+        self.vae_config.use_feature_cache = True
         self.vae_config.use_parallel_encode = False
         self.vae_config.use_parallel_decode = False
         self.vae_config.use_feature_cache = False
