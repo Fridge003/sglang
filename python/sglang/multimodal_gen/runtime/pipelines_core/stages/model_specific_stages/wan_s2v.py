@@ -331,7 +331,7 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
 
 
 class WanS2VDecodingStage(PipelineStage):
-    """Decode Wan S2V latents using the official Wan VAE."""
+    """Decode Wan S2V latents."""
 
     def __init__(self, vae):
         super().__init__()
@@ -382,10 +382,7 @@ class WanS2VDecodingStage(PipelineStage):
             device=batch.latents.device,
             dtype=batch.latents.dtype,
         )
-        if extra["drop_motion_frames"]:
-            decode_latents = torch.cat([prefix_latents, batch.latents], dim=2)
-        else:
-            decode_latents = torch.cat([prefix_latents, batch.latents], dim=2)
+        decode_latents = torch.cat([prefix_latents, batch.latents], dim=2)
         decode_latents = self._scale_and_shift(decode_latents, server_args)
         if hasattr(self.vae, "decode_video"):
             batch.output = self.vae.decode_video(decode_latents)
