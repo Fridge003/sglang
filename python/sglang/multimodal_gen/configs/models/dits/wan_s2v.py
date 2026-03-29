@@ -38,7 +38,7 @@ class WanS2VArchConfig(WanVideoArchConfig):
     )
     zero_init: bool = False
     zero_timestep: bool = False
-    enable_motioner: bool = True
+    enable_motioner: bool = False
     add_last_motion: bool = True
     enable_tsm: bool = False
     trainable_token_pos_emb: bool = False
