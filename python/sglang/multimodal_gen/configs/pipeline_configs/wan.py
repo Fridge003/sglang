@@ -48,7 +48,7 @@ def _make_wan_s2v_text_encoder_config() -> T5Config:
     config = T5Config()
     arch = config.arch_config
     arch.vocab_size = 256384
-    arch.architectures = ["WanS2VOfficialTextEncoder"]
+    arch.architectures = ["UMT5EncoderModel"]
     arch.d_model = 4096
     arch.hidden_size = 4096
     arch.d_kv = 64

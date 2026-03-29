@@ -9,9 +9,7 @@ from sglang.multimodal_gen.configs.models.encoders.base import (
 
 @dataclass
 class WanS2VAudioEncoderArchConfig(AudioEncoderArchConfig):
-    architectures: list[str] = field(
-        default_factory=lambda: ["WanS2VOfficialAudioEncoder"]
-    )
+    architectures: list[str] = field(default_factory=lambda: ["WanS2VAudioEncoder"])
     model_id: str = "wav2vec2-large-xlsr-53-english"
     sample_rate: int = 16000
     video_rate: int = 30
