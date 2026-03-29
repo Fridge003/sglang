@@ -1350,7 +1350,6 @@ class WanS2VTransformer3DModel(WanModelS2V, OffloadableDiTMixin):
             cross_attn_norm=arch.cross_attn_norm,
             eps=arch.eps,
         )
-        self.config = hf_config
         self.hf_config = hf_config
         self.param_dtype = next(self.parameters()).dtype
         self.num_train_timesteps = int(hf_config.get("num_train_timesteps", 1000))
@@ -1425,7 +1424,7 @@ class WanS2VTransformer3DModel(WanModelS2V, OffloadableDiTMixin):
         return self.get_size_less_than_area(
             int(height),
             int(width),
-            target_area=int(self.config.get("max_area", 720 * 1280)),
+            target_area=int(self.hf_config.get("max_area", 720 * 1280)),
         )
 
     def prepare_standard_s2v_latents(
