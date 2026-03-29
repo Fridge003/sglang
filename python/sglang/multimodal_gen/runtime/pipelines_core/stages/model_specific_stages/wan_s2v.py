@@ -158,9 +158,17 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             vae_dtype = torch.bfloat16
         elif server_args.pipeline_config.vae_precision == "fp16":
             vae_dtype = torch.float16
+        self.log_info(
+            "vae encode setup: dtype=%s use_parallel_encode=%s",
+            vae_dtype,
+            getattr(self.vae, "use_parallel_encode", None),
+        )
+        self.log_info("moving vae for encode")
         self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
         video = video.to(device=get_local_torch_device(), dtype=vae_dtype)
+        self.log_info("running vae.encode")
         latent_dist = self.vae.encode(video)
+        self.log_info("finished vae.encode")
         latents = self._retrieve_latents(latent_dist)
         latents = server_args.pipeline_config.postprocess_vae_encode(latents, self.vae)
         scaling_factor, shift_factor = (
