@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import os
 from copy import deepcopy
 from typing import Any
 
@@ -20,7 +19,6 @@ from sglang.multimodal_gen.configs.models.dits.wan_s2v import (
     WAN_S2V_SAMPLE_NEG_PROMPT,
 )
 from sglang.multimodal_gen.runtime.distributed import (
-    get_local_torch_device,
     get_sp_group,
     get_sp_world_size,
     sequence_model_parallel_all_gather,
@@ -1303,7 +1301,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         nn.init.zeros_(self.head.head.weight)
 
 
-class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
+class WanS2VTransformer3DModel(WanModelS2V, OffloadableDiTMixin):
     _aliases = ["WanS2VTransformer3DModel"]
     _fsdp_shard_conditions = WanS2VConfig()._fsdp_shard_conditions
     _compile_conditions = WanS2VConfig()._compile_conditions
@@ -1315,112 +1313,58 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
 
     def __init__(
         self,
-        noise_model: torch.nn.Module,
-        *,
-        config: dict[str, Any],
-        device: torch.device,
-        param_dtype: torch.dtype,
-        num_train_timesteps: int,
-        sample_neg_prompt: str,
-        drop_first_motion: bool,
-        sample_fps: int,
-        motion_frames: int,
+        config: WanS2VConfig,
+        hf_config: dict[str, Any],
+        quant_config=None,
     ) -> None:
-        super().__init__()
-        self.noise_model = noise_model
-        self.blocks = getattr(noise_model, "blocks", None)
-        self.config = config
-        self.device_ = device
-        self.param_dtype = param_dtype
-        self.num_train_timesteps = int(num_train_timesteps)
-        self.sample_neg_prompt = sample_neg_prompt
-        self.motion_frames = int(motion_frames)
-        self.drop_first_motion = bool(drop_first_motion)
-        self.fps = int(sample_fps)
+        del quant_config
+        arch = config.arch_config
+        super().__init__(
+            cond_dim=arch.cond_dim,
+            audio_dim=arch.audio_dim,
+            num_audio_token=arch.num_audio_token,
+            enable_adain=arch.enable_adain,
+            adain_mode=arch.adain_mode,
+            audio_inject_layers=tuple(arch.audio_inject_layers),
+            zero_init=arch.zero_init,
+            zero_timestep=arch.zero_timestep,
+            enable_motioner=arch.enable_motioner,
+            add_last_motion=arch.add_last_motion,
+            enable_tsm=arch.enable_tsm,
+            trainable_token_pos_emb=arch.trainable_token_pos_emb,
+            motion_token_num=arch.motion_token_num,
+            enable_framepack=arch.enable_framepack,
+            framepack_drop_mode=arch.framepack_drop_mode,
+            model_type=arch.model_type,
+            patch_size=arch.patch_size,
+            text_len=arch.text_len,
+            in_dim=arch.in_channels,
+            dim=arch.hidden_size,
+            ffn_dim=arch.ffn_dim,
+            freq_dim=arch.freq_dim,
+            text_dim=arch.text_dim,
+            out_dim=arch.out_channels,
+            num_heads=arch.num_attention_heads,
+            num_layers=arch.num_layers,
+            qk_norm=arch.qk_norm,
+            cross_attn_norm=arch.cross_attn_norm,
+            eps=arch.eps,
+        )
+        self.config = hf_config
+        self.hf_config = hf_config
+        self.param_dtype = next(self.parameters()).dtype
+        self.num_train_timesteps = int(hf_config.get("num_train_timesteps", 1000))
+        self.sample_neg_prompt = str(
+            hf_config.get("sample_neg_prompt", config.sample_neg_prompt)
+        )
+        self.motion_frames = int(hf_config.get("motion_frames", 73))
+        self.drop_first_motion = bool(hf_config.get("drop_first_motion", True))
+        self.fps = int(hf_config.get("sample_fps", 16))
         self.audio_sample_m = 0
         self.supports_standard_denoising = True
 
-    @property
-    def device(self):
-        return self.device_
-
-    @classmethod
-    def from_component_path(
-        cls,
-        component_model_path: str,
-        server_args,
-        config: dict[str, Any],
-    ):
-        config = dict(config)
-        checkpoint_root = os.path.expanduser(
-            config.get("wan_checkpoint_root", "checkpoints")
-        )
-        if not os.path.isabs(checkpoint_root):
-            checkpoint_root = os.path.join(component_model_path, checkpoint_root)
-        if not os.path.exists(checkpoint_root):
-            raise ValueError(f"Resolved path does not exist: {checkpoint_root}")
-
-        backend = getattr(server_args, "attention_backend", None)
-        backend = str(
-            config.get("attention_backend", "auto") if backend is None else backend
-        ).lower()
-        attention_backend = {
-            "auto": AttentionBackendEnum.NO_ATTENTION,
-            "fa": AttentionBackendEnum.FA,
-            "fa2": AttentionBackendEnum.FA,
-            "flash": AttentionBackendEnum.FA,
-            "flashattention": AttentionBackendEnum.FA,
-            "flash_attention": AttentionBackendEnum.FA,
-            "torch_sdpa": AttentionBackendEnum.TORCH_SDPA,
-            "sdpa": AttentionBackendEnum.TORCH_SDPA,
-        }.get(backend)
-        if attention_backend is None:
-            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
-        if (
-            attention_backend not in cls._supported_attention_backends
-            and attention_backend is not AttentionBackendEnum.NO_ATTENTION
-        ):
-            raise ValueError(
-                f"Wan S2V attention backend {attention_backend} is not supported"
-            )
-        config["attention_backend"] = str(attention_backend)
-
-        param_dtype = torch.bfloat16
-        num_train_timesteps = int(config.get("num_train_timesteps", 1000))
-        sample_neg_prompt = str(
-            config.get("sample_neg_prompt", WAN_S2V_SAMPLE_NEG_PROMPT)
-        )
-        drop_first_motion = bool(config.get("drop_first_motion", True))
-        sample_fps = int(config.get("sample_fps", 16))
-        motion_frames = int(config.get("motion_frames", 73))
-        local_device = get_local_torch_device()
-        logger.info(
-            "Creating native WanModelS2V directly from %s",
-            checkpoint_root,
-        )
-        noise_model = WanModelS2V.from_pretrained(
-            checkpoint_root,
-            torch_dtype=param_dtype,
-            device_map=local_device,
-        )
-        noise_model.eval().requires_grad_(False)
-
-        if bool(config.get("convert_model_dtype", False)):
-            noise_model.to(param_dtype)
-        if not bool(config.get("init_on_cpu", True)):
-            noise_model.to(local_device)
-
-        return cls(
-            noise_model=noise_model,
-            config=config,
-            device=local_device,
-            param_dtype=param_dtype,
-            num_train_timesteps=num_train_timesteps,
-            sample_neg_prompt=sample_neg_prompt,
-            drop_first_motion=drop_first_motion,
-            sample_fps=sample_fps,
-            motion_frames=motion_frames,
-        )
+    def post_load_weights(self) -> None:
+        return None
 
     def get_default_negative_prompt(self) -> str:
         return self.sample_neg_prompt
@@ -1556,7 +1500,7 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             ]
         if add_last_motion is None:
             add_last_motion = 2
-        output = self.noise_model(
+        output = super().forward(
             hidden_states,
             t=timestep,
             context=context,
