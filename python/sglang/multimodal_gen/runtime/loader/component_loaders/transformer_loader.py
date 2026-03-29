@@ -70,7 +70,7 @@ class TransformerLoader(ComponentLoader):
             )
 
         # 3. quant config
-        safetensors_list = self.get_list_of_safetensors_to_load(
+        safetensors_list = resolve_transformer_safetensors_to_load(
             server_args, component_model_path
         )
         quant_config = self._resolve_quant_config(
