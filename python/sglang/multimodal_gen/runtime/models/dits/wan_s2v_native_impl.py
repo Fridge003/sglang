@@ -156,7 +156,7 @@ class WanSelfAttention(nn.Module):
             skip_sequence_parallel=skip_sequence_parallel,
         )
 
-    def forward(self, x, seq_lens, grid_sizes, freqs):
+    def forward(self, x, seq_lens, grid_sizes, freqs, num_replicated_suffix=0):
         del seq_lens
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         q = self.norm_q(self.q(x)).view(b, s, n, d)
@@ -166,6 +166,7 @@ class WanSelfAttention(nn.Module):
             rope_apply(q, grid_sizes, freqs),
             rope_apply(k, grid_sizes, freqs),
             v,
+            num_replicated_suffix=num_replicated_suffix,
         )
         return self.o(x.flatten(2))
 
@@ -235,10 +236,26 @@ class WanAttentionBlock(nn.Module):
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'), nn.Linear(ffn_dim, dim))
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
-    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+    def forward(
+        self,
+        x,
+        e,
+        seq_lens,
+        grid_sizes,
+        freqs,
+        context,
+        context_lens,
+        num_replicated_suffix=0,
+    ):
         with torch.amp.autocast('cuda', dtype=torch.float32):
             e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
-        y = self.self_attn(self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2), seq_lens, grid_sizes, freqs)
+        y = self.self_attn(
+            self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
+            seq_lens,
+            grid_sizes,
+            freqs,
+            num_replicated_suffix=num_replicated_suffix,
+        )
         with torch.amp.autocast('cuda', dtype=torch.float32):
             x = x + y * e[2].squeeze(2)
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
@@ -467,7 +484,17 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             supported_attention_backends=supported_attention_backends,
         )
 
-    def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
+    def forward(
+        self,
+        x,
+        e,
+        seq_lens,
+        grid_sizes,
+        freqs,
+        context,
+        context_lens,
+        num_replicated_suffix=0,
+    ):
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
@@ -476,7 +503,13 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         e = [element.squeeze(1) for element in e]
         norm_x = self.norm1(x).float()
         norm_x = torch.cat([norm_x[:, seg_idx[i]:seg_idx[i+1]] * (1 + e[1][:, i:i+1]) + e[0][:, i:i+1] for i in range(2)], dim=1)
-        y = self.self_attn(norm_x, seq_lens, grid_sizes, freqs)
+        y = self.self_attn(
+            norm_x,
+            seq_lens,
+            grid_sizes,
+            freqs,
+            num_replicated_suffix=num_replicated_suffix,
+        )
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[2][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
@@ -589,7 +622,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             audio_attn_id = self.audio_injector.injected_block_id[block_idx]
             audio_emb = self.merged_audio_emb
             num_frames = audio_emb.shape[1]
-            input_hidden_states = hidden_states[:, : self.original_seq_len].clone()
+            input_hidden_states = hidden_states[:, : self.local_original_seq_len].clone()
             input_hidden_states = rearrange(input_hidden_states, 'b (t n) c -> (b t) n c', t=num_frames)
             if self.enbale_adain and self.adain_mode == 'attn_norm':
                 audio_emb_global = rearrange(self.audio_emb_global, 'b t n c -> (b t) n c')
@@ -599,7 +632,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             attn_audio_emb = rearrange(audio_emb, 'b t n c -> (b t) n c', t=num_frames)
             residual_out = self.audio_injector.injector[audio_attn_id](x=attn_hidden_states, context=attn_audio_emb, context_lens=torch.ones(attn_hidden_states.shape[0], dtype=torch.long, device=attn_hidden_states.device) * attn_audio_emb.shape[1])
             residual_out = rearrange(residual_out, '(b t) n c -> b (t n) c', t=num_frames)
-            hidden_states[:, : self.original_seq_len] = hidden_states[:, : self.original_seq_len] + residual_out
+            hidden_states[:, : self.local_original_seq_len] = hidden_states[:, : self.local_original_seq_len] + residual_out
         return hidden_states
 
     def forward(self, x, t, context, seq_len, ref_latents, motion_latents, cond_states, audio_input=None, motion_frames=(17, 5), add_last_motion=2, drop_motion_frames=False, *extra_args, **extra_kwargs):
@@ -648,24 +681,36 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         x = torch.cat(x, dim=0)
         self.pre_compute_freqs = torch.cat(self.pre_compute_freqs, dim=0)
         mask_input = torch.cat(mask_input, dim=0)
-        x = x + self.trainable_cond_mask(mask_input).to(x.dtype)
+        condition_suffix_len = x.shape[1] - self.original_seq_len
+        self.local_original_seq_len = self.original_seq_len
         seq_len_full = x.shape[1]
         seq_shard_pad = 0
         if sequence_shard_enabled:
-            if seq_len_full % self.sp_size != 0:
+            if self.original_seq_len % self.sp_size != 0:
                 raise ValueError(
-                    f"Wan S2V sequence length {seq_len_full} must be divisible by sp_size {self.sp_size}"
+                    f"Wan S2V video sequence length {self.original_seq_len} must be divisible by sp_size {self.sp_size}"
                 )
             sp_rank = get_sp_group().rank_in_group
-            local_seq_len = seq_len_full // self.sp_size
-            x = x.view(x.shape[0], self.sp_size, local_seq_len, x.shape[2])[:, sp_rank]
-            self.pre_compute_freqs = self.pre_compute_freqs.view(
-                self.pre_compute_freqs.shape[0],
-                self.sp_size,
-                local_seq_len,
-                self.pre_compute_freqs.shape[2],
-                self.pre_compute_freqs.shape[3],
-            )[:, sp_rank]
+            self.local_original_seq_len = self.original_seq_len // self.sp_size
+            video_slice = slice(
+                sp_rank * self.local_original_seq_len,
+                (sp_rank + 1) * self.local_original_seq_len,
+            )
+            x = torch.cat([x[:, video_slice], x[:, self.original_seq_len :]], dim=1)
+            self.pre_compute_freqs = torch.cat(
+                [
+                    self.pre_compute_freqs[:, video_slice],
+                    self.pre_compute_freqs[:, self.original_seq_len :],
+                ],
+                dim=1,
+            )
+            mask_input = torch.cat(
+                [mask_input[:, video_slice], mask_input[:, self.original_seq_len :]], dim=1
+            )
+            seq_lens = torch.full_like(
+                seq_lens, self.local_original_seq_len + condition_suffix_len
+            )
+        x = x + self.trainable_cond_mask(mask_input).to(x.dtype)
         if self.zero_timestep:
             t = torch.cat([t, torch.zeros([1], dtype=t.dtype, device=t.device)])
         with amp.autocast(dtype=torch.float32):
@@ -676,16 +721,27 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             zero_e0 = e0[-1:]
             e0 = e0[:-1]
             e0 = torch.cat([e0.unsqueeze(2), zero_e0.unsqueeze(2).repeat(e0.size(0), 1, 1, 1)], dim=2)
-            e0 = [e0, self.original_seq_len]
+            e0 = [e0, self.local_original_seq_len]
         else:
             e0 = [e0.unsqueeze(2).repeat(1, 1, 2, 1), 0]
         context = self.text_embedding(torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context]))
-        kwargs = dict(e=e0, seq_lens=seq_lens, grid_sizes=grid_sizes, freqs=self.pre_compute_freqs, context=context, context_lens=None)
+        kwargs = dict(
+            e=e0,
+            seq_lens=seq_lens,
+            grid_sizes=grid_sizes,
+            freqs=self.pre_compute_freqs,
+            context=context,
+            context_lens=None,
+            num_replicated_suffix=condition_suffix_len if sequence_shard_enabled else 0,
+        )
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
         if sequence_shard_enabled:
-            x = sequence_model_parallel_all_gather(x.contiguous(), dim=1)
+            x_video = sequence_model_parallel_all_gather(
+                x[:, : self.local_original_seq_len].contiguous(), dim=1
+            )
+            x = torch.cat([x_video, x[:, self.local_original_seq_len :]], dim=1)
             if seq_shard_pad > 0:
                 x = x[:, :seq_len_full]
         x = x[:, : self.original_seq_len]
