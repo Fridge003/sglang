@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import pathlib
 
 import numpy as np
 import torch
@@ -72,10 +73,16 @@ class WanS2VAudioEncoder(AudioEncoder):
         target_device: torch.device | str = "cpu",
     ) -> None:
         super().__init__(config)
-        self.component_model_path = component_model_path
-        self.processor = Wav2Vec2Processor.from_pretrained(component_model_path)
+        model_path = component_model_path
+        nested_model_path = (
+            pathlib.Path(component_model_path) / config.arch_config.model_id
+        )
+        if nested_model_path.exists():
+            model_path = str(nested_model_path)
+        self.component_model_path = model_path
+        self.processor = Wav2Vec2Processor.from_pretrained(model_path)
         self.model = Wav2Vec2ForCTC.from_pretrained(
-            component_model_path,
+            model_path,
             torch_dtype=torch_dtype,
         )
         self.model = self.model.to(target_device)
