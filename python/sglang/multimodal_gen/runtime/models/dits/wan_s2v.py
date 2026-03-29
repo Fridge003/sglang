@@ -1272,7 +1272,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         self,
         noise_model: torch.nn.Module,
         *,
-        component_model_path: str,
         config: dict[str, Any],
         device: torch.device,
         param_dtype: torch.dtype,
@@ -1285,7 +1284,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         super().__init__()
         self.noise_model = noise_model
         self.blocks = getattr(noise_model, "blocks", None)
-        self.component_model_path = component_model_path
         self.config = config
         self.device_ = device
         self.param_dtype = param_dtype
@@ -1369,7 +1367,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
 
         return cls(
             noise_model=noise_model,
-            component_model_path=component_model_path,
             config=config,
             device=local_device,
             param_dtype=param_dtype,
