@@ -46,6 +46,11 @@ class WanS2VArchConfig(WanVideoArchConfig):
     enable_framepack: bool = True
     framepack_drop_mode: str = "padd"
     model_type: str = "s2v"
+    param_names_mapping: dict = field(
+        default_factory=lambda: {
+            r"^patch_embedding\.proj\.(.*)$": r"patch_embedding.\1",
+        }
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
