@@ -156,19 +156,11 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             vae_dtype = torch.bfloat16
         elif server_args.pipeline_config.vae_precision == "fp16":
             vae_dtype = torch.float16
-        self.log_info(
-            "vae encode setup: dtype=%s use_parallel_encode=%s",
-            vae_dtype,
-            getattr(self.vae, "use_parallel_encode", None),
-        )
-        self.log_info("moving vae for encode")
         self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
         video = video.to(device=get_local_torch_device(), dtype=vae_dtype)
         if hasattr(self.vae, "encode_video"):
             return self.vae.encode_video(video)
-        self.log_info("running vae.encode")
         latent_dist = self.vae.encode(video)
-        self.log_info("finished vae.encode")
         latents = self._retrieve_latents(latent_dist)
         latents = server_args.pipeline_config.postprocess_vae_encode(latents, self.vae)
         scaling_factor, shift_factor = (
@@ -267,14 +259,12 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
                 "Wan S2V standard denoising path requested, but transformer does not support it"
             )
 
-        self.log_info("resolving input paths")
         image_path = self._get_single_path(batch.image_path, "image_path")
         audio_path = self._get_single_path(batch.audio_path, "audio_path")
         pose_video_path = batch.pose_video_path
         if pose_video_path is not None:
             pose_video_path = self._get_single_path(pose_video_path, "pose_video_path")
 
-        self.log_info("building random generator")
         self._generate_seed_and_generator(batch)
         if batch.num_clip not in (None, 1):
             raise NotImplementedError(
@@ -284,7 +274,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         infer_frames = self.transformer._normalize_infer_frames(batch.num_frames)
         height, width = self.transformer.get_generation_size(image_path=image_path)
 
-        self.log_info("encoding reference image")
         resize = transforms.Resize(min(height, width))
         crop = transforms.CenterCrop((height, width))
         to_tensor = transforms.ToTensor()
@@ -292,13 +281,11 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         ref_pixel_values = to_tensor(model_pic).unsqueeze(1).unsqueeze(0) * 2 - 1.0
         ref_latents = self._encode_video_to_latents(ref_pixel_values, server_args)
 
-        self.log_info("encoding motion latents")
         motion_frames = self.transformer.motion_frames
         motion_pixels = torch.zeros([1, 3, motion_frames, height, width])
         motion_latents = self._encode_video_to_latents(motion_pixels, server_args)
         lat_motion_frames = (motion_frames + 3) // 4
 
-        self.log_info("encoding audio")
         audio_input, max_num_repeat = self.audio_encoder.encode_audio(
             audio_path,
             infer_frames=infer_frames,
@@ -309,7 +296,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         if max_num_repeat < 1:
             raise ValueError(f"Audio path produced no valid clips: {audio_path}")
 
-        self.log_info("encoding pose condition")
         cond_states = self._load_pose_cond(
             pose_video_path,
             infer_frames=infer_frames,
@@ -321,16 +307,13 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         if not negative_prompt:
             negative_prompt = self.transformer.get_default_negative_prompt()
 
-        self.log_info("encoding prompt")
         prompt_embeds = self._encode_text_prompt(
             batch.prompt or "", server_args=server_args
         )
-        self.log_info("encoding negative prompt")
         negative_prompt_embeds = self._encode_text_prompt(
             negative_prompt, server_args=server_args
         )
 
-        self.log_info("preparing initial latents")
         lat_target_frames = (infer_frames + 3 + motion_frames) // 4 - lat_motion_frames
         latent_shape = (1, 16, lat_target_frames, height // 8, width // 8)
         latents = self.transformer.prepare_standard_s2v_latents(
@@ -368,7 +351,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             self.vae = self.vae.to("cpu")
         if getattr(server_args, "audio_encoder_cpu_offload", False):
             self.audio_encoder = self.audio_encoder.to("cpu")
-        self.log_info("prepared wan s2v batch extras")
         return batch
 
 
