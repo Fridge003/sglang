@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 import os
-import types
 from copy import deepcopy
 from typing import Any
 
@@ -17,6 +16,9 @@ from einops import rearrange
 from PIL import Image
 
 from sglang.multimodal_gen.configs.models.dits import WanS2VConfig
+from sglang.multimodal_gen.configs.models.dits.wan_s2v import (
+    WAN_S2V_SAMPLE_NEG_PROMPT,
+)
 from sglang.multimodal_gen.runtime.distributed import (
     get_local_torch_device,
     get_sp_group,
@@ -36,11 +38,6 @@ from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiT
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-_WAN_S2V_SAMPLE_NEG_PROMPT = (
-    "画面模糊，最差质量，画面模糊，细节模糊不清，情绪激动剧烈，手快速抖动，字幕，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
-)
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -1277,8 +1274,13 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         *,
         component_model_path: str,
         config: dict[str, Any],
-        config_obj: Any,
         device: torch.device,
+        param_dtype: torch.dtype,
+        num_train_timesteps: int,
+        sample_neg_prompt: str,
+        drop_first_motion: bool,
+        sample_fps: int,
+        motion_frames: int,
     ) -> None:
         super().__init__()
         self.noise_model = noise_model
@@ -1286,82 +1288,18 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         self.component_model_path = component_model_path
         self.config = config
         self.device_ = device
-        self.param_dtype = config_obj.param_dtype
-        self.num_train_timesteps = int(config_obj.num_train_timesteps)
-        self.sample_neg_prompt = config_obj.sample_neg_prompt
-        self.motion_frames = int(config_obj.transformer.motion_frames)
-        self.drop_first_motion = bool(config_obj.drop_first_motion)
-        self.fps = int(config_obj.sample_fps)
+        self.param_dtype = param_dtype
+        self.num_train_timesteps = int(num_train_timesteps)
+        self.sample_neg_prompt = sample_neg_prompt
+        self.motion_frames = int(motion_frames)
+        self.drop_first_motion = bool(drop_first_motion)
+        self.fps = int(sample_fps)
         self.audio_sample_m = 0
         self.supports_standard_denoising = True
 
     @property
     def device(self):
         return self.device_
-
-    @staticmethod
-    def _resolve_existing_path(
-        component_model_path: str, path_value: str | None
-    ) -> str:
-        if not path_value:
-            raise ValueError(
-                "WanS2VTransformer3DModel config is missing a required path"
-            )
-        path_value = os.path.expanduser(path_value)
-        if os.path.isabs(path_value):
-            resolved = path_value
-        else:
-            resolved = os.path.join(component_model_path, path_value)
-        if not os.path.exists(resolved):
-            raise ValueError(f"Resolved path does not exist: {resolved}")
-        return resolved
-
-    @classmethod
-    def _resolve_attention_backend(
-        cls, server_args, config: dict[str, Any]
-    ) -> AttentionBackendEnum:
-        backend = getattr(server_args, "attention_backend", None)
-        backend = str(config.get("attention_backend", "auto") if backend is None else backend).lower()
-
-        # Keep the resolver aligned with WanTransformer3DModel: normalize the
-        # public CLI/backend names first, then validate against the model's
-        # supported backend set.
-        backend_aliases = {
-            "auto": AttentionBackendEnum.NO_ATTENTION,
-            "fa": AttentionBackendEnum.FA,
-            "fa2": AttentionBackendEnum.FA,
-            "flash": AttentionBackendEnum.FA,
-            "flashattention": AttentionBackendEnum.FA,
-            "flash_attention": AttentionBackendEnum.FA,
-            "torch_sdpa": AttentionBackendEnum.TORCH_SDPA,
-            "sdpa": AttentionBackendEnum.TORCH_SDPA,
-        }
-        backend_enum = backend_aliases.get(backend)
-        if backend_enum is None:
-            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
-        if (
-            backend_enum not in cls._supported_attention_backends
-            and backend_enum is not AttentionBackendEnum.NO_ATTENTION
-        ):
-            raise ValueError(
-                f"Wan S2V attention backend {backend_enum} is not supported"
-            )
-        return backend_enum
-
-    @staticmethod
-    def _build_runtime_config(config: dict[str, Any]) -> types.SimpleNamespace:
-        return types.SimpleNamespace(
-            param_dtype=torch.bfloat16,
-            num_train_timesteps=int(config.get("num_train_timesteps", 1000)),
-            sample_neg_prompt=str(
-                config.get("sample_neg_prompt", _WAN_S2V_SAMPLE_NEG_PROMPT)
-            ),
-            drop_first_motion=bool(config.get("drop_first_motion", True)),
-            sample_fps=int(config.get("sample_fps", 16)),
-            transformer=types.SimpleNamespace(
-                motion_frames=int(config.get("motion_frames", 73))
-            ),
-        )
 
     @classmethod
     def from_component_path(
@@ -1370,16 +1308,48 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         server_args,
         config: dict[str, Any],
     ):
-        checkpoint_root = cls._resolve_existing_path(
-            component_model_path, config.get("wan_checkpoint_root", "checkpoints")
-        )
-
         config = dict(config)
-        attention_backend = cls._resolve_attention_backend(
-            server_args, config
+        checkpoint_root = os.path.expanduser(
+            config.get("wan_checkpoint_root", "checkpoints")
         )
+        if not os.path.isabs(checkpoint_root):
+            checkpoint_root = os.path.join(component_model_path, checkpoint_root)
+        if not os.path.exists(checkpoint_root):
+            raise ValueError(f"Resolved path does not exist: {checkpoint_root}")
+
+        backend = getattr(server_args, "attention_backend", None)
+        backend = str(
+            config.get("attention_backend", "auto") if backend is None else backend
+        ).lower()
+        attention_backend = {
+            "auto": AttentionBackendEnum.NO_ATTENTION,
+            "fa": AttentionBackendEnum.FA,
+            "fa2": AttentionBackendEnum.FA,
+            "flash": AttentionBackendEnum.FA,
+            "flashattention": AttentionBackendEnum.FA,
+            "flash_attention": AttentionBackendEnum.FA,
+            "torch_sdpa": AttentionBackendEnum.TORCH_SDPA,
+            "sdpa": AttentionBackendEnum.TORCH_SDPA,
+        }.get(backend)
+        if attention_backend is None:
+            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
+        if (
+            attention_backend not in cls._supported_attention_backends
+            and attention_backend is not AttentionBackendEnum.NO_ATTENTION
+        ):
+            raise ValueError(
+                f"Wan S2V attention backend {attention_backend} is not supported"
+            )
         config["attention_backend"] = str(attention_backend)
-        config_obj = cls._build_runtime_config(config)
+
+        param_dtype = torch.bfloat16
+        num_train_timesteps = int(config.get("num_train_timesteps", 1000))
+        sample_neg_prompt = str(
+            config.get("sample_neg_prompt", WAN_S2V_SAMPLE_NEG_PROMPT)
+        )
+        drop_first_motion = bool(config.get("drop_first_motion", True))
+        sample_fps = int(config.get("sample_fps", 16))
+        motion_frames = int(config.get("motion_frames", 73))
         local_device = get_local_torch_device()
         logger.info(
             "Creating native WanModelS2V directly from %s",
@@ -1387,13 +1357,13 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         )
         noise_model = WanModelS2V.from_pretrained(
             checkpoint_root,
-            torch_dtype=config_obj.param_dtype,
+            torch_dtype=param_dtype,
             device_map=local_device,
         )
         noise_model.eval().requires_grad_(False)
 
         if bool(config.get("convert_model_dtype", False)):
-            noise_model.to(config_obj.param_dtype)
+            noise_model.to(param_dtype)
         if not bool(config.get("init_on_cpu", True)):
             noise_model.to(local_device)
 
@@ -1401,8 +1371,13 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             noise_model=noise_model,
             component_model_path=component_model_path,
             config=config,
-            config_obj=config_obj,
             device=local_device,
+            param_dtype=param_dtype,
+            num_train_timesteps=num_train_timesteps,
+            sample_neg_prompt=sample_neg_prompt,
+            drop_first_motion=drop_first_motion,
+            sample_fps=sample_fps,
+            motion_frames=motion_frames,
         )
 
     def get_default_negative_prompt(self) -> str:

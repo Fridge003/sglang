@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from sglang.multimodal_gen.configs.models.dits.base import DiTArchConfig, DiTConfig
 from sglang.multimodal_gen.configs.models.dits.wanvideo import WanVideoArchConfig
 
+WAN_S2V_SAMPLE_NEG_PROMPT = (
+    "画面模糊，最差质量，画面模糊，细节模糊不清，情绪激动剧烈，手快速抖动，字幕，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+)
+
 
 @dataclass
 class WanS2VArchConfig(WanVideoArchConfig):
@@ -53,3 +57,4 @@ class WanS2VArchConfig(WanVideoArchConfig):
 class WanS2VConfig(DiTConfig):
     arch_config: DiTArchConfig = field(default_factory=WanS2VArchConfig)
     prefix: str = "WanS2V"
+    sample_neg_prompt: str = WAN_S2V_SAMPLE_NEG_PROMPT
