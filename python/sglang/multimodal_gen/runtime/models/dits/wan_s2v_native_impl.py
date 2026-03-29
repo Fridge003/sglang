@@ -13,12 +13,14 @@ from diffusers.models.attention import AdaLayerNorm
 from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange
 
-flash_attention = None
-
-
-def set_flash_attention_impl(fn):
-    global flash_attention
-    flash_attention = fn
+from sglang.multimodal_gen.runtime.distributed import (
+    get_sp_group,
+    get_sp_world_size,
+    sequence_model_parallel_all_gather,
+)
+from sglang.multimodal_gen.runtime.layers.attention.layer import USPAttention
+from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
+from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 
 
 def sinusoidal_embedding_1d(dim, position):
@@ -125,7 +127,16 @@ class WanLayerNorm(nn.LayerNorm):
 
 
 class WanSelfAttention(nn.Module):
-    def __init__(self, dim, num_heads, window_size=(-1, -1), qk_norm=True, eps=1e-6):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        window_size=(-1, -1),
+        qk_norm=True,
+        eps=1e-6,
+        supported_attention_backends: set[AttentionBackendEnum] | None = None,
+        skip_sequence_parallel: bool = False,
+    ):
         super().__init__()
         assert dim % num_heads == 0
         self.num_heads = num_heads
@@ -137,39 +148,89 @@ class WanSelfAttention(nn.Module):
         self.o = nn.Linear(dim, dim)
         self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.attn = USPAttention(
+            num_heads=num_heads,
+            head_size=self.head_dim,
+            causal=False,
+            supported_attention_backends=supported_attention_backends,
+            skip_sequence_parallel=skip_sequence_parallel,
+        )
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
+        del seq_lens
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         q = self.norm_q(self.q(x)).view(b, s, n, d)
         k = self.norm_k(self.k(x)).view(b, s, n, d)
         v = self.v(x).view(b, s, n, d)
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size,
+        x = self.attn(
+            rope_apply(q, grid_sizes, freqs),
+            rope_apply(k, grid_sizes, freqs),
+            v,
         )
         return self.o(x.flatten(2))
 
 
 class WanCrossAttention(WanSelfAttention):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        window_size=(-1, -1),
+        qk_norm=True,
+        eps=1e-6,
+        supported_attention_backends: set[AttentionBackendEnum] | None = None,
+    ):
+        super().__init__(
+            dim,
+            num_heads,
+            window_size,
+            qk_norm,
+            eps,
+            supported_attention_backends=supported_attention_backends,
+            skip_sequence_parallel=True,
+        )
+
     def forward(self, x, context, context_lens):
+        del context_lens
         b, n, d = x.size(0), self.num_heads, self.head_dim
         q = self.norm_q(self.q(x)).view(b, -1, n, d)
         k = self.norm_k(self.k(context)).view(b, -1, n, d)
         v = self.v(context).view(b, -1, n, d)
-        x = flash_attention(q=q, k=k, v=v, k_lens=context_lens)
+        x = self.attn(q, k, v)
         return self.o(x.flatten(2))
 
 
 class WanAttentionBlock(nn.Module):
-    def __init__(self, dim, ffn_dim, num_heads, window_size=(-1, -1), qk_norm=True, cross_attn_norm=False, eps=1e-6):
+    def __init__(
+        self,
+        dim,
+        ffn_dim,
+        num_heads,
+        window_size=(-1, -1),
+        qk_norm=True,
+        cross_attn_norm=False,
+        eps=1e-6,
+        supported_attention_backends: set[AttentionBackendEnum] | None = None,
+    ):
         super().__init__()
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
+        self.self_attn = WanSelfAttention(
+            dim,
+            num_heads,
+            window_size,
+            qk_norm,
+            eps,
+            supported_attention_backends=supported_attention_backends,
+        )
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
-        self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+        self.cross_attn = WanCrossAttention(
+            dim,
+            num_heads,
+            (-1, -1),
+            qk_norm,
+            eps,
+            supported_attention_backends=supported_attention_backends,
+        )
         self.norm2 = WanLayerNorm(dim, eps)
         self.ffn = nn.Sequential(nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'), nn.Linear(ffn_dim, dim))
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -376,9 +437,35 @@ class WanS2VSelfAttention(WanSelfAttention):
 
 
 class WanS2VAttentionBlock(WanAttentionBlock):
-    def __init__(self, dim, ffn_dim, num_heads, window_size=(-1, -1), qk_norm=True, cross_attn_norm=False, eps=1e-6):
-        super().__init__(dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps)
-        self.self_attn = WanS2VSelfAttention(dim, num_heads, window_size, qk_norm, eps)
+    def __init__(
+        self,
+        dim,
+        ffn_dim,
+        num_heads,
+        window_size=(-1, -1),
+        qk_norm=True,
+        cross_attn_norm=False,
+        eps=1e-6,
+        supported_attention_backends: set[AttentionBackendEnum] | None = None,
+    ):
+        super().__init__(
+            dim,
+            ffn_dim,
+            num_heads,
+            window_size,
+            qk_norm,
+            cross_attn_norm,
+            eps,
+            supported_attention_backends=supported_attention_backends,
+        )
+        self.self_attn = WanS2VSelfAttention(
+            dim,
+            num_heads,
+            window_size,
+            qk_norm,
+            eps,
+            supported_attention_backends=supported_attention_backends,
+        )
 
     def forward(self, x, e, seq_lens, grid_sizes, freqs, context, context_lens):
         seg_idx = min(max(0, e[1].item()), x.size(1))
@@ -430,12 +517,29 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         self.text_embedding = nn.Sequential(nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'), nn.Linear(dim, dim))
         self.time_embedding = nn.Sequential(nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
-        self.blocks = nn.ModuleList([WanS2VAttentionBlock(dim, ffn_dim, num_heads, window_size, qk_norm, cross_attn_norm, eps) for _ in range(num_layers)])
+        self._supported_attention_backends = {
+            AttentionBackendEnum.FA,
+            AttentionBackendEnum.TORCH_SDPA,
+        }
+        self.blocks = nn.ModuleList([
+            WanS2VAttentionBlock(
+                dim,
+                ffn_dim,
+                num_heads,
+                window_size,
+                qk_norm,
+                cross_attn_norm,
+                eps,
+                supported_attention_backends=self._supported_attention_backends,
+            )
+            for _ in range(num_layers)
+        ])
         self.head = HeadS2V(dim, out_dim, patch_size, eps)
         d = dim // num_heads
         self.freqs = torch.cat([rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1)
         self.init_weights()
-        self.use_context_parallel = False
+        self.sp_size = get_sp_world_size()
+        self.use_context_parallel = self.sp_size > 1
         if cond_dim > 0:
             self.cond_encoder = nn.Conv3d(cond_dim, self.dim, kernel_size=self.patch_size, stride=self.patch_size)
         self.enbale_adain = enable_adain
@@ -499,6 +603,12 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         return hidden_states
 
     def forward(self, x, t, context, seq_len, ref_latents, motion_latents, cond_states, audio_input=None, motion_frames=(17, 5), add_last_motion=2, drop_motion_frames=False, *extra_args, **extra_kwargs):
+        forward_batch = get_forward_context().forward_batch
+        sequence_shard_enabled = (
+            forward_batch is not None
+            and forward_batch.enable_sequence_shard
+            and self.sp_size > 1
+        )
         add_last_motion = self.add_last_motion * add_last_motion
         audio_input = torch.cat([audio_input[..., 0:1].repeat(1, 1, 1, motion_frames[0]), audio_input], dim=-1)
         audio_emb_res = self.casual_audio_encoder(audio_input)
@@ -539,6 +649,23 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         self.pre_compute_freqs = torch.cat(self.pre_compute_freqs, dim=0)
         mask_input = torch.cat(mask_input, dim=0)
         x = x + self.trainable_cond_mask(mask_input).to(x.dtype)
+        seq_len_full = x.shape[1]
+        seq_shard_pad = 0
+        if sequence_shard_enabled:
+            if seq_len_full % self.sp_size != 0:
+                raise ValueError(
+                    f"Wan S2V sequence length {seq_len_full} must be divisible by sp_size {self.sp_size}"
+                )
+            sp_rank = get_sp_group().rank_in_group
+            local_seq_len = seq_len_full // self.sp_size
+            x = x.view(x.shape[0], self.sp_size, local_seq_len, x.shape[2])[:, sp_rank]
+            self.pre_compute_freqs = self.pre_compute_freqs.view(
+                self.pre_compute_freqs.shape[0],
+                self.sp_size,
+                local_seq_len,
+                self.pre_compute_freqs.shape[2],
+                self.pre_compute_freqs.shape[3],
+            )[:, sp_rank]
         if self.zero_timestep:
             t = torch.cat([t, torch.zeros([1], dtype=t.dtype, device=t.device)])
         with amp.autocast(dtype=torch.float32):
@@ -557,6 +684,10 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
+        if sequence_shard_enabled:
+            x = sequence_model_parallel_all_gather(x.contiguous(), dim=1)
+            if seq_shard_pad > 0:
+                x = x[:, :seq_len_full]
         x = x[:, : self.original_seq_len]
         x = self.head(x, e)
         x = self.unpatchify(x, original_grid_sizes)

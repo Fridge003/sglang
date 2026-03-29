@@ -11,10 +11,7 @@ from PIL import Image
 
 from sglang.multimodal_gen.configs.models.dits import WanS2VConfig
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
-from sglang.multimodal_gen.runtime.models.dits.wan_s2v_native_impl import (
-    WanModelS2V,
-    set_flash_attention_impl,
-)
+from sglang.multimodal_gen.runtime.models.dits.wan_s2v_native_impl import WanModelS2V
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -29,7 +26,6 @@ _WAN_S2V_SAMPLE_NEG_PROMPT = (
 
 class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
     _aliases = ["WanS2VTransformer3DModel"]
-    _sdpa_warned_padding_mask = False
     _fsdp_shard_conditions = WanS2VConfig()._fsdp_shard_conditions
     _compile_conditions = WanS2VConfig()._compile_conditions
     _supported_attention_backends = WanS2VConfig()._supported_attention_backends
@@ -82,202 +78,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         if not os.path.exists(resolved):
             raise ValueError(f"Resolved path does not exist: {resolved}")
         return resolved
-
-    @staticmethod
-    def _sdpa_flash_attention(
-        q,
-        k,
-        v,
-        q_lens=None,
-        k_lens=None,
-        dropout_p=0.0,
-        softmax_scale=None,
-        q_scale=None,
-        causal=False,
-        window_size=(-1, -1),
-        deterministic=False,
-        dtype=torch.bfloat16,
-        version=None,
-    ):
-        del window_size, deterministic, version
-        if q_scale is not None:
-            q = q * q_scale
-        if softmax_scale is not None:
-            q = q * softmax_scale
-
-        if q_lens is not None or k_lens is not None:
-            if not WanS2VTransformer3DModel._sdpa_warned_padding_mask:
-                logger.warning(
-                    "Wan S2V SDPA fallback ignores q_lens/k_lens padding masks; "
-                    "this is intended only for compatibility validation."
-                )
-                WanS2VTransformer3DModel._sdpa_warned_padding_mask = True
-
-        q = q.transpose(1, 2).to(dtype)
-        k = k.transpose(1, 2).to(dtype)
-        v = v.transpose(1, 2).to(dtype)
-        out = torch.nn.functional.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=None,
-            is_causal=causal,
-            dropout_p=dropout_p,
-        )
-        return out.transpose(1, 2).contiguous()
-
-    @classmethod
-    def _compatible_flash_attention(
-        cls,
-        q,
-        k,
-        v,
-        q_lens=None,
-        k_lens=None,
-        dropout_p=0.0,
-        softmax_scale=None,
-        q_scale=None,
-        causal=False,
-        window_size=(-1, -1),
-        deterministic=False,
-        dtype=torch.bfloat16,
-        version=None,
-    ):
-        del dropout_p
-        half_dtypes = (torch.float16, torch.bfloat16)
-        assert dtype in half_dtypes
-        assert q.device.type == "cuda" and q.size(-1) <= 256
-
-        b, lq, lk, out_dtype = q.size(0), q.size(1), k.size(1), q.dtype
-
-        def half(x):
-            return x if x.dtype in half_dtypes else x.to(dtype)
-
-        if q_lens is None:
-            q = half(q.flatten(0, 1))
-            q_lens = torch.tensor([lq] * b, dtype=torch.int32, device=q.device)
-        else:
-            q = half(torch.cat([u[:v] for u, v in zip(q, q_lens)]))
-
-        if k_lens is None:
-            k = half(k.flatten(0, 1))
-            v = half(v.flatten(0, 1))
-            k_lens = torch.tensor([lk] * b, dtype=torch.int32, device=k.device)
-        else:
-            k = half(torch.cat([u[:v] for u, v in zip(k, k_lens)]))
-            v = half(torch.cat([u[:v] for u, v in zip(v, k_lens)]))
-
-        q = q.to(v.dtype)
-        k = k.to(v.dtype)
-        if q_scale is not None:
-            q = q * q_scale
-
-        fa3_func = getattr(
-            importlib.import_module("flash_attn_interface"),
-            "flash_attn_varlen_func",
-            None,
-        )
-        fa2_func = getattr(
-            importlib.import_module("flash_attn"), "flash_attn_varlen_func", None
-        )
-
-        use_fa3 = (
-            (version is None or version == 3)
-            and fa3_func is not None
-        )
-        if use_fa3:
-            x = fa3_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens])
-                .cumsum(0, dtype=torch.int32)
-                .to(q.device, non_blocking=True),
-                cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens])
-                .cumsum(0, dtype=torch.int32)
-                .to(q.device, non_blocking=True),
-                seqused_q=None,
-                seqused_k=None,
-                max_seqlen_q=lq,
-                max_seqlen_k=lk,
-                softmax_scale=softmax_scale,
-                causal=causal,
-                deterministic=deterministic,
-                window_size=window_size,
-            )
-            if isinstance(x, tuple):
-                x = x[0]
-            return x.unflatten(0, (b, lq)).type(out_dtype)
-
-        if fa2_func is None:
-            raise RuntimeError(
-                "No compatible flash attention varlen kernel is available for Wan S2V"
-            )
-        x = fa2_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=torch.cat([q_lens.new_zeros([1]), q_lens])
-            .cumsum(0, dtype=torch.int32)
-            .to(q.device, non_blocking=True),
-            cu_seqlens_k=torch.cat([k_lens.new_zeros([1]), k_lens])
-            .cumsum(0, dtype=torch.int32)
-            .to(q.device, non_blocking=True),
-            max_seqlen_q=lq,
-            max_seqlen_k=lk,
-            dropout_p=0.0,
-            softmax_scale=softmax_scale,
-            causal=causal,
-            window_size=window_size,
-            deterministic=deterministic,
-        )
-        return x.unflatten(0, (b, lq)).type(out_dtype)
-
-    @classmethod
-    def _patch_attention_backend(cls, backend: AttentionBackendEnum):
-        if backend == AttentionBackendEnum.FA:
-            set_flash_attention_impl(cls._compatible_flash_attention)
-            logger.info("Using native Wan S2V flash attention backend (compat)")
-            return
-
-        if backend == AttentionBackendEnum.TORCH_SDPA:
-            logger.info("Patching native Wan S2V attention backend to SDPA fallback")
-            set_flash_attention_impl(cls._sdpa_flash_attention)
-            return
-
-        if backend == AttentionBackendEnum.NO_ATTENTION:
-            try:
-                has_fa2 = (
-                    getattr(
-                        __import__("flash_attn"),
-                        "flash_attn_varlen_func",
-                        None,
-                    )
-                    is not None
-                )
-            except Exception:
-                has_fa2 = False
-            try:
-                has_fa3 = (
-                    getattr(
-                        __import__("flash_attn_interface"),
-                        "flash_attn_varlen_func",
-                        None,
-                    )
-                    is not None
-                )
-            except Exception:
-                has_fa3 = False
-            if has_fa2 or has_fa3:
-                set_flash_attention_impl(cls._compatible_flash_attention)
-                logger.info("Using native Wan S2V flash attention backend (auto compat)")
-                return
-            backend = AttentionBackendEnum.TORCH_SDPA
-
-        if backend != AttentionBackendEnum.TORCH_SDPA:
-            raise ValueError(f"Unsupported Wan S2V attention backend: {backend}")
-        logger.info("Patching native Wan S2V attention backend to SDPA fallback")
-        set_flash_attention_impl(cls._sdpa_flash_attention)
 
     @classmethod
     def _resolve_attention_backend(
@@ -343,19 +143,7 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         )
         config["attention_backend"] = str(attention_backend)
         config_obj = cls._build_runtime_config(config)
-        cls._patch_attention_backend(attention_backend)
         local_device = get_local_torch_device()
-        use_sp = (
-            max(
-                getattr(server_args, "sp_degree", 1) or 1,
-                getattr(server_args, "ulysses_degree", 1) or 1,
-            )
-            > 1
-        )
-        if use_sp:
-            raise NotImplementedError(
-                "Native Wan S2V transformer does not support sequence parallel yet"
-            )
         logger.info(
             "Creating native WanModelS2V directly from %s",
             checkpoint_root,
