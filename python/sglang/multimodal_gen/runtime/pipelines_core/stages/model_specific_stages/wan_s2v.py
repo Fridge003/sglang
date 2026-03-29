@@ -151,8 +151,6 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
     def _encode_video_to_latents(
         self, video: torch.Tensor, server_args: ServerArgs
     ) -> torch.Tensor:
-        if hasattr(self.vae, "encode_video"):
-            return self.vae.encode_video(video)
         vae_dtype = torch.float32
         if server_args.pipeline_config.vae_precision == "bf16":
             vae_dtype = torch.bfloat16
@@ -166,6 +164,8 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
         self.log_info("moving vae for encode")
         self.vae = self.vae.to(device=get_local_torch_device(), dtype=vae_dtype)
         video = video.to(device=get_local_torch_device(), dtype=vae_dtype)
+        if hasattr(self.vae, "encode_video"):
+            return self.vae.encode_video(video)
         self.log_info("running vae.encode")
         latent_dist = self.vae.encode(video)
         self.log_info("finished vae.encode")
