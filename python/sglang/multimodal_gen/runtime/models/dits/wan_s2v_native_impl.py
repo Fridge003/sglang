@@ -651,6 +651,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         else:
             audio_emb = audio_emb_res
         self.merged_audio_emb = audio_emb[:, motion_frames[1]:, :]
+        num_frames = self.merged_audio_emb.shape[1]
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
         cond = [self.cond_encoder(c.unsqueeze(0)) for c in cond_states]
         x = [x_ + pose for x_, pose in zip(x, cond)]
@@ -686,26 +687,51 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         seq_len_full = x.shape[1]
         seq_shard_pad = 0
         if sequence_shard_enabled:
-            if self.original_seq_len % self.sp_size != 0:
+            if self.original_seq_len % num_frames != 0:
                 raise ValueError(
-                    f"Wan S2V video sequence length {self.original_seq_len} must be divisible by sp_size {self.sp_size}"
+                    f"Wan S2V video sequence length {self.original_seq_len} must be divisible by num_frames {num_frames}"
+                )
+            tokens_per_frame = self.original_seq_len // num_frames
+            if tokens_per_frame % self.sp_size != 0:
+                raise ValueError(
+                    f"Wan S2V tokens per frame {tokens_per_frame} must be divisible by sp_size {self.sp_size}"
                 )
             sp_rank = get_sp_group().rank_in_group
-            self.local_original_seq_len = self.original_seq_len // self.sp_size
-            video_slice = slice(
-                sp_rank * self.local_original_seq_len,
-                (sp_rank + 1) * self.local_original_seq_len,
+            local_tokens_per_frame = tokens_per_frame // self.sp_size
+            self.local_original_seq_len = num_frames * local_tokens_per_frame
+            frame_slice = slice(
+                sp_rank * local_tokens_per_frame,
+                (sp_rank + 1) * local_tokens_per_frame,
             )
-            x = torch.cat([x[:, video_slice], x[:, self.original_seq_len :]], dim=1)
+            x_video = x[:, : self.original_seq_len].view(
+                x.shape[0], num_frames, tokens_per_frame, x.shape[2]
+            )[:, :, frame_slice]
+            x = torch.cat([x_video.reshape(x.shape[0], -1, x.shape[2]), x[:, self.original_seq_len :]], dim=1)
+            freqs_video = self.pre_compute_freqs[:, : self.original_seq_len].view(
+                self.pre_compute_freqs.shape[0],
+                num_frames,
+                tokens_per_frame,
+                self.pre_compute_freqs.shape[2],
+                self.pre_compute_freqs.shape[3],
+            )[:, :, frame_slice]
             self.pre_compute_freqs = torch.cat(
                 [
-                    self.pre_compute_freqs[:, video_slice],
+                    freqs_video.reshape(
+                        self.pre_compute_freqs.shape[0],
+                        -1,
+                        self.pre_compute_freqs.shape[2],
+                        self.pre_compute_freqs.shape[3],
+                    ),
                     self.pre_compute_freqs[:, self.original_seq_len :],
                 ],
                 dim=1,
             )
+            mask_video = mask_input[:, : self.original_seq_len].view(
+                mask_input.shape[0], num_frames, tokens_per_frame
+            )[:, :, frame_slice]
             mask_input = torch.cat(
-                [mask_input[:, video_slice], mask_input[:, self.original_seq_len :]], dim=1
+                [mask_video.reshape(mask_input.shape[0], -1), mask_input[:, self.original_seq_len :]],
+                dim=1,
             )
             seq_lens = torch.full_like(
                 seq_lens, self.local_original_seq_len + condition_suffix_len
@@ -738,10 +764,11 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
         if sequence_shard_enabled:
-            x_video = sequence_model_parallel_all_gather(
-                x[:, : self.local_original_seq_len].contiguous(), dim=1
+            x_video = x[:, : self.local_original_seq_len].view(
+                x.shape[0], num_frames, self.local_original_seq_len // num_frames, x.shape[2]
             )
-            x = torch.cat([x_video, x[:, self.local_original_seq_len :]], dim=1)
+            x_video = sequence_model_parallel_all_gather(x_video.contiguous(), dim=2)
+            x = torch.cat([x_video.reshape(x.shape[0], -1, x.shape[2]), x[:, self.local_original_seq_len :]], dim=1)
             if seq_shard_pad > 0:
                 x = x[:, :seq_len_full]
         x = x[:, : self.original_seq_len]
