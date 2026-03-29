@@ -112,6 +112,8 @@ def rope_precompute(x, grid_sizes, freqs, start=None):
 def _gather_debug_tensor(x, grid_sizes, num_replicated_suffix):
     if get_sp_world_size() == 1:
         return x
+    if isinstance(grid_sizes, list):
+        grid_sizes = grid_sizes[-1]
     local_video_len = x.shape[1] - num_replicated_suffix
     num_frames = int(grid_sizes[0, 0].item())
     local_tokens_per_frame = local_video_len // num_frames
