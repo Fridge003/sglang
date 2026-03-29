@@ -476,7 +476,7 @@ class SamplingParams:
         else:
             self.enable_sequence_shard = False
 
-        if self.enable_sequence_shard:
+        if self.enable_sequence_shard and not pipeline_config.task_type.is_s2v():
             self.adjust_frames = False
             logger.info(
                 f"Sequence dimension shard is enabled, disabling frame adjustment for better performance"
