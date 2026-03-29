@@ -514,7 +514,13 @@ class SamplingParams:
                     pipeline_config.vae_config.arch_config.temporal_compression_ratio
                 )
 
-                if use_temporal_scaling_frames:
+                # Wan S2V trims one frame before building the denoising latents, so
+                # its shardable latent-frame count is not the generic VAE formula.
+                if pipeline_config.task_type.name == "S2V":
+                    infer_frames = max(num_frames - 1, 4)
+                    infer_frames = max((infer_frames // temporal_scale_factor) * temporal_scale_factor, temporal_scale_factor)
+                    orig_latent_num_frames = infer_frames // temporal_scale_factor
+                elif use_temporal_scaling_frames:
                     orig_latent_num_frames = (
                         num_frames - 1
                     ) // temporal_scale_factor + 1
@@ -533,7 +539,9 @@ class SamplingParams:
                             math.ceil(orig_latent_num_frames / num_gpus) * num_gpus
                         )
 
-                    if use_temporal_scaling_frames:
+                    if pipeline_config.task_type.name == "S2V":
+                        new_num_frames = new_latent_num_frames * temporal_scale_factor + 1
+                    elif use_temporal_scaling_frames:
                         # Convert back to number of frames, ensuring num_frames-1 is a multiple of temporal_scale_factor
                         new_num_frames = (
                             new_latent_num_frames - 1
