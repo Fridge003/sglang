@@ -18,6 +18,11 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+_WAN_S2V_SAMPLE_NEG_PROMPT = (
+    "画面模糊，最差质量，画面模糊，细节模糊不清，情绪激动剧烈，手快速抖动，字幕，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走"
+)
+
+
 class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
     _aliases = ["WanS2VTransformer3DModel"]
     _sdpa_warned_padding_mask = False
@@ -299,6 +304,21 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             return "flash"
         return backend
 
+    @staticmethod
+    def _build_runtime_config(config: dict[str, Any]) -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            param_dtype=torch.bfloat16,
+            num_train_timesteps=int(config.get("num_train_timesteps", 1000)),
+            sample_neg_prompt=str(
+                config.get("sample_neg_prompt", _WAN_S2V_SAMPLE_NEG_PROMPT)
+            ),
+            drop_first_motion=bool(config.get("drop_first_motion", True)),
+            sample_fps=int(config.get("sample_fps", 16)),
+            transformer=types.SimpleNamespace(
+                motion_frames=int(config.get("motion_frames", 73))
+            ),
+        )
+
     @classmethod
     def from_component_path(
         cls,
@@ -315,22 +335,14 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         if code_root not in sys.path:
             sys.path.insert(0, code_root)
 
-        task_name = str(config.get("wan_task_name", "s2v-14B"))
-        module_configs = importlib.import_module("wan.configs")
-        module_s2v = importlib.import_module("wan.speech2video")
         config = dict(config)
         config["attention_backend"] = cls._resolve_attention_backend(
             server_args, config
         )
+        config_obj = cls._build_runtime_config(config)
+
+        module_s2v = importlib.import_module("wan.modules.s2v.model_s2v")
         cls._patch_attention_backend(config)
-
-        wan_configs = getattr(module_configs, "WAN_CONFIGS", None)
-        if not isinstance(wan_configs, dict) or task_name not in wan_configs:
-            raise ValueError(
-                f"Official Wan config {task_name!r} not found under {code_root}"
-            )
-
-        config_obj = wan_configs[task_name]
         local_device = get_local_torch_device()
         use_sp = (
             max(
