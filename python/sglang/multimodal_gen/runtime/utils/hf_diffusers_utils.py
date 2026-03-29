@@ -948,11 +948,8 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
     if overlay_config is not None:
         return overlay_config
 
-    # If it's a local path, verify it directly
+    # If it's a local path, verify it directly.
     if os.path.exists(model_name_or_path):
-        manifest = _load_overlay_manifest_if_present(model_name_or_path)
-        if manifest is not None:
-            return _load_model_index_from_dir(model_name_or_path)
         try:
             return verify_model_config_and_directory(model_name_or_path)
         except ValueError:
@@ -963,18 +960,6 @@ def maybe_download_model_index(model_name_or_path: str) -> dict[str, Any]:
                     config = json.load(f)
                 return config
             raise
-
-    overlay_spec = resolve_model_overlay(model_name_or_path)
-    if overlay_spec is not None:
-        overlay_metadata_dir = _download_overlay_metadata(
-            model_name_or_path, overlay_spec
-        )
-        return _load_model_index_from_dir(overlay_metadata_dir)
-
-    direct_overlay = _resolve_direct_overlay_repo(model_name_or_path)
-    if direct_overlay is not None:
-        _, overlay_dir, _ = direct_overlay
-        return _load_model_index_from_dir(overlay_dir)
 
     # For remote models, download just the model_index.json
     try:
@@ -1065,85 +1050,6 @@ def maybe_download_model(
         )
         if overlay_model_path is not None:
             return overlay_model_path
-
-    overlay_spec = None
-    if (
-        force_diffusers_model
-        and not skip_overlay_resolution
-        and not os.path.exists(model_name_or_path)
-    ):
-        overlay_spec = resolve_model_overlay(model_name_or_path)
-        if overlay_spec is not None:
-            overlay_metadata_dir = _download_overlay_metadata(
-                model_name_or_path, overlay_spec
-            )
-            manifest = _load_overlay_manifest_if_present(overlay_metadata_dir)
-            if manifest is not None:
-                source_allow_patterns = cast(
-                    list[str] | None, manifest.get("source_allow_patterns")
-                )
-                source_dir = maybe_download_model(
-                    model_name_or_path,
-                    local_dir=local_dir,
-                    download=download,
-                    allow_patterns=source_allow_patterns or allow_patterns,
-                    force_diffusers_model=False,
-                    skip_overlay_resolution=True,
-                )
-                source_dir = _ensure_overlay_source_dir_complete(
-                    source_model_id=model_name_or_path,
-                    source_dir=source_dir,
-                    manifest=manifest,
-                    local_dir=local_dir,
-                    allow_patterns=allow_patterns,
-                    download=download,
-                )
-                return _materialize_overlay_model(
-                    source_model_id=model_name_or_path,
-                    overlay_spec=overlay_spec,
-                    overlay_dir=overlay_metadata_dir,
-                    source_dir=source_dir,
-                )
-            return maybe_download_model(
-                str(overlay_spec["overlay_repo_id"]),
-                local_dir=local_dir,
-                download=download,
-                is_lora=is_lora,
-                allow_patterns=allow_patterns,
-                force_diffusers_model=True,
-                skip_overlay_resolution=True,
-            )
-
-    if force_diffusers_model and not skip_overlay_resolution:
-        direct_overlay = _resolve_direct_overlay_repo(model_name_or_path)
-        if direct_overlay is not None:
-            overlay_spec, overlay_dir, manifest = direct_overlay
-            source_model_id = str(manifest["source_model_id"])
-            source_allow_patterns = cast(
-                list[str] | None, manifest.get("source_allow_patterns")
-            )
-            source_dir = maybe_download_model(
-                source_model_id,
-                local_dir=local_dir,
-                download=download,
-                allow_patterns=source_allow_patterns or allow_patterns,
-                force_diffusers_model=False,
-                skip_overlay_resolution=True,
-            )
-            source_dir = _ensure_overlay_source_dir_complete(
-                source_model_id=source_model_id,
-                source_dir=source_dir,
-                manifest=manifest,
-                local_dir=local_dir,
-                allow_patterns=allow_patterns,
-                download=download,
-            )
-            return _materialize_overlay_model(
-                source_model_id=source_model_id,
-                overlay_spec=overlay_spec,
-                overlay_dir=overlay_dir,
-                source_dir=source_dir,
-            )
 
     # 1. Local path check: if path exists locally, verify it's complete (skip for LoRA)
     if os.path.exists(model_name_or_path):

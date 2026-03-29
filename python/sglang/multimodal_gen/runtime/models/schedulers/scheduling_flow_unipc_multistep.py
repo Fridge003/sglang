@@ -6,7 +6,7 @@
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 
 import math
-from typing import Any, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -79,19 +79,6 @@ class FlowUniPCMultistepScheduler(SchedulerMixin, ConfigMixin, BaseScheduler):
 
     _compatibles = [e.name for e in KarrasDiffusionSchedulers]
     order = 1
-
-    @classmethod
-    def from_component_path(
-        cls,
-        component_model_path: str,
-        server_args,
-        config: dict[str, Any],
-    ):
-        del component_model_path, server_args
-        scheduler_config = dict(config)
-        scheduler_config.pop("wan_code_root", None)
-        scheduler_config.pop("wan_task_name", None)
-        return cls(**scheduler_config)
 
     @register_to_config
     def __init__(
