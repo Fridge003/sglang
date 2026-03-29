@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import os
 from copy import deepcopy
 
 import numpy as np
@@ -594,6 +595,11 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             raise NotImplementedError('Native Wan S2V motioner path is not implemented')
         if enable_framepack:
             self.frame_packer = FramePackMotioner(inner_dim=self.dim, num_heads=self.num_heads, zip_frame_buckets=[1, 2, 16], drop_mode=framepack_drop_mode)
+        self._debug_block_dump_dir = os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_DIR")
+        self._debug_block_dump_call_idx = int(
+            os.getenv("SGLANG_WAN_S2V_BLOCK_DUMP_CALL_IDX", "0")
+        )
+        self._forward_call_idx = 0
 
     def zero_init_weights(self):
         with torch.no_grad():
@@ -763,9 +769,41 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             context_lens=None,
             num_replicated_suffix=condition_suffix_len if sequence_shard_enabled else 0,
         )
+        dump_this_call = (
+            self._debug_block_dump_dir is not None
+            and self._forward_call_idx == self._debug_block_dump_call_idx
+        )
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
+            if dump_this_call:
+                dump_x = x
+                if sequence_shard_enabled:
+                    dump_video = dump_x[:, : self.local_original_seq_len].view(
+                        dump_x.shape[0],
+                        num_frames,
+                        self.local_original_seq_len // num_frames,
+                        dump_x.shape[2],
+                    )
+                    dump_video = sequence_model_parallel_all_gather(
+                        dump_video.contiguous(), dim=2
+                    )
+                    dump_x = torch.cat(
+                        [
+                            dump_video.reshape(dump_x.shape[0], -1, dump_x.shape[2]),
+                            dump_x[:, self.local_original_seq_len :],
+                        ],
+                        dim=1,
+                    )
+                if not sequence_shard_enabled or get_sp_group().rank_in_group == 0:
+                    os.makedirs(self._debug_block_dump_dir, exist_ok=True)
+                    torch.save(
+                        dump_x.detach().cpu(),
+                        os.path.join(
+                            self._debug_block_dump_dir,
+                            f"call_{self._forward_call_idx:02d}_block_{idx:02d}.pt",
+                        ),
+                    )
         if sequence_shard_enabled:
             x_video = x[:, : self.local_original_seq_len].view(
                 x.shape[0], num_frames, self.local_original_seq_len // num_frames, x.shape[2]
@@ -776,6 +814,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
                 x = x[:, :seq_len_full]
         x = x[:, : self.original_seq_len]
         x = self.head(x, e)
+        self._forward_call_idx += 1
         x = self.unpatchify(x, original_grid_sizes)
         return [u.float() for u in x]
 
