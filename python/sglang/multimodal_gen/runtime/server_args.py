@@ -299,7 +299,7 @@ class ServerArgs:
         if self.tp_size != 1 or self.sp_degree <= 1:
             return
 
-        if self.pipeline_config.pipeline_class_name == "WanSpeechToVideoPipeline":
+        if self.pipeline_config.task_type.name == "S2V":
             return
 
         enabled = False
