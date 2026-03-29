@@ -4,7 +4,6 @@ from __future__ import annotations
 import math
 import os
 
-import librosa
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -15,6 +14,11 @@ from sglang.multimodal_gen.configs.models.encoders.wan_s2v_audio import (
 )
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.models.encoders.base import AudioEncoder
+
+try:
+    import soundfile as sf
+except ImportError:  # pragma: no cover
+    sf = None
 
 
 def get_sample_indices(
@@ -128,6 +132,30 @@ class WanS2VAudioEncoder(AudioEncoder):
         self.model = self.model.to(*args, **kwargs)
         return super().to(*args, **kwargs)
 
+    def _load_audio(self, audio_path: str) -> tuple[np.ndarray, int]:
+        if sf is None:
+            raise ImportError("soundfile is required to load Wan S2V audio")
+        audio_input, sample_rate = sf.read(
+            audio_path, dtype="float32", always_2d=False
+        )
+        if isinstance(audio_input, np.ndarray) and audio_input.ndim > 1:
+            audio_input = audio_input.mean(axis=-1)
+        if sample_rate != self.sample_rate:
+            waveform = torch.from_numpy(np.asarray(audio_input, dtype=np.float32))
+            waveform = waveform.view(1, 1, -1)
+            target_len = max(
+                1, int(round(waveform.shape[-1] * self.sample_rate / sample_rate))
+            )
+            waveform = F.interpolate(
+                waveform,
+                size=target_len,
+                mode="linear",
+                align_corners=False,
+            )
+            audio_input = waveform.view(-1).numpy()
+            sample_rate = self.sample_rate
+        return np.asarray(audio_input, dtype=np.float32), sample_rate
+
     def extract_audio_feat(
         self,
         audio_path: str,
@@ -135,7 +163,7 @@ class WanS2VAudioEncoder(AudioEncoder):
         return_all_layers: bool = False,
         dtype: torch.dtype = torch.float32,
     ) -> torch.Tensor:
-        audio_input, sample_rate = librosa.load(audio_path, sr=self.sample_rate)
+        audio_input, sample_rate = self._load_audio(audio_path)
         input_values = self.processor(
             audio_input,
             sampling_rate=sample_rate,

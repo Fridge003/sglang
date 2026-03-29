@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import importlib
 import os
-import sys
 import types
 from typing import Any
 
@@ -12,6 +10,10 @@ import torch
 from PIL import Image
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
+from sglang.multimodal_gen.runtime.models.dits.wan_s2v_native_impl import (
+    WanModelS2V,
+    set_flash_attention_impl,
+)
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
@@ -162,7 +164,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         if q_scale is not None:
             q = q * q_scale
 
-        module_attention = importlib.import_module("wan.modules.attention")
         fa3_func = getattr(
             importlib.import_module("flash_attn_interface"),
             "flash_attn_varlen_func",
@@ -174,7 +175,6 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
 
         use_fa3 = (
             (version is None or version == 3)
-            and getattr(module_attention, "FLASH_ATTN_3_AVAILABLE", False)
             and fa3_func is not None
         )
         if use_fa3:
@@ -226,71 +226,46 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         return x.unflatten(0, (b, lq)).type(out_dtype)
 
     @classmethod
-    def _patch_attention_backend(cls, config: dict[str, Any]):
-        backend = str(config.get("attention_backend", "auto")).lower()
+    def _patch_attention_backend(cls, backend: str):
         if backend not in {"auto", "flash", "sdpa"}:
             raise ValueError(f"Unsupported Wan attention backend: {backend}")
 
-        module_attention = importlib.import_module("wan.modules.attention")
         if backend == "flash":
-            module_attention.flash_attention = cls._compatible_flash_attention
-            logger.info("Using official Wan flash attention backend (compat)")
-            module_model = importlib.import_module("wan.modules.model")
-            module_model.flash_attention = cls._compatible_flash_attention
-            for module_name in (
-                "wan.modules.s2v.model_s2v",
-                "wan.modules.s2v.motioner",
-                "wan.distributed.ulysses",
-            ):
-                try:
-                    module = importlib.import_module(module_name)
-                except ModuleNotFoundError:
-                    continue
-                setattr(module, "flash_attention", cls._compatible_flash_attention)
+            set_flash_attention_impl(cls._compatible_flash_attention)
+            logger.info("Using native Wan S2V flash attention backend (compat)")
             return
 
         if backend == "auto":
-            has_fa2 = getattr(
-                importlib.import_module("flash_attn"),
-                "flash_attn_varlen_func",
-                None,
-            )
-            has_fa3 = getattr(module_attention, "FLASH_ATTN_3_AVAILABLE", False)
-            if has_fa2 or not has_fa3:
-                module_attention.flash_attention = cls._compatible_flash_attention
-                module_model = importlib.import_module("wan.modules.model")
-                module_model.flash_attention = cls._compatible_flash_attention
-                for module_name in (
-                    "wan.modules.s2v.model_s2v",
-                    "wan.modules.s2v.motioner",
-                    "wan.distributed.ulysses",
-                ):
-                    try:
-                        module = importlib.import_module(module_name)
-                    except ModuleNotFoundError:
-                        continue
-                    setattr(module, "flash_attention", cls._compatible_flash_attention)
-                logger.info("Using official Wan flash attention backend (auto compat)")
+            try:
+                has_fa2 = (
+                    getattr(
+                        __import__("flash_attn"),
+                        "flash_attn_varlen_func",
+                        None,
+                    )
+                    is not None
+                )
+            except Exception:
+                has_fa2 = False
+            try:
+                has_fa3 = (
+                    getattr(
+                        __import__("flash_attn_interface"),
+                        "flash_attn_varlen_func",
+                        None,
+                    )
+                    is not None
+                )
+            except Exception:
+                has_fa3 = False
+            if has_fa2 or has_fa3:
+                set_flash_attention_impl(cls._compatible_flash_attention)
+                logger.info("Using native Wan S2V flash attention backend (auto compat)")
                 return
             backend = "sdpa"
 
-        logger.info("Patching official Wan attention backend to SDPA fallback")
-        module_attention.flash_attention = cls._sdpa_flash_attention
-        module_attention.FLASH_ATTN_2_AVAILABLE = False
-        module_attention.FLASH_ATTN_3_AVAILABLE = False
-
-        module_model = importlib.import_module("wan.modules.model")
-        module_model.flash_attention = cls._sdpa_flash_attention
-        for module_name in (
-            "wan.modules.s2v.model_s2v",
-            "wan.modules.s2v.motioner",
-            "wan.distributed.ulysses",
-        ):
-            try:
-                module = importlib.import_module(module_name)
-            except ModuleNotFoundError:
-                continue
-            setattr(module, "flash_attention", cls._sdpa_flash_attention)
+        logger.info("Patching native Wan S2V attention backend to SDPA fallback")
+        set_flash_attention_impl(cls._sdpa_flash_attention)
 
     @classmethod
     def _resolve_attention_backend(cls, server_args, config: dict[str, Any]) -> str:
@@ -326,23 +301,16 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
         server_args,
         config: dict[str, Any],
     ):
-        code_root = cls._resolve_existing_path(
-            component_model_path, config.get("wan_code_root", "official_code")
-        )
         checkpoint_root = cls._resolve_existing_path(
             component_model_path, config.get("wan_checkpoint_root", "checkpoints")
         )
-        if code_root not in sys.path:
-            sys.path.insert(0, code_root)
 
         config = dict(config)
         config["attention_backend"] = cls._resolve_attention_backend(
             server_args, config
         )
         config_obj = cls._build_runtime_config(config)
-
-        module_s2v = importlib.import_module("wan.modules.s2v.model_s2v")
-        cls._patch_attention_backend(config)
+        cls._patch_attention_backend(config["attention_backend"])
         local_device = get_local_torch_device()
         use_sp = (
             max(
@@ -351,26 +319,24 @@ class WanS2VTransformer3DModel(torch.nn.Module, OffloadableDiTMixin):
             )
             > 1
         )
+        if use_sp:
+            raise NotImplementedError(
+                "Native Wan S2V transformer does not support sequence parallel yet"
+            )
         logger.info(
-            "Creating WanModel_S2V directly from %s",
+            "Creating native WanModelS2V directly from %s",
             checkpoint_root,
         )
-        noise_model = module_s2v.WanModel_S2V.from_pretrained(
+        noise_model = WanModelS2V.from_pretrained(
             checkpoint_root,
             torch_dtype=config_obj.param_dtype,
             device_map=local_device,
         )
         noise_model.eval().requires_grad_(False)
-        if use_sp:
-            for block in noise_model.blocks:
-                block.self_attn.forward = types.MethodType(
-                    module_s2v.sp_attn_forward_s2v, block.self_attn
-                )
-            noise_model.use_context_parallel = True
 
         if bool(config.get("convert_model_dtype", False)):
             noise_model.to(config_obj.param_dtype)
-        if not bool(config.get("init_on_cpu", True)) or use_sp:
+        if not bool(config.get("init_on_cpu", True)):
             noise_model.to(local_device)
 
         return cls(

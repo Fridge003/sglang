@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import hashlib
 import os
+import tempfile
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 import PIL.Image
 import torch
@@ -56,9 +60,29 @@ class WanS2VBeforeDenoisingStage(PipelineStage):
             value = value[0]
         if not isinstance(value, str) or not value:
             raise ValueError(f"Wan S2V expects {field_name} as a non-empty string")
+        if value.lower().startswith(("http://", "https://")):
+            return self._download_remote_input(value, field_name)
         if not os.path.exists(value):
             raise FileNotFoundError(f"{field_name} not found: {value}")
         return value
+
+    def _download_remote_input(self, url: str, field_name: str) -> str:
+        parsed = urlparse(url)
+        ext = os.path.splitext(parsed.path)[1] or (
+            ".wav" if field_name == "audio_path" else ".jpg"
+        )
+        cache_dir = os.path.join(
+            tempfile.gettempdir(), "sglang_wan_s2v_remote_inputs"
+        )
+        os.makedirs(cache_dir, exist_ok=True)
+        target_path = os.path.join(
+            cache_dir, f"{field_name}_{hashlib.sha256(url.encode()).hexdigest()[:16]}{ext}"
+        )
+        if os.path.exists(target_path):
+            return target_path
+        with urlopen(url) as response, open(target_path, "wb") as fout:
+            fout.write(response.read())
+        return target_path
 
     def _generate_seed_and_generator(self, batch: Req) -> None:
         seed = batch.seed if batch.seed is not None else 42
