@@ -499,6 +499,13 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         context_lens,
         num_replicated_suffix=0,
     ):
+        debug_dump_dir = os.getenv("SGLANG_WAN_S2V_INTERNAL_DUMP_DIR")
+        debug_block_idx = int(os.getenv("SGLANG_WAN_S2V_INTERNAL_DUMP_BLOCK_IDX", "-1"))
+        debug_enabled = (
+            debug_dump_dir
+            and getattr(self, "_debug_dump_enabled", False)
+            and getattr(self, "_debug_block_idx", -1) == debug_block_idx
+        )
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
@@ -514,16 +521,28 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
+        if debug_enabled:
+            os.makedirs(debug_dump_dir, exist_ok=True)
+            torch.save(y.detach().cpu(), os.path.join(debug_dump_dir, "self_attn.pt"))
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[2][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
-        x = x + self.cross_attn(self.norm3(x), context, context_lens)
+        if debug_enabled:
+            torch.save(x.detach().cpu(), os.path.join(debug_dump_dir, "post_self_residual.pt"))
+        cross = self.cross_attn(self.norm3(x), context, context_lens)
+        if debug_enabled:
+            torch.save(cross.detach().cpu(), os.path.join(debug_dump_dir, "cross_attn.pt"))
+        x = x + cross
         norm2_x = self.norm2(x).float()
         norm2_x = torch.cat([norm2_x[:, seg_idx[i]:seg_idx[i+1]] * (1 + e[4][:, i:i+1]) + e[3][:, i:i+1] for i in range(2)], dim=1)
         y = self.ffn(norm2_x)
+        if debug_enabled:
+            torch.save(y.detach().cpu(), os.path.join(debug_dump_dir, "ffn.pt"))
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[5][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
+        if debug_enabled:
+            torch.save(x.detach().cpu(), os.path.join(debug_dump_dir, "block_out.pt"))
         return x
 
 
@@ -571,6 +590,9 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             )
             for _ in range(num_layers)
         ])
+        for idx, block in enumerate(self.blocks):
+            block._debug_block_idx = idx
+            block._debug_dump_enabled = False
         self.head = HeadS2V(dim, out_dim, patch_size, eps)
         d = dim // num_heads
         self.freqs = torch.cat([rope_params(1024, d - 4 * (d // 6)), rope_params(1024, 2 * (d // 6)), rope_params(1024, 2 * (d // 6))], dim=1)
@@ -779,6 +801,8 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             self._debug_block_dump_dir is not None
             and self._forward_call_idx == self._debug_block_dump_call_idx
         )
+        for block in self.blocks:
+            block._debug_dump_enabled = dump_this_call
         for idx, block in enumerate(self.blocks):
             x = block(x, **kwargs)
             x = self.after_transformer_block(idx, x)
