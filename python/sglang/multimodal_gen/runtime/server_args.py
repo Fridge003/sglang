@@ -470,9 +470,6 @@ class ServerArgs:
             if (
                 ("wan" in pipeline_name_lower or "mova" in pipeline_name_lower)
                 and self.dit_layerwise_offload is None
-                and (self.num_gpus or 1) == 1
-                and (self.sp_degree or 1) == 1
-                and (self.ulysses_degree or 1) == 1
             ):
                 auto_enable_layerwise_offload = (
                     current_platform.enable_dit_layerwise_offload_for_wan_by_default()
