@@ -299,6 +299,9 @@ class ServerArgs:
         if self.tp_size != 1 or self.sp_degree <= 1:
             return
 
+        if self.pipeline_config.pipeline_class_name == "WanSpeechToVideoPipeline":
+            return
+
         enabled = False
         for text_encoder_config in self.pipeline_config.text_encoder_configs:
             if isinstance(text_encoder_config, T5Config):
