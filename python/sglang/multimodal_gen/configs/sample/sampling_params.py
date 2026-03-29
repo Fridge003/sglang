@@ -527,7 +527,10 @@ class SamplingParams:
                 else:
                     orig_latent_num_frames = num_frames
 
-                if orig_latent_num_frames % server_args.num_gpus != 0:
+                if (
+                    pipeline_config.task_type.name != "S2V"
+                    and orig_latent_num_frames % server_args.num_gpus != 0
+                ):
                     # Adjust latent frames to be divisible by number of GPUs
                     if self.num_frames_round_down:
                         # Ensure we have at least 1 batch per GPU

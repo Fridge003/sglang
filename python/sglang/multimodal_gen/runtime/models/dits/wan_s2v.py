@@ -1132,22 +1132,70 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         x = torch.cat(x, dim=0)
         self.pre_compute_freqs = torch.cat(self.pre_compute_freqs, dim=0)
         mask_input = torch.cat(mask_input, dim=0)
-        condition_suffix_len = x.shape[1] - self.original_seq_len
+        video_seq_len = self.original_seq_len
+        condition_suffix_len = x.shape[1] - video_seq_len
         self.local_original_seq_len = self.original_seq_len
         seq_len_full = x.shape[1]
         seq_shard_pad = 0
         if sequence_shard_enabled:
-            if num_frames % self.sp_size != 0:
+            tokens_per_frame = video_seq_len // num_frames
+            if video_seq_len % num_frames != 0:
                 raise ValueError(
-                    f"Wan S2V latent num_frames {num_frames} must be divisible by sp_size {self.sp_size}"
+                    f"Wan S2V video sequence length {video_seq_len} is not divisible by latent frames {num_frames}"
                 )
-            if self.original_seq_len % self.sp_size != 0:
+            padded_num_frames = math.ceil(num_frames / self.sp_size) * self.sp_size
+            pad_frames = padded_num_frames - num_frames
+            if pad_frames > 0:
+                pad_tokens = pad_frames * tokens_per_frame
+                x_video_pad = x[
+                    :, video_seq_len - tokens_per_frame : video_seq_len
+                ].repeat(1, pad_frames, 1)
+                freq_video_pad = self.pre_compute_freqs[
+                    :, video_seq_len - tokens_per_frame : video_seq_len
+                ].repeat(1, pad_frames, 1, 1)
+                mask_video_pad = mask_input[
+                    :, video_seq_len - tokens_per_frame : video_seq_len
+                ].repeat(1, pad_frames)
+                x = torch.cat([x[:, :video_seq_len], x_video_pad, x[:, video_seq_len:]], dim=1)
+                self.pre_compute_freqs = torch.cat(
+                    [
+                        self.pre_compute_freqs[:, :video_seq_len],
+                        freq_video_pad,
+                        self.pre_compute_freqs[:, video_seq_len:],
+                    ],
+                    dim=1,
+                )
+                mask_input = torch.cat(
+                    [
+                        mask_input[:, :video_seq_len],
+                        mask_video_pad,
+                        mask_input[:, video_seq_len:],
+                    ],
+                    dim=1,
+                )
+                self.merged_audio_emb = torch.cat(
+                    [
+                        self.merged_audio_emb,
+                        self.merged_audio_emb[:, -1:].repeat(1, pad_frames, 1, 1),
+                    ],
+                    dim=1,
+                )
+                if self.enbale_adain:
+                    self.audio_emb_global = torch.cat(
+                        [
+                            self.audio_emb_global,
+                            self.audio_emb_global[:, -1:].repeat(1, pad_frames, 1, 1),
+                        ],
+                        dim=1,
+                    )
+            padded_video_seq_len = video_seq_len + pad_frames * tokens_per_frame
+            if padded_video_seq_len % self.sp_size != 0:
                 raise ValueError(
-                    f"Wan S2V video sequence length {self.original_seq_len} must be divisible by sp_size {self.sp_size}"
+                    f"Wan S2V video sequence length {padded_video_seq_len} must be divisible by sp_size {self.sp_size}"
                 )
             sp_rank = get_sp_group().rank_in_group
-            self.local_num_frames = num_frames // self.sp_size
-            self.local_original_seq_len = self.original_seq_len // self.sp_size
+            self.local_num_frames = padded_num_frames // self.sp_size
+            self.local_original_seq_len = padded_video_seq_len // self.sp_size
             video_slice = slice(
                 sp_rank * self.local_original_seq_len,
                 (sp_rank + 1) * self.local_original_seq_len,
@@ -1157,15 +1205,15 @@ class WanModelS2V(ModelMixin, ConfigMixin):
                 (sp_rank + 1) * self.local_num_frames,
             )
             x_video = x[:, video_slice]
-            x = torch.cat([x_video, x[:, self.original_seq_len :]], dim=1)
+            x = torch.cat([x_video, x[:, padded_video_seq_len:]], dim=1)
             freqs_video = self.pre_compute_freqs[:, video_slice]
             self.pre_compute_freqs = torch.cat(
-                [freqs_video, self.pre_compute_freqs[:, self.original_seq_len :]],
+                [freqs_video, self.pre_compute_freqs[:, padded_video_seq_len:]],
                 dim=1,
             )
             mask_video = mask_input[:, video_slice]
             mask_input = torch.cat(
-                [mask_video, mask_input[:, self.original_seq_len :]], dim=1
+                [mask_video, mask_input[:, padded_video_seq_len:]], dim=1
             )
             self.merged_audio_emb = self.merged_audio_emb[:, frame_slice]
             if self.enbale_adain:
