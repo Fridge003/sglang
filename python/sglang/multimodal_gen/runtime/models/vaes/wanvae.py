@@ -17,9 +17,7 @@
 # limitations under the License.
 
 import contextvars
-import os
 from contextlib import contextmanager
-from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -31,7 +29,6 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_sp_parallel_rank,
     get_sp_world_size,
 )
-from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.layers.activation import get_act_fn
 from sglang.multimodal_gen.runtime.models.vaes.common import (
     DiagonalGaussianDistribution,
@@ -817,19 +814,6 @@ class AutoencoderKLWan(ParallelTiledVAE):
     _supports_gradient_checkpointing = False
 
     @staticmethod
-    def _resolve_existing_path(component_model_path: str, path_value: str | None) -> str:
-        if not path_value:
-            raise ValueError("Wan VAE config is missing a required path")
-        path_value = os.path.expanduser(path_value)
-        if os.path.isabs(path_value):
-            resolved = path_value
-        else:
-            resolved = os.path.join(component_model_path, path_value)
-        if not os.path.exists(resolved):
-            raise ValueError(f"Resolved path does not exist: {resolved}")
-        return resolved
-
-    @staticmethod
     def _remap_official_state_key(key: str) -> str:
         if key == "encoder.conv1.weight":
             return "encoder.conv_in.weight"
@@ -926,52 +910,6 @@ class AutoencoderKLWan(ParallelTiledVAE):
             return key.replace("decoder.head.2.", "decoder.conv_out.", 1)
 
         return key
-
-    @classmethod
-    def from_component_path(
-        cls,
-        component_model_path: str,
-        server_args,
-        config: dict[str, Any],
-    ):
-        checkpoint_root = cls._resolve_existing_path(
-            component_model_path, config.get("wan_checkpoint_root")
-        )
-        vae_path = os.path.join(checkpoint_root, config.get("vae_checkpoint", "Wan2.1_VAE.pth"))
-
-        vae_config = server_args.pipeline_config.vae_config
-        vae_precision = server_args.pipeline_config.vae_precision
-        target_device = (
-            torch.device("cpu")
-            if bool(getattr(server_args, "vae_cpu_offload", False))
-            else get_local_torch_device()
-        )
-        target_dtype = {
-            "bf16": torch.bfloat16,
-            "fp16": torch.float16,
-            "fp32": torch.float32,
-        }[vae_precision]
-        model = cls(vae_config).to(
-            device=target_device,
-            dtype=target_dtype,
-        )
-        logger.info(
-            "Loaded Wan VAE config: use_parallel_encode=%s use_parallel_decode=%s encoder_conv=%s",
-            getattr(vae_config, "use_parallel_encode", None),
-            getattr(vae_config, "use_parallel_decode", None),
-            type(getattr(getattr(model, "encoder", None), "conv_in", None)).__name__,
-        )
-
-        official_state = torch.load(vae_path, map_location="cpu")
-        remapped_state = {
-            cls._remap_official_state_key(key): value
-            for key, value in official_state.items()
-        }
-        model.load_state_dict(remapped_state, strict=True)
-        # The official checkpoint is fp32. Force the fully-loaded module back to the
-        # requested runtime dtype so decode paths don't keep mixed fp32/bf16 params.
-        model = model.to(device=target_device, dtype=target_dtype)
-        return model.eval()
 
     def __init__(
         self,
