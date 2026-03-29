@@ -178,6 +178,9 @@ class WanI2V480PConfig(WanT2V480PConfig, WanI2VCommonConfig):
         self.vae_config.use_feature_cache = False
         self.vae_config.use_parallel_encode = False
         self.vae_config.use_parallel_decode = False
+        self.vae_config.use_feature_cache = False
+        self.vae_config.use_parallel_encode = False
+        self.vae_config.use_parallel_decode = False
 
 
 @dataclass
