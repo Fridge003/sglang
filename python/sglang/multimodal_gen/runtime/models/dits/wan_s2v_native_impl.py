@@ -109,6 +109,21 @@ def rope_precompute(x, grid_sizes, freqs, start=None):
     return output
 
 
+def _gather_debug_tensor(x, grid_sizes, num_replicated_suffix):
+    if get_sp_world_size() == 1:
+        return x
+    local_video_len = x.shape[1] - num_replicated_suffix
+    num_frames = int(grid_sizes[0, 0].item())
+    local_tokens_per_frame = local_video_len // num_frames
+    video = x[:, :local_video_len].view(
+        x.shape[0], num_frames, local_tokens_per_frame, x.shape[2]
+    )
+    video = sequence_model_parallel_all_gather(video.contiguous(), dim=2)
+    return torch.cat(
+        [video.reshape(x.shape[0], -1, x.shape[2]), x[:, local_video_len:]], dim=1
+    )
+
+
 class WanRMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
         super().__init__()
@@ -506,6 +521,15 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             and getattr(self, "_debug_dump_enabled", False)
             and getattr(self, "_debug_block_idx", -1) == debug_block_idx
         )
+        dump_rank = get_sp_group().rank_in_group if get_sp_world_size() > 1 else 0
+
+        def dump_tensor(name, tensor):
+            if not debug_enabled or dump_rank != 0:
+                return
+            tensor = _gather_debug_tensor(tensor, grid_sizes, num_replicated_suffix)
+            os.makedirs(debug_dump_dir, exist_ok=True)
+            torch.save(tensor.detach().cpu(), os.path.join(debug_dump_dir, name))
+
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
@@ -521,28 +545,22 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        if debug_enabled:
-            os.makedirs(debug_dump_dir, exist_ok=True)
-            torch.save(y.detach().cpu(), os.path.join(debug_dump_dir, "self_attn.pt"))
+        dump_tensor("self_attn.pt", y)
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[2][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
-        if debug_enabled:
-            torch.save(x.detach().cpu(), os.path.join(debug_dump_dir, "post_self_residual.pt"))
+        dump_tensor("post_self_residual.pt", x)
         cross = self.cross_attn(self.norm3(x), context, context_lens)
-        if debug_enabled:
-            torch.save(cross.detach().cpu(), os.path.join(debug_dump_dir, "cross_attn.pt"))
+        dump_tensor("cross_attn.pt", cross)
         x = x + cross
         norm2_x = self.norm2(x).float()
         norm2_x = torch.cat([norm2_x[:, seg_idx[i]:seg_idx[i+1]] * (1 + e[4][:, i:i+1]) + e[3][:, i:i+1] for i in range(2)], dim=1)
         y = self.ffn(norm2_x)
-        if debug_enabled:
-            torch.save(y.detach().cpu(), os.path.join(debug_dump_dir, "ffn.pt"))
+        dump_tensor("ffn.pt", y)
         with amp.autocast(dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[5][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
-        if debug_enabled:
-            torch.save(x.detach().cpu(), os.path.join(debug_dump_dir, "block_out.pt"))
+        dump_tensor("block_out.pt", x)
         return x
 
 
