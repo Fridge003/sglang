@@ -2192,6 +2192,12 @@ class ServerArgs:
             2.2 We will use Flashinfer backend on blackwell.
             2.3 Otherwise, we will use triton backend.
         """
+        # Whisper requires flashinfer for cross-attention CUDA graph support
+        if "WhisperForConditionalGeneration" in (
+            model_config.hf_config.architectures or []
+        ):
+            return "flashinfer"
+
         if not use_mla_backend:
             # MHA architecture
             if is_hopper_with_cuda_12_3() and is_no_spec_infer_or_topk_one(self):
@@ -2267,12 +2273,16 @@ class ServerArgs:
                 self.speculative_algorithm is None
             ), "Speculative decoding is currently not supported with Flex Attention backend"
 
-        # Encoder-decoder models (e.g., Whisper)
-        if model_config.is_encoder_decoder:
-            logger.warning(
-                "Cuda graph is disabled for encoder-decoder models (e.g., Whisper)"
-            )
-            self.disable_cuda_graph = True
+        # Whisper's encoder token padding conflicts with prefix caching.
+        # Only disable for Whisper; other encoder-decoder models (e.g., mllama) use radix cache.
+        if (
+            model_config.is_encoder_decoder
+            and not self.disable_radix_cache
+            and "WhisperForConditionalGeneration"
+            in (model_config.hf_config.architectures or [])
+        ):
+            logger.info("Radix cache is disabled for Whisper")
+            self.disable_radix_cache = True
 
         # Major NVIDIA platforms backends
         if (
@@ -4632,9 +4642,7 @@ class ServerArgs:
             "'flashinfer_deepgemm' (Hopper SM90 only; uses swapAB optimization for small M dimensions in decoding), "
             "'cutlass' (optimal for Hopper/Blackwell GPUs and high-throughput), "
             "'triton' (fallback, widely compatible), "
-            "'aiter' (ROCm only). "
-            "NOTE: This replaces the deprecated environment variables "
-            "SGLANG_ENABLE_FLASHINFER_FP8_GEMM and SGLANG_SUPPORT_CUTLASS_BLOCK_FP8.",
+            "'aiter' (ROCm only). ",
         )
         parser.add_argument(
             "--fp4-gemm-backend",
@@ -4646,9 +4654,7 @@ class ServerArgs:
             "Options: 'auto' (default; selects flashinfer_cudnn on SM120, flashinfer_cutlass otherwise), "
             "'flashinfer_cutlass' (CUTLASS backend), "
             "'flashinfer_cudnn' (FlashInfer cuDNN backend, optimal on CUDA 13+ with cuDNN 9.15+), "
-            "'flashinfer_trtllm' (FlashInfer TensorRT-LLM backend, requires different weight preparation with shuffling). "
-            "NOTE: This replaces the deprecated environment variable "
-            "SGLANG_FLASHINFER_FP4_GEMM_BACKEND.",
+            "'flashinfer_trtllm' (FlashInfer TensorRT-LLM backend, requires different weight preparation with shuffling). ",
         )
         parser.add_argument(
             "--disable-flashinfer-autotune",
