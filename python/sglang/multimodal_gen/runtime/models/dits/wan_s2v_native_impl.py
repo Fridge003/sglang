@@ -6,7 +6,6 @@ from copy import deepcopy
 
 import numpy as np
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.attention import AdaLayerNorm
@@ -65,7 +64,7 @@ def rope_apply(x, grid_sizes, freqs):
     return torch.stack(output).to(dtype=x.dtype)
 
 
-@amp.autocast(enabled=False)
+@torch.amp.autocast("cuda", enabled=False)
 def rope_precompute(x, grid_sizes, freqs, start=None):
     b, s, n, c = x.size(0), x.size(1), x.size(2), x.size(3) // 2
     if isinstance(freqs, list):
@@ -382,7 +381,7 @@ class CausalAudioEncoder(nn.Module):
         self.act = nn.SiLU()
 
     def forward(self, features):
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             weights = self.act(self.weights)
             weighted_feat = ((features * weights) / weights.sum(dim=1, keepdims=True)).sum(dim=1)
             weighted_feat = weighted_feat.permute(0, 2, 1)
@@ -478,7 +477,7 @@ class FramePackMotioner(nn.Module):
 
 class HeadS2V(Head):
     def forward(self, x, e):
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
             x = self.head(self.norm(x) * (1 + e[1]) + e[0])
         return x
@@ -533,7 +532,7 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             e = (self.modulation.unsqueeze(2) + e).chunk(6, dim=1)
         e = [element.squeeze(1) for element in e]
         norm_x = self.norm1(x).float()
@@ -545,7 +544,7 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[2][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
         cross = self.cross_attn(self.norm3(x), context, context_lens)
@@ -553,7 +552,7 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         norm2_x = self.norm2(x).float()
         norm2_x = torch.cat([norm2_x[:, seg_idx[i]:seg_idx[i+1]] * (1 + e[4][:, i:i+1]) + e[3][:, i:i+1] for i in range(2)], dim=1)
         y = self.ffn(norm2_x)
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             y = torch.cat([y[:, seg_idx[i]:seg_idx[i+1]] * e[5][:, i:i+1] for i in range(2)], dim=1)
             x = x + y
         return x
@@ -767,7 +766,7 @@ class WanModelS2V(ModelMixin, ConfigMixin):
         x = x + self.trainable_cond_mask(mask_input).to(x.dtype)
         if self.zero_timestep:
             t = torch.cat([t, torch.zeros([1], dtype=t.dtype, device=t.device)])
-        with amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast("cuda", dtype=torch.float32):
             e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
             e0 = self.time_projection(e).unflatten(1, (6, self.dim))
         if self.zero_timestep:
