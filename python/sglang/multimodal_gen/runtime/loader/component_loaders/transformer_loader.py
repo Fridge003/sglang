@@ -73,9 +73,6 @@ class TransformerLoader(ComponentLoader):
         safetensors_list = resolve_transformer_safetensors_to_load(
             server_args, component_model_path
         )
-        quant_config = self._resolve_quant_config(
-            config, server_args, safetensors_list, component_model_path
-        )
 
         cls_name = config.pop("_class_name")
         model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
