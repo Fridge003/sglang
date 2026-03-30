@@ -331,6 +331,31 @@ class Wan2_2_S2V_14B_Config(WanT2V480PConfig, WanI2VCommonConfig):
         pos_kwargs["audio_input"] = torch.zeros_like(pos_kwargs["audio_input"])
         return pos_kwargs
 
+    def skip_decode_scale_and_shift(self, vae) -> bool:
+        return hasattr(vae, "decode_video")
+
+    def prepare_decoding_latents(self, batch, server_args=None, vae=None):
+        del server_args, vae
+        extra = batch.extra["wan_s2v"]
+        prefix_latents = (
+            extra["ref_latents"]
+            if extra["drop_motion_frames"]
+            else extra["motion_latents"]
+        )
+        prefix_latents = prefix_latents.to(
+            device=batch.latents.device,
+            dtype=batch.latents.dtype,
+        )
+        return torch.cat([prefix_latents, batch.latents], dim=2)
+
+    def postprocess_decoded_batch(self, frames, batch, server_args):
+        del server_args
+        extra = batch.extra["wan_s2v"]
+        frames = frames[:, :, -extra["infer_frames"] :]
+        if extra["drop_motion_frames"]:
+            frames = frames[:, :, 3:]
+        return frames
+
     def __post_init__(self) -> None:
         self.vae_config.load_encoder = True
         self.vae_config.load_decoder = True

@@ -4,10 +4,12 @@
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages import DenoisingStage
+from sglang.multimodal_gen.runtime.pipelines_core.stages import (
+    DecodingStage,
+    DenoisingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.wan_s2v import (
     WanS2VBeforeDenoisingStage,
-    WanS2VDecodingStage,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
@@ -56,8 +58,9 @@ class WanSpeechToVideoPipeline(ComposedPipelineBase):
             )
         )
         self.add_stage(
-            WanS2VDecodingStage(
+            DecodingStage(
                 vae=self.get_module("vae"),
+                pipeline=self,
             )
         )
 

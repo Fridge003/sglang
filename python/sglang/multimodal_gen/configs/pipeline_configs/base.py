@@ -353,6 +353,10 @@ class PipelineConfig:
             shift_factor = getattr(vae, "shift_factor", None)
         return scaling_factor, shift_factor
 
+    def skip_decode_scale_and_shift(self, vae) -> bool:
+        del vae
+        return False
+
     # called after latents are prepared
     def maybe_pack_latents(self, latents, batch_size, batch):
         return latents
@@ -367,6 +371,10 @@ class PipelineConfig:
     # called after scale_and_shift, before vae decoding
     def preprocess_decoding(self, latents, server_args=None, vae=None):
         return latents
+
+    def prepare_decoding_latents(self, batch, server_args=None, vae=None):
+        del server_args, vae
+        return batch.latents
 
     def gather_latents_for_sp(self, latents, batch=None):
         # For video latents [B, C, T_local, H, W], gather along time dim=2
@@ -425,6 +433,10 @@ class PipelineConfig:
         return latents
 
     def post_decoding(self, frames, server_args):
+        return frames
+
+    def postprocess_decoded_batch(self, frames, batch, server_args):
+        del batch, server_args
         return frames
 
     def prepare_pos_cond_kwargs(self, batch, device, rotary_emb, dtype):
