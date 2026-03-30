@@ -19,8 +19,10 @@ from sglang.multimodal_gen.configs.models.dits.wan_s2v import (
     WAN_S2V_SAMPLE_NEG_PROMPT,
 )
 from sglang.multimodal_gen.runtime.distributed import (
+    divide,
     get_sp_group,
     get_sp_world_size,
+    get_tp_world_size,
     sequence_model_parallel_all_gather,
 )
 from sglang.multimodal_gen.runtime.distributed.parallel_state import (
@@ -30,7 +32,15 @@ from sglang.multimodal_gen.runtime.layers.attention.layer import (
     USPAttention,
     UlyssesAttention,
 )
-from sglang.multimodal_gen.runtime.layers.layernorm import FP32LayerNorm, RMSNorm
+from sglang.multimodal_gen.runtime.layers.layernorm import (
+    FP32LayerNorm,
+    RMSNorm,
+    tensor_parallel_rms_norm,
+)
+from sglang.multimodal_gen.runtime.layers.linear import (
+    ColumnParallelLinear,
+    RowParallelLinear,
+)
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -158,21 +168,25 @@ class WanSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.window_size = window_size
-        self.q = nn.Linear(dim, dim)
-        self.k = nn.Linear(dim, dim)
-        self.v = nn.Linear(dim, dim)
-        self.o = nn.Linear(dim, dim)
+        self.q = ColumnParallelLinear(dim, dim, gather_output=False, prefix="q")
+        self.k = ColumnParallelLinear(dim, dim, gather_output=False, prefix="k")
+        self.v = ColumnParallelLinear(dim, dim, gather_output=False, prefix="v")
+        self.o = RowParallelLinear(
+            dim, dim, input_is_parallel=True, reduce_results=True, prefix="o"
+        )
         self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.tp_rmsnorm = qk_norm and get_tp_world_size() > 1
+        self.local_num_heads = divide(num_heads, get_tp_world_size())
         self.attn = USPAttention(
-            num_heads=num_heads,
+            num_heads=self.local_num_heads,
             head_size=self.head_dim,
             causal=False,
             supported_attention_backends=supported_attention_backends,
             skip_sequence_parallel=skip_sequence_parallel,
         )
         self.ulysses_attn = UlyssesAttention(
-            num_heads=num_heads,
+            num_heads=self.local_num_heads,
             head_size=self.head_dim,
             causal=False,
             supported_attention_backends=supported_attention_backends,
@@ -180,10 +194,21 @@ class WanSelfAttention(nn.Module):
 
     def forward(self, x, seq_lens, grid_sizes, freqs, num_replicated_suffix=0):
         del seq_lens
-        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-        q = self.norm_q(self.q(x)).view(b, s, n, d)
-        k = self.norm_k(self.k(x)).view(b, s, n, d)
-        v = self.v(x).view(b, s, n, d)
+        b, s, n, d = *x.shape[:2], self.local_num_heads, self.head_dim
+        q, _ = self.q(x)
+        if self.tp_rmsnorm:
+            q = tensor_parallel_rms_norm(q, self.norm_q)
+        else:
+            q = self.norm_q(q)
+        q = q.view(b, s, n, d)
+        k, _ = self.k(x)
+        if self.tp_rmsnorm:
+            k = tensor_parallel_rms_norm(k, self.norm_k)
+        else:
+            k = self.norm_k(k)
+        k = k.view(b, s, n, d)
+        v, _ = self.v(x)
+        v = v.view(b, s, n, d)
         q = rope_apply(q, grid_sizes, freqs)
         k = rope_apply(k, grid_sizes, freqs)
         if (
@@ -219,7 +244,8 @@ class WanSelfAttention(nn.Module):
                 v,
                 num_replicated_suffix=num_replicated_suffix,
             )
-        return self.o(x.flatten(2))
+        x, _ = self.o(x.flatten(2))
+        return x
 
 
 class WanCrossAttention(WanSelfAttention):
