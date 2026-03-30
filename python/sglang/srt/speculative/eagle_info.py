@@ -293,7 +293,16 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
                 dtype=torch.float32,
                 device=batch.device,
             )
-            sampling_info.apply_logits_bias(linear_penalty)
+
+            # Only apply non-multiplicative (additive) penalizers to the capture tensor.
+            # Multiplicative penalizers (e.g. repetition penalty) would corrupt additive
+            # penalty values, so they are applied directly on logits below.
+            for pen in sampling_info.penalizer_orchestrator.penalizers.values():
+                if not getattr(pen, "is_multiplicative", False):
+                    pen.apply(linear_penalty)
+            if sampling_info.logit_bias is not None:
+                linear_penalty.add_(sampling_info.logit_bias)
+
             logits_output.next_token_logits.add_(
                 torch.repeat_interleave(linear_penalty, self.draft_token_num, dim=0)
             )
@@ -303,7 +312,6 @@ class EagleVerifyInput(SpecInput, EagleVerifyInputV2Mixin):
             if rep_cls in sampling_info.penalizer_orchestrator.penalizers:
                 rep_pen = sampling_info.penalizer_orchestrator.penalizers[rep_cls]
                 if rep_pen._is_prepared:
-                    # Expand per-request penalties to match draft_token_num layout
                     expanded_penalties = torch.repeat_interleave(
                         rep_pen.cumulated_repetition_penalties,
                         self.draft_token_num,
