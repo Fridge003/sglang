@@ -59,6 +59,10 @@ class WanS2VArchConfig(WanVideoArchConfig):
             r"^blocks\.(\d+)\.cross_attn\.o\.(.*)$": r"blocks.\1.cross_attn.to_out.\2",
             r"^blocks\.(\d+)\.ffn\.0\.(.*)$": r"blocks.\1.ffn.fc_in.\2",
             r"^blocks\.(\d+)\.ffn\.2\.(.*)$": r"blocks.\1.ffn.fc_out.\2",
+            r"^audio_injector\.injector\.(\d+)\.q\.(.*)$": r"audio_injector.injector.\1.to_q.\2",
+            r"^audio_injector\.injector\.(\d+)\.k\.(.*)$": r"audio_injector.injector.\1.to_k.\2",
+            r"^audio_injector\.injector\.(\d+)\.v\.(.*)$": r"audio_injector.injector.\1.to_v.\2",
+            r"^audio_injector\.injector\.(\d+)\.o\.(.*)$": r"audio_injector.injector.\1.to_out.\2",
         }
     )
 
