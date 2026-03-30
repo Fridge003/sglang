@@ -700,10 +700,6 @@ def _register_configs():
         sampling_param_cls=Wan2_2_S2V_14B_SamplingParam,
         pipeline_config_cls=Wan2_2_S2V_14B_Config,
         hf_model_paths=["Wan-AI/Wan2.2-S2V-14B"],
-        model_detectors=[
-            lambda hf_id: "wan2.2-s2v-14b" in hf_id.lower(),
-            lambda name: "wanspeechtovideopipeline" in name.lower(),
-        ],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,
