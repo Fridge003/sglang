@@ -768,11 +768,13 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         e = e[0]
         e = (self.modulation.float().unsqueeze(2) + e.float()).chunk(6, dim=1)
         e = [element.squeeze(1) for element in e]
-        norm_x = self.norm1(x).float()
         norm_x = torch.cat(
             [
-                norm_x[:, seg_idx[i] : seg_idx[i + 1]] * (1 + e[1][:, i : i + 1])
-                + e[0][:, i : i + 1]
+                self.norm1(
+                    x[:, seg_idx[i] : seg_idx[i + 1]],
+                    e[0][:, i : i + 1],
+                    e[1][:, i : i + 1],
+                )
                 for i in range(2)
             ],
             dim=1,
@@ -794,11 +796,13 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         x = x + y.to(dtype=x.dtype)
         cross = self.cross_attn(self.norm3(x), context, context_lens)
         x = x + cross
-        norm2_x = self.norm2(x).float()
         norm2_x = torch.cat(
             [
-                norm2_x[:, seg_idx[i] : seg_idx[i + 1]] * (1 + e[4][:, i : i + 1])
-                + e[3][:, i : i + 1]
+                self.norm2(
+                    x[:, seg_idx[i] : seg_idx[i + 1]],
+                    e[3][:, i : i + 1],
+                    e[4][:, i : i + 1],
+                )
                 for i in range(2)
             ],
             dim=1,
