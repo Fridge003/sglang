@@ -41,6 +41,7 @@ from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
+from sglang.multimodal_gen.runtime.layers.mlp import MLP
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -168,11 +169,17 @@ class WanSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.window_size = window_size
-        self.q = ColumnParallelLinear(dim, dim, gather_output=False, prefix="q")
-        self.k = ColumnParallelLinear(dim, dim, gather_output=False, prefix="k")
-        self.v = ColumnParallelLinear(dim, dim, gather_output=False, prefix="v")
-        self.o = RowParallelLinear(
-            dim, dim, input_is_parallel=True, reduce_results=True, prefix="o"
+        self.to_q = ColumnParallelLinear(
+            dim, dim, gather_output=False, prefix="to_q"
+        )
+        self.to_k = ColumnParallelLinear(
+            dim, dim, gather_output=False, prefix="to_k"
+        )
+        self.to_v = ColumnParallelLinear(
+            dim, dim, gather_output=False, prefix="to_v"
+        )
+        self.to_out = RowParallelLinear(
+            dim, dim, input_is_parallel=True, reduce_results=True, prefix="to_out"
         )
         self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
@@ -195,19 +202,19 @@ class WanSelfAttention(nn.Module):
     def forward(self, x, seq_lens, grid_sizes, freqs, num_replicated_suffix=0):
         del seq_lens
         b, s, n, d = *x.shape[:2], self.local_num_heads, self.head_dim
-        q, _ = self.q(x)
+        q, _ = self.to_q(x)
         if self.tp_rmsnorm:
             q = tensor_parallel_rms_norm(q, self.norm_q)
         else:
             q = self.norm_q(q)
         q = q.view(b, s, n, d)
-        k, _ = self.k(x)
+        k, _ = self.to_k(x)
         if self.tp_rmsnorm:
             k = tensor_parallel_rms_norm(k, self.norm_k)
         else:
             k = self.norm_k(k)
         k = k.view(b, s, n, d)
-        v, _ = self.v(x)
+        v, _ = self.to_v(x)
         v = v.view(b, s, n, d)
         q = rope_apply(q, grid_sizes, freqs)
         k = rope_apply(k, grid_sizes, freqs)
@@ -244,7 +251,7 @@ class WanSelfAttention(nn.Module):
                 v,
                 num_replicated_suffix=num_replicated_suffix,
             )
-        x, _ = self.o(x.flatten(2))
+        x, _ = self.to_out(x.flatten(2))
         return x
 
 
@@ -271,22 +278,22 @@ class WanCrossAttention(WanSelfAttention):
     def forward(self, x, context, context_lens):
         del context_lens
         b, n, d = x.size(0), self.local_num_heads, self.head_dim
-        q, _ = self.q(x)
+        q, _ = self.to_q(x)
         if self.tp_rmsnorm:
             q = tensor_parallel_rms_norm(q, self.norm_q)
         else:
             q = self.norm_q(q)
         q = q.view(b, -1, n, d)
-        k, _ = self.k(context)
+        k, _ = self.to_k(context)
         if self.tp_rmsnorm:
             k = tensor_parallel_rms_norm(k, self.norm_k)
         else:
             k = self.norm_k(k)
         k = k.view(b, -1, n, d)
-        v, _ = self.v(context)
+        v, _ = self.to_v(context)
         v = v.view(b, -1, n, d)
         x = self.attn(q, k, v)
-        x, _ = self.o(x.flatten(2))
+        x, _ = self.to_out(x.flatten(2))
         return x
 
 
@@ -326,11 +333,7 @@ class WanAttentionBlock(nn.Module):
             supported_attention_backends=supported_attention_backends,
         )
         self.norm2 = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
-        self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim),
-            nn.GELU(approximate="tanh"),
-            nn.Linear(ffn_dim, dim),
-        )
+        self.ffn = MLP(dim, ffn_dim, dim, act_type="gelu_pytorch_tanh")
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
     def forward(

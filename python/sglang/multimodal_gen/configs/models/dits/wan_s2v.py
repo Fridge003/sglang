@@ -49,6 +49,16 @@ class WanS2VArchConfig(WanVideoArchConfig):
     param_names_mapping: dict = field(
         default_factory=lambda: {
             r"^patch_embedding\.proj\.(.*)$": r"patch_embedding.\1",
+            r"^blocks\.(\d+)\.self_attn\.q\.(.*)$": r"blocks.\1.self_attn.to_q.\2",
+            r"^blocks\.(\d+)\.self_attn\.k\.(.*)$": r"blocks.\1.self_attn.to_k.\2",
+            r"^blocks\.(\d+)\.self_attn\.v\.(.*)$": r"blocks.\1.self_attn.to_v.\2",
+            r"^blocks\.(\d+)\.self_attn\.o\.(.*)$": r"blocks.\1.self_attn.to_out.\2",
+            r"^blocks\.(\d+)\.cross_attn\.q\.(.*)$": r"blocks.\1.cross_attn.to_q.\2",
+            r"^blocks\.(\d+)\.cross_attn\.k\.(.*)$": r"blocks.\1.cross_attn.to_k.\2",
+            r"^blocks\.(\d+)\.cross_attn\.v\.(.*)$": r"blocks.\1.cross_attn.to_v.\2",
+            r"^blocks\.(\d+)\.cross_attn\.o\.(.*)$": r"blocks.\1.cross_attn.to_out.\2",
+            r"^blocks\.(\d+)\.ffn\.0\.(.*)$": r"blocks.\1.ffn.fc_in.\2",
+            r"^blocks\.(\d+)\.ffn\.2\.(.*)$": r"blocks.\1.ffn.fc_out.\2",
         }
     )
 
