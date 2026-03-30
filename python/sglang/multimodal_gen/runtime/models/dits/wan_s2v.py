@@ -30,6 +30,7 @@ from sglang.multimodal_gen.runtime.layers.attention.layer import (
     USPAttention,
     UlyssesAttention,
 )
+from sglang.multimodal_gen.runtime.layers.layernorm import FP32LayerNorm, RMSNorm
 from sglang.multimodal_gen.runtime.managers.forward_context import get_forward_context
 from sglang.multimodal_gen.runtime.platforms import AttentionBackendEnum
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
@@ -141,27 +142,6 @@ def rope_precompute(x, grid_sizes, freqs, start=None):
     return output
 
 
-class WanRMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        out = x.float() * torch.rsqrt(
-            x.float().pow(2).mean(dim=-1, keepdim=True) + self.eps
-        )
-        return out.to(dtype=x.dtype) * self.weight.to(dtype=x.dtype)
-
-
-class WanLayerNorm(nn.LayerNorm):
-    def __init__(self, dim, eps=1e-6, elementwise_affine=False):
-        super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    def forward(self, x):
-        return super().forward(x.float()).type_as(x)
-
-
 class WanSelfAttention(nn.Module):
     def __init__(
         self,
@@ -182,8 +162,8 @@ class WanSelfAttention(nn.Module):
         self.k = nn.Linear(dim, dim)
         self.v = nn.Linear(dim, dim)
         self.o = nn.Linear(dim, dim)
-        self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
-        self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
         self.attn = USPAttention(
             num_heads=num_heads,
             head_size=self.head_dim,
@@ -285,7 +265,7 @@ class WanAttentionBlock(nn.Module):
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
     ):
         super().__init__()
-        self.norm1 = WanLayerNorm(dim, eps)
+        self.norm1 = FP32LayerNorm(dim, eps=eps)
         self.self_attn = WanSelfAttention(
             dim,
             num_heads,
@@ -295,7 +275,7 @@ class WanAttentionBlock(nn.Module):
             supported_attention_backends=supported_attention_backends,
         )
         self.norm3 = (
-            WanLayerNorm(dim, eps, elementwise_affine=True)
+            FP32LayerNorm(dim, eps=eps, elementwise_affine=True)
             if cross_attn_norm
             else nn.Identity()
         )
@@ -307,7 +287,7 @@ class WanAttentionBlock(nn.Module):
             eps,
             supported_attention_backends=supported_attention_backends,
         )
-        self.norm2 = WanLayerNorm(dim, eps)
+        self.norm2 = FP32LayerNorm(dim, eps=eps)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
             nn.GELU(approximate="tanh"),
@@ -348,7 +328,7 @@ class Head(nn.Module):
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
         super().__init__()
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = WanLayerNorm(dim, eps)
+        self.norm = FP32LayerNorm(dim, eps=eps)
         self.head = nn.Linear(dim, out_dim)
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
