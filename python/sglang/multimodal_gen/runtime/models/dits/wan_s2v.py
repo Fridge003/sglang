@@ -967,8 +967,8 @@ class WanModelS2V(ModelMixin, ConfigMixin):
             if hasattr(self, "cond_encoder"):
                 self.cond_encoder = zero_module(self.cond_encoder)
             for i in range(len(self.audio_injector.injector)):
-                self.audio_injector.injector[i].o = zero_module(
-                    self.audio_injector.injector[i].o
+                self.audio_injector.injector[i].to_out = zero_module(
+                    self.audio_injector.injector[i].to_out
                 )
                 if self.enbale_adain:
                     self.audio_injector.injector_adain_layers[i].linear = zero_module(
