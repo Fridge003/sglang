@@ -56,19 +56,6 @@ class TransformerLoader(ComponentLoader):
         dit_config = getattr(server_args.pipeline_config, pipeline_dit_config_attr)
         dit_config.update_model_arch(config)
 
-        model_cls, _ = ModelRegistry.resolve_model_cls(cls_name)
-        if hasattr(model_cls, "from_component_path"):
-            logger.info(
-                "Loading %s from component path %s", cls_name, component_model_path
-            )
-            engine_config = dict(config)
-            engine_config.pop("_class_name", None)
-            return model_cls.from_component_path(
-                component_model_path=component_model_path,
-                server_args=server_args,
-                config=engine_config,
-            )
-
         # 3. quant config
         safetensors_list = resolve_transformer_safetensors_to_load(
             server_args, component_model_path

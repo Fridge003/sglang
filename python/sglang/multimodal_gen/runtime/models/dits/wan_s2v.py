@@ -306,8 +306,7 @@ class WanAttentionBlock(nn.Module):
         context_lens,
         num_replicated_suffix=0,
     ):
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
+        e = (self.modulation.float().unsqueeze(0) + e.float()).chunk(6, dim=2)
         y = self.self_attn(
             self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens,
@@ -315,12 +314,10 @@ class WanAttentionBlock(nn.Module):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e[2].squeeze(2)
+        x = x + (y.float() * e[2].squeeze(2)).to(dtype=x.dtype)
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
         y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            x = x + y * e[5].squeeze(2)
+        x = x + (y.float() * e[5].squeeze(2)).to(dtype=x.dtype)
         return x
 
 
@@ -333,11 +330,12 @@ class Head(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
     def forward(self, x, e):
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(2, dim=2)
-            return self.head(
-                self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
-            )
+        e = (self.modulation.float().unsqueeze(0) + e.float().unsqueeze(2)).chunk(
+            2, dim=2
+        )
+        return self.head(
+            self.norm(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2)
+        )
 
 
 class CausalConv1d(nn.Module):
@@ -455,13 +453,12 @@ class CausalAudioEncoder(nn.Module):
         self.act = nn.SiLU()
 
     def forward(self, features):
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            weights = self.act(self.weights)
-            weighted_feat = (
-                (features * weights) / weights.sum(dim=1, keepdims=True)
-            ).sum(dim=1)
-            weighted_feat = weighted_feat.permute(0, 2, 1)
-            return self.encoder(weighted_feat)
+        weights = self.act(self.weights.float())
+        weighted_feat = (
+            (features.float() * weights) / weights.sum(dim=1, keepdims=True)
+        ).sum(dim=1)
+        weighted_feat = weighted_feat.permute(0, 2, 1)
+        return self.encoder(weighted_feat.to(dtype=features.dtype))
 
 
 class AudioCrossAttention(WanCrossAttention):
@@ -664,9 +661,8 @@ class FramePackMotioner(nn.Module):
 
 class HeadS2V(Head):
     def forward(self, x, e):
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
-            x = self.head(self.norm(x) * (1 + e[1]) + e[0])
+        e = (self.modulation.float() + e.float().unsqueeze(1)).chunk(2, dim=1)
+        x = self.head(self.norm(x) * (1 + e[1]) + e[0])
         return x
 
 
@@ -719,8 +715,7 @@ class WanS2VAttentionBlock(WanAttentionBlock):
         seg_idx = min(max(0, e[1].item()), x.size(1))
         seg_idx = [0, seg_idx, x.size(1)]
         e = e[0]
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            e = (self.modulation.unsqueeze(2) + e).chunk(6, dim=1)
+        e = (self.modulation.float().unsqueeze(2) + e.float()).chunk(6, dim=1)
         e = [element.squeeze(1) for element in e]
         norm_x = self.norm1(x).float()
         norm_x = torch.cat(
@@ -738,15 +733,14 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            y = torch.cat(
-                [
-                    y[:, seg_idx[i] : seg_idx[i + 1]] * e[2][:, i : i + 1]
-                    for i in range(2)
-                ],
-                dim=1,
-            )
-            x = x + y
+        y = torch.cat(
+            [
+                y[:, seg_idx[i] : seg_idx[i + 1]].float() * e[2][:, i : i + 1]
+                for i in range(2)
+            ],
+            dim=1,
+        )
+        x = x + y.to(dtype=x.dtype)
         cross = self.cross_attn(self.norm3(x), context, context_lens)
         x = x + cross
         norm2_x = self.norm2(x).float()
@@ -759,15 +753,14 @@ class WanS2VAttentionBlock(WanAttentionBlock):
             dim=1,
         )
         y = self.ffn(norm2_x)
-        with torch.amp.autocast("cuda", dtype=torch.float32):
-            y = torch.cat(
-                [
-                    y[:, seg_idx[i] : seg_idx[i + 1]] * e[5][:, i : i + 1]
-                    for i in range(2)
-                ],
-                dim=1,
-            )
-            x = x + y
+        y = torch.cat(
+            [
+                y[:, seg_idx[i] : seg_idx[i + 1]].float() * e[5][:, i : i + 1]
+                for i in range(2)
+            ],
+            dim=1,
+        )
+        x = x + y.to(dtype=x.dtype)
         return x
 
 
