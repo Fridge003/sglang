@@ -2383,6 +2383,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         # Collect attention layers and moe layers from the model
         self.model.model = resolve_language_model(self.model)
         language_model = getattr(self.model, "language_model", self.model)
+
+        # Some draft models (e.g. eagle3) don't have a standard 'layers' attribute
+        if not hasattr(language_model.model, "layers"):
+            logger.warning(
+                "Disable piecewise CUDA graph because the model does not have a 'layers' attribute"
+            )
+            return
+
         self.attention_layers = []
         self.moe_layers = []
         self.moe_fusions = []
@@ -2416,6 +2424,8 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
             if attn_layer is not None:
                 self.attention_layers.append(attn_layer)
+            elif hasattr(layer, "mixer"):
+                self.attention_layers.append(None)
 
             moe_block = None
             moe_fusion = None
