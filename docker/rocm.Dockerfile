@@ -27,7 +27,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_COMMIT="5f88ca1cd5f097b3e408fb4afe938e74b7f59f8a"
 
 # ===============================
 # Base image 942 with rocm720 and args
@@ -37,7 +37,7 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_COMMIT="5f88ca1cd5f097b3e408fb4afe938e74b7f59f8a"
 
 # ===============================
 # Base image 950 and args
@@ -47,7 +47,7 @@ ENV BUILD_TRITON="0"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_COMMIT="5f88ca1cd5f097b3e408fb4afe938e74b7f59f8a"
 
 # ===============================
 # Base image 950 with rocm720 and args
@@ -57,7 +57,7 @@ ENV BUILD_TRITON="1"
 ENV BUILD_LLVM="0"
 ENV BUILD_AITER_ALL="1"
 ENV BUILD_MOONCAKE="1"
-ENV AITER_COMMIT="v0.1.11.post1"
+ENV AITER_COMMIT="5f88ca1cd5f097b3e408fb4afe938e74b7f59f8a"
 
 # ===============================
 # Chosen arch and args
