@@ -102,7 +102,7 @@ class TestDeepseekV32TC(CustomTestCase):
                 f"### test_gsm8k (deepseek-v32 TC MI325)\n"
                 f'{metrics["accuracy"]=:.3f}\n'
             )
-            self.assertGreater(metrics["accuracy"], GSM8K_ACCURACY_THRESHOLD)
+        self.assertGreater(metrics["accuracy"], GSM8K_ACCURACY_THRESHOLD)
 
     def test_bs_1_speed(self):
         """Single batch speed test for TC configuration."""

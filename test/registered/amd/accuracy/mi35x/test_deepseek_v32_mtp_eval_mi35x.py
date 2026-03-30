@@ -120,8 +120,8 @@ class TestDeepseekV32TPMTP(CustomTestCase):
                 f'{metrics["accuracy"]=:.3f}\n'
                 f"{avg_spec_accept_length=:.2f}\n"
             )
-            self.assertGreater(metrics["accuracy"], GSM8K_ACCURACY_THRESHOLD)
-            self.assertGreater(avg_spec_accept_length, AVG_SPEC_ACCEPT_LENGTH_THRESHOLD)
+        self.assertGreater(metrics["accuracy"], GSM8K_ACCURACY_THRESHOLD)
+        self.assertGreater(avg_spec_accept_length, AVG_SPEC_ACCEPT_LENGTH_THRESHOLD)
 
     def test_bs_1_speed(self):
         """Single batch speed test for TP+MTP configuration."""
