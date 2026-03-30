@@ -194,18 +194,15 @@ class TestApplyLogitsBias(CustomTestCase):
 class TestUpdatePenalties(CustomTestCase):
 
     def test_required_creates_penalties_tensor(self):
-        """Test that update_penalties allocates a zero tensor and calls penalizer apply."""
-        # Create a mock linear penalizer (non-multiplicative, prepared)
-        linear_pen = MagicMock(_is_prepared=True)
-        linear_pen.is_multiplicative = False
-
+        """Test that update_penalties allocates a zero tensor and calls orchestrator methods."""
         orch = MagicMock(is_required=True)
-        orch.penalizers = {"linear": linear_pen}
+        orch.accumulate_scaling_penalties.return_value = None
         info = _make_info(batch_size=2, penalizer_orchestrator=orch)
         info.update_penalties()
         self.assertIsNotNone(info.acc_linear_penalties)
         self.assertEqual(info.acc_linear_penalties.shape, (2, VOCAB_SIZE))
-        linear_pen.apply.assert_called_once_with(info.acc_linear_penalties)
+        orch.apply_additive.assert_called_once_with(info.acc_linear_penalties)
+        orch.accumulate_scaling_penalties.assert_called_once()
 
     def test_not_required_sets_none(self):
         """Test that update_penalties sets acc_linear_penalties to None when not required."""

@@ -239,21 +239,10 @@ class SamplingBatchInfo:
                 dtype=torch.float32,
                 device=self.temperatures.device,
             )
-            self.acc_scaling_penalties = None
-
-            for pen in self.penalizer_orchestrator.penalizers.values():
-                if not pen._is_prepared:
-                    continue
-                if getattr(pen, "is_multiplicative", False):
-                    # Accumulate multiplicative penalties (e.g. repetition penalty)
-                    if self.acc_scaling_penalties is None:
-                        self.acc_scaling_penalties = (
-                            pen.cumulated_repetition_penalties.clone()
-                        )
-                    else:
-                        self.acc_scaling_penalties *= pen.cumulated_repetition_penalties
-                else:
-                    pen.apply(self.acc_linear_penalties)
+            self.penalizer_orchestrator.apply_additive(self.acc_linear_penalties)
+            self.acc_scaling_penalties = (
+                self.penalizer_orchestrator.accumulate_scaling_penalties()
+            )
         else:
             self.acc_linear_penalties = None
             self.acc_scaling_penalties = None

@@ -54,6 +54,9 @@ class BatchedRepetitionPenalizer(_BatchedPenalizer):
         apply_scaling_penalties(logits, self.cumulated_repetition_penalties)
         return logits
 
+    def get_scaling_penalties(self) -> torch.Tensor:
+        return self.cumulated_repetition_penalties
+
     def _filter(self, keep_indices: torch.Tensor):
         self.repetition_penalties = self.repetition_penalties[keep_indices]
         self.cumulated_repetition_penalties = self.cumulated_repetition_penalties[
