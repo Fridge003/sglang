@@ -25,6 +25,8 @@ from typing import (
     Union,
 )
 
+from huggingface_hub import hf_hub_download
+
 if TYPE_CHECKING:
     from sglang.multimodal_gen.runtime.server_args import Backend
 
@@ -71,6 +73,7 @@ from sglang.multimodal_gen.configs.pipeline_configs.wan import (
     TurboWanI2V720Config,
     TurboWanT2V480PConfig,
     Wan2_2_I2V_A14B_Config,
+    Wan2_2_S2V_14B_Config,
     Wan2_2_T2V_A14B_Config,
     Wan2_2_TI2V_5B_Config,
 )
@@ -106,6 +109,7 @@ from sglang.multimodal_gen.configs.sample.wan import (
     Turbo_Wan2_2_I2V_A14B_SamplingParam,
     Wan2_1_Fun_1_3B_InP_SamplingParams,
     Wan2_2_I2V_A14B_SamplingParam,
+    Wan2_2_S2V_14B_SamplingParam,
     Wan2_2_T2V_A14B_SamplingParam,
     Wan2_2_TI2V_5B_SamplingParam,
     WanI2V_14B_480P_SamplingParam,
@@ -120,11 +124,14 @@ from sglang.multimodal_gen.configs.sample.zimage import (
 from sglang.multimodal_gen.runtime.pipelines_core.composed_pipeline_base import (
     ComposedPipelineBase,
 )
+from sglang.multimodal_gen.runtime.utils.model_overlay import (
+    maybe_load_overlay_model_index,
+)
 from sglang.multimodal_gen.runtime.utils.hf_diffusers_utils import (
     maybe_download_model_index,
+    snapshot_download,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.utils import KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS
 
 logger = init_logger(__name__)
 
@@ -327,7 +334,13 @@ def _get_config_info(
             return _CONFIG_REGISTRY.get(model_id)
 
     # 3. Use detectors
-    config = maybe_download_model_index(model_path)
+    config = maybe_load_overlay_model_index(
+        model_path,
+        snapshot_download_fn=snapshot_download,
+        hf_hub_download_fn=hf_hub_download,
+    )
+    if config is None:
+        config = maybe_download_model_index(model_path)
     pipeline_name = config.get("_class_name", "").lower()
 
     matched_model_names = []
@@ -496,7 +509,13 @@ def get_model_info(
     else:
         # Try to get from model_index.json
         try:
-            config = maybe_download_model_index(model_path)
+            config = maybe_load_overlay_model_index(
+                model_path,
+                snapshot_download_fn=snapshot_download,
+                hf_hub_download_fn=hf_hub_download,
+            )
+            if config is None:
+                config = maybe_download_model_index(model_path)
         except Exception as e:
             logger.error(f"Could not read model config for '{model_path}': {e}")
             if backend == Backend.AUTO:
@@ -676,6 +695,11 @@ def _register_configs():
         sampling_param_cls=Wan2_2_I2V_A14B_SamplingParam,
         pipeline_config_cls=Wan2_2_I2V_A14B_Config,
         hf_model_paths=["Wan-AI/Wan2.2-I2V-A14B-Diffusers"],
+    )
+    register_configs(
+        sampling_param_cls=Wan2_2_S2V_14B_SamplingParam,
+        pipeline_config_cls=Wan2_2_S2V_14B_Config,
+        hf_model_paths=["Wan-AI/Wan2.2-S2V-14B"],
     )
     register_configs(
         sampling_param_cls=FastWanT2V480PConfig,
@@ -870,18 +894,25 @@ def _register_configs():
 _register_configs()
 
 
+# Known non-diffusers multimodal model patterns
+# Maps pattern -> pipeline_name for models that don't have model_index.json
+_NON_DIFFUSERS_MULTIMODAL_PATTERNS: Dict[str, str] = {
+    "hunyuan3d": "Hunyuan3D2Pipeline",
+    "flux.2-dev-nvfp4": "Flux2NvfpPipeline",
+}
+
+
 def is_known_non_diffusers_multimodal_model(model_path: str) -> bool:
     model_path_lower = model_path.lower()
     return any(
-        pattern in model_path_lower
-        for pattern in KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS
+        pattern in model_path_lower for pattern in _NON_DIFFUSERS_MULTIMODAL_PATTERNS
     )
 
 
 def get_non_diffusers_pipeline_name(model_path: str) -> Optional[str]:
     """Get the pipeline name for a known non-diffusers model."""
     model_path_lower = model_path.lower()
-    for pattern, pipeline_name in KNOWN_NON_DIFFUSERS_DIFFUSION_MODEL_PATTERNS.items():
+    for pattern, pipeline_name in _NON_DIFFUSERS_MULTIMODAL_PATTERNS.items():
         if pattern in model_path_lower:
             return pipeline_name
     return None
