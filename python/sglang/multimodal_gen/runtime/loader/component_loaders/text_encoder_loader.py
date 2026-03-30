@@ -100,7 +100,7 @@ class TextEncoderLoader(ComponentLoader):
             component_model_path,
             trust_remote_code=server_args.trust_remote_code,
             revision=server_args.revision,
-            torch_dtype=PRECISION_TO_TYPE[encoder_dtype],
+            dtype=PRECISION_TO_TYPE[encoder_dtype],
         )
 
     def _prepare_weights(

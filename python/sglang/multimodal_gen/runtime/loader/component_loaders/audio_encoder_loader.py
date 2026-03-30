@@ -32,7 +32,7 @@ class AudioEncoderLoader(ComponentLoader):
         return model_cls(
             config=encoder_config,
             component_model_path=component_model_path,
-            torch_dtype=PRECISION_TO_TYPE[
+            dtype=PRECISION_TO_TYPE[
                 server_args.pipeline_config.audio_encoder_precision
             ],
             target_device=target_device,

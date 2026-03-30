@@ -69,7 +69,7 @@ class WanS2VAudioEncoder(AudioEncoder):
         config: WanS2VAudioEncoderConfig,
         component_model_path: str,
         *,
-        torch_dtype: torch.dtype = torch.float32,
+        dtype: torch.dtype = torch.float32,
         target_device: torch.device | str = "cpu",
     ) -> None:
         super().__init__(config)
@@ -83,7 +83,7 @@ class WanS2VAudioEncoder(AudioEncoder):
         self.processor = Wav2Vec2Processor.from_pretrained(model_path)
         self.model = Wav2Vec2ForCTC.from_pretrained(
             model_path,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
         )
         self.model = self.model.to(target_device)
         self.video_rate = config.arch_config.video_rate
