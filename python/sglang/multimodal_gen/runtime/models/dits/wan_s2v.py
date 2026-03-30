@@ -386,7 +386,7 @@ class MotionEncoderTC(nn.Module):
         )
         if need_global:
             self.conv1_global = CausalConv1d(in_dim, hidden_dim // 4, 3, stride=1)
-        self.norm1 = nn.LayerNorm(
+        self.norm1 = FP32LayerNorm(
             hidden_dim // 4, elementwise_affine=False, eps=1e-6, **factory_kwargs
         )
         self.act = nn.SiLU()
@@ -394,10 +394,10 @@ class MotionEncoderTC(nn.Module):
         self.conv3 = CausalConv1d(hidden_dim // 2, hidden_dim, 3, stride=2)
         if need_global:
             self.final_linear = nn.Linear(hidden_dim, hidden_dim, **factory_kwargs)
-        self.norm2 = nn.LayerNorm(
+        self.norm2 = FP32LayerNorm(
             hidden_dim // 2, elementwise_affine=False, eps=1e-6, **factory_kwargs
         )
-        self.norm3 = nn.LayerNorm(
+        self.norm3 = FP32LayerNorm(
             hidden_dim, elementwise_affine=False, eps=1e-6, **factory_kwargs
         )
         self.padding_tokens = nn.Parameter(torch.zeros(1, 1, 1, hidden_dim))
@@ -494,7 +494,7 @@ class AudioInjectorWAN(nn.Module):
         )
         self.injector_pre_norm_feat = nn.ModuleList(
             [
-                nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
+                FP32LayerNorm(dim, elementwise_affine=False, eps=1e-6)
                 for _ in range(audio_injector_id)
             ]
         )
