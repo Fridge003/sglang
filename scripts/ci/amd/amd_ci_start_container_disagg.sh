@@ -21,7 +21,7 @@ fi
 
 # Default base tags (can be overridden by command line arguments)
 ROCM_VERSION="rocm700"
-IMAGE_SUFFIX="test-pr-20023"
+IMAGE_SUFFIX="test-aiter-upgrade"
 DEFAULT_MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x-${IMAGE_SUFFIX}"
 DEFAULT_MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x-${IMAGE_SUFFIX}"
 
