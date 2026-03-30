@@ -32,8 +32,10 @@ from sglang.multimodal_gen.runtime.layers.attention.layer import (
     USPAttention,
     UlyssesAttention,
 )
+from sglang.multimodal_gen.runtime.layers.elementwise import MulAdd
 from sglang.multimodal_gen.runtime.layers.layernorm import (
     FP32LayerNorm,
+    LayerNormScaleShift,
     RMSNorm,
     tensor_parallel_rms_norm,
 )
@@ -310,7 +312,9 @@ class WanAttentionBlock(nn.Module):
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
     ):
         super().__init__()
-        self.norm1 = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm1 = LayerNormScaleShift(
+            dim, eps=eps, elementwise_affine=False, dtype=torch.float32
+        )
         self.self_attn = WanSelfAttention(
             dim,
             num_heads,
@@ -332,9 +336,13 @@ class WanAttentionBlock(nn.Module):
             eps,
             supported_attention_backends=supported_attention_backends,
         )
-        self.norm2 = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm2 = LayerNormScaleShift(
+            dim, eps=eps, elementwise_affine=False, dtype=torch.float32
+        )
         self.ffn = MLP(dim, ffn_dim, dim, act_type="gelu_pytorch_tanh")
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.self_attn_residual = MulAdd()
+        self.mlp_residual = MulAdd()
 
     def forward(
         self,
@@ -349,16 +357,18 @@ class WanAttentionBlock(nn.Module):
     ):
         e = (self.modulation.float().unsqueeze(0) + e.float()).chunk(6, dim=2)
         y = self.self_attn(
-            self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
+            self.norm1(x, e[0].squeeze(2), e[1].squeeze(2)),
             seq_lens,
             grid_sizes,
             freqs,
             num_replicated_suffix=num_replicated_suffix,
         )
-        x = x + (y.float() * e[2].squeeze(2)).to(dtype=x.dtype)
+        x = self.self_attn_residual(y.float(), e[2].squeeze(2), x.float()).to(
+            dtype=x.dtype
+        )
         x = x + self.cross_attn(self.norm3(x), context, context_lens)
-        y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) + e[3].squeeze(2))
-        x = x + (y.float() * e[5].squeeze(2)).to(dtype=x.dtype)
+        y = self.ffn(self.norm2(x, e[3].squeeze(2), e[4].squeeze(2)))
+        x = self.mlp_residual(y.float(), e[5].squeeze(2), x.float()).to(dtype=x.dtype)
         return x
 
 
