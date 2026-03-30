@@ -265,7 +265,7 @@ class WanAttentionBlock(nn.Module):
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
     ):
         super().__init__()
-        self.norm1 = FP32LayerNorm(dim, eps=eps)
+        self.norm1 = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.self_attn = WanSelfAttention(
             dim,
             num_heads,
@@ -287,7 +287,7 @@ class WanAttentionBlock(nn.Module):
             eps,
             supported_attention_backends=supported_attention_backends,
         )
-        self.norm2 = FP32LayerNorm(dim, eps=eps)
+        self.norm2 = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim),
             nn.GELU(approximate="tanh"),
@@ -328,7 +328,7 @@ class Head(nn.Module):
     def __init__(self, dim, out_dim, patch_size, eps=1e-6):
         super().__init__()
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = FP32LayerNorm(dim, eps=eps)
+        self.norm = FP32LayerNorm(dim, eps=eps, elementwise_affine=False)
         self.head = nn.Linear(dim, out_dim)
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
