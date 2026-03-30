@@ -270,12 +270,24 @@ class WanCrossAttention(WanSelfAttention):
 
     def forward(self, x, context, context_lens):
         del context_lens
-        b, n, d = x.size(0), self.num_heads, self.head_dim
-        q = self.norm_q(self.q(x)).view(b, -1, n, d)
-        k = self.norm_k(self.k(context)).view(b, -1, n, d)
-        v = self.v(context).view(b, -1, n, d)
+        b, n, d = x.size(0), self.local_num_heads, self.head_dim
+        q, _ = self.q(x)
+        if self.tp_rmsnorm:
+            q = tensor_parallel_rms_norm(q, self.norm_q)
+        else:
+            q = self.norm_q(q)
+        q = q.view(b, -1, n, d)
+        k, _ = self.k(context)
+        if self.tp_rmsnorm:
+            k = tensor_parallel_rms_norm(k, self.norm_k)
+        else:
+            k = self.norm_k(k)
+        k = k.view(b, -1, n, d)
+        v, _ = self.v(context)
+        v = v.view(b, -1, n, d)
         x = self.attn(q, k, v)
-        return self.o(x.flatten(2))
+        x, _ = self.o(x.flatten(2))
+        return x
 
 
 class WanAttentionBlock(nn.Module):
