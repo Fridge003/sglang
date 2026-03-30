@@ -5,46 +5,22 @@ import subprocess
 from functools import lru_cache
 
 from sglang.srt.environ import envs
+from sglang.utils import (
+    has_diffusion_overlay_registry_match,
+    is_known_non_diffusers_diffusion_model,
+    load_diffusion_overlay_registry_from_env,
+)
 
 logger = logging.getLogger(__name__)
 
 
-_BUILTIN_DIFFUSION_OVERLAY_REGISTRY = {
-    "Wan-AI/Wan2.2-S2V-14B": {
-        "overlay_repo_id": "MickJ/Wan2.2-S2V-14B-overlay",
-        "overlay_revision": "main",
-    }
-}
+@lru_cache(maxsize=1)
+def _load_overlay_registry() -> dict:
+    return load_diffusion_overlay_registry_from_env()
 
 
-def _load_diffusion_overlay_registry() -> dict[str, dict]:
-    registry = dict(_BUILTIN_DIFFUSION_OVERLAY_REGISTRY)
-    raw_value = os.getenv("SGLANG_DIFFUSION_MODEL_OVERLAY_REGISTRY", "").strip()
-    if not raw_value:
-        return registry
-
-    if raw_value.startswith("{"):
-        payload = json.loads(raw_value)
-    else:
-        with open(os.path.expanduser(raw_value), encoding="utf-8") as f:
-            payload = json.load(f)
-
-    for source_model_id, spec in payload.items():
-        if isinstance(spec, str):
-            registry[source_model_id] = {"overlay_repo_id": spec}
-        elif isinstance(spec, dict) and spec.get("overlay_repo_id"):
-            registry[source_model_id] = dict(spec)
-    return registry
-
-
-def _has_diffusion_overlay_target(model_path: str) -> bool:
-    registry = _load_diffusion_overlay_registry()
-    if model_path in registry:
-        return True
-    if os.path.exists(model_path):
-        base_name = os.path.basename(os.path.normpath(model_path))
-        return any(base_name == key.rsplit("/", 1)[-1] for key in registry)
-    return False
+def _is_overlay_diffusion_model(model_path: str) -> bool:
+    return has_diffusion_overlay_registry_match(model_path, _load_overlay_registry())
 
 
 def _is_diffusers_model_dir(model_dir: str) -> bool:
@@ -67,24 +43,16 @@ def get_is_diffusion_model(model_path: str) -> bool:
     Returns False on any failure (network error, 404, offline mode, etc.)
     so that the caller falls through to the standard LLM server path.
     """
-    try:
-        from sglang.multimodal_gen.registry import (
-            is_known_non_diffusers_multimodal_model,
-        )
-    except ImportError:
-        is_known_non_diffusers_multimodal_model = lambda _: False
+    if _is_overlay_diffusion_model(model_path):
+        # short-circuit, if applicable for the overlay mechanism (diffusion-only)
+        return True
 
     if os.path.isdir(model_path):
         if _is_diffusers_model_dir(model_path):
             return True
-        if _has_diffusion_overlay_target(model_path):
-            return True
-        return is_known_non_diffusers_multimodal_model(model_path)
+        return is_known_non_diffusers_diffusion_model(model_path)
 
-    if _has_diffusion_overlay_target(model_path):
-        return True
-
-    if is_known_non_diffusers_multimodal_model(model_path):
+    if is_known_non_diffusers_diffusion_model(model_path):
         return True
 
     try:
