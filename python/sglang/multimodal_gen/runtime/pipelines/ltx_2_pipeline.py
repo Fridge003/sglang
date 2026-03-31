@@ -234,7 +234,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                     strength=self._stage1_lora_scale,
                 )
             else:
-                self.unmerge_lora_weights(target="transformer")
+                self.deactivate_lora_weights(target="transformer")
         elif phase == "stage2":
             lora_nicknames = []
             lora_paths = []
@@ -254,6 +254,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_path=lora_paths,
                 target=lora_targets,
                 strength=lora_strengths,
+                merge_weights=self._stage1_lora_path is not None,
             )
         else:
             raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")
