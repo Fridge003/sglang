@@ -113,6 +113,7 @@ class BaseLayerWithLoRA(nn.Module):
         lora_path: str | None = None,
         strength: float = 1.0,
         clear_existing: bool = False,
+        merge_weights: bool = True,
     ) -> None:
         """
         Set LoRA weights. Supports multiple LoRA adapters.
@@ -149,7 +150,10 @@ class BaseLayerWithLoRA(nn.Module):
         self.strength = strength
 
         self.disable_lora = False
-        self.merge_lora_weights()
+        if merge_weights:
+            self.merge_lora_weights()
+        elif self.merged:
+            self.unmerge_lora_weights()
 
     @torch.no_grad()
     def _merge_lora_into_data(

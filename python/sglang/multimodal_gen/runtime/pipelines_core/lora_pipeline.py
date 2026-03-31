@@ -397,6 +397,7 @@ class LoRAPipeline(ComposedPipelineBase):
         rank: int,
         strengths: list[float],
         clear_existing: bool = False,
+        merge_weights: bool = True,
     ) -> int:
         """
         Apply LoRA weights to the given lora_layers. Supports multiple LoRA adapters.
@@ -467,6 +468,7 @@ class LoRAPipeline(ComposedPipelineBase):
                         self.lora_adapters[nickname][lora_B_name],
                         lora_path=path,
                         strength=lora_strength,
+                        merge_weights=merge_weights,
                         clear_existing=(
                             clear_existing and idx == 0
                         ),  # Only clear on first LoRA
@@ -589,6 +591,7 @@ class LoRAPipeline(ComposedPipelineBase):
         lora_path: str | None | list[str | None] = None,
         target: str | list[str] = "all",
         strength: float | list[float] = 1.0,
+        merge_weights: bool = True,
     ):  # type: ignore
         """
         Load LoRA adapter(s) into the pipeline and apply them to the specified transformer(s).
@@ -682,6 +685,7 @@ class LoRAPipeline(ComposedPipelineBase):
                         rank,
                         tgt_strengths,
                         clear_existing=True,
+                        merge_weights=merge_weights,
                     )
                     adapted_count += count
                     self.cur_adapter_name[module_name] = merged_name
@@ -698,7 +702,7 @@ class LoRAPipeline(ComposedPipelineBase):
                     )
 
         logger.info(
-            "Rank %d: LoRA adapter(s) %s applied to %d layers (targets: %s, strengths: %s)",
+            "Rank %d: LoRA adapter(s) %s applied to %d layers (targets: %s, strengths: %s, merge_weights=%s)",
             rank,
             ", ".join(map(str, lora_paths)) if lora_paths else None,
             adapted_count,
@@ -708,7 +712,34 @@ class LoRAPipeline(ComposedPipelineBase):
                 if len(strengths) > 1
                 else f"{strengths[0]:.2f}"
             ),
+            merge_weights,
         )
+
+    def deactivate_lora_weights(self, target: str = "all") -> None:
+        """
+        Disable LoRA for the specified target, regardless of whether weights were
+        merged into the base model or are still active in the wrapped LoRA path.
+        """
+        target_modules, error = self._get_target_lora_layers(target)
+        if error:
+            logger.warning("deactivate_lora_weights: %s", error)
+        if not target_modules:
+            return
+
+        with self._temporarily_disable_offload(target_modules=target_modules):
+            for module_name, lora_layers_dict in target_modules:
+                for name, layer in lora_layers_dict.items():
+                    if hasattr(layer, "merged") and layer.merged:
+                        try:
+                            layer.unmerge_lora_weights()
+                        except ValueError as e:
+                            logger.warning("Could not unmerge layer %s: %s", name, e)
+                    if hasattr(layer, "disable_lora"):
+                        layer.disable_lora = True
+                self.is_lora_merged[module_name] = False
+                self.cur_adapter_strength.pop(module_name, None)
+                self.cur_adapter_config.pop(module_name, None)
+                logger.info("LoRA weights deactivated for %s", module_name)
 
     def merge_lora_weights(self, target: str = "all", strength: float = 1.0) -> None:
         """
