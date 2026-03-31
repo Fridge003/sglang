@@ -1,6 +1,6 @@
 import dataclasses
 from dataclasses import field
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 
@@ -93,8 +93,11 @@ def pack_text_embeds(
 
 
 def _gemma_postprocess_func(
-    outputs: BaseEncoderOutput, text_inputs: dict
+    outputs: BaseEncoderOutput,
+    text_inputs: dict,
+    pipeline_config: Optional["LTX2PipelineConfig"] = None,
 ) -> torch.Tensor:
+    _ = pipeline_config
     # LTX-2 requires all hidden states concatenated for the connector
     if hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
         # outputs.hidden_states is a tuple of tensors
@@ -221,6 +224,7 @@ class LTX2PipelineConfig(PipelineConfig):
             padding="max_length",
             max_length=max_sequence_length,
             truncation=True,
+            add_special_tokens=True,
             return_tensors="pt",
         )
         return text_inputs
