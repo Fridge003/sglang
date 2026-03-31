@@ -608,6 +608,15 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             model_video = model_video.float()
                             model_audio = model_audio.float()
                             if batch.do_classifier_free_guidance:
+                                if i == 0 and stage == "stage1":
+                                    _maybe_save_ltx2_latent_dump(
+                                        "sglang_stage1_step0_model_video_raw.pt",
+                                        model_video,
+                                    )
+                                    _maybe_save_ltx2_latent_dump(
+                                        "sglang_stage1_step0_model_audio_raw.pt",
+                                        model_audio,
+                                    )
                                 model_video_uncond, model_video_text = (
                                     model_video.chunk(2)
                                 )
@@ -622,6 +631,15 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                     batch.guidance_scale
                                     * (model_audio_text - model_audio_uncond)
                                 )
+                            if i == 0 and stage == "stage1":
+                                _maybe_save_ltx2_latent_dump(
+                                    "sglang_stage1_step0_model_video_guided.pt",
+                                    model_video,
+                                )
+                                _maybe_save_ltx2_latent_dump(
+                                    "sglang_stage1_step0_model_audio_guided.pt",
+                                    model_audio,
+                                )
                             v_pos = model_video
                             a_v_pos = model_audio
                             v_neg = None
@@ -633,6 +651,15 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             audio_latents = audio_scheduler.step(
                                 a_v_pos, t_device, audio_latents, return_dict=False
                             )[0]
+                            if i == 0 and stage == "stage1":
+                                _maybe_save_ltx2_latent_dump(
+                                    "sglang_stage1_step0_video_latents_after.pt",
+                                    latents,
+                                )
+                                _maybe_save_ltx2_latent_dump(
+                                    "sglang_stage1_step0_audio_latents_after.pt",
+                                    audio_latents,
+                                )
 
                             if do_ti2v:
                                 latents[:, :num_img_tokens, :] = batch.image_latent[
