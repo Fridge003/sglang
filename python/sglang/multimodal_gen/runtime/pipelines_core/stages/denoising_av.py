@@ -1,5 +1,6 @@
 import copy
 import math
+import os
 import time
 from io import BytesIO
 
@@ -48,6 +49,14 @@ LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS = {
     "audio_skip_step": 0,
     "audio_stg_blocks": (29,),
 }
+
+
+def _maybe_save_ltx2_latent_dump(file_name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
 
 class LTX2AVDenoisingStage(DenoisingStage):
@@ -937,6 +946,16 @@ class LTX2AVDenoisingStage(DenoisingStage):
 
             batch.latents = latents
             batch.audio_latents = audio_latents
+            ltx2_phase = batch.extra.get("ltx2_phase")
+            if ltx2_phase in {"stage1", "stage2"}:
+                _maybe_save_ltx2_latent_dump(
+                    f"sglang_{ltx2_phase}_video_latents.pt", batch.latents
+                )
+                if isinstance(batch.audio_latents, torch.Tensor):
+                    _maybe_save_ltx2_latent_dump(
+                        f"sglang_{ltx2_phase}_audio_latents.pt",
+                        batch.audio_latents,
+                    )
 
         # 4. Cleanup
         if isinstance(self.transformer, OffloadableDiTMixin):
