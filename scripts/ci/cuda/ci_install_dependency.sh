@@ -230,7 +230,8 @@ echo "Installing python extras: [${EXTRAS}]"
 source "$(dirname "$0")/cache_nvidia_wheels.sh"
 
 PYPROJECT_HASH=$(sha256sum "${REPO_ROOT}/python/pyproject.toml" | awk '{print $1}')
-HASH_FILE="/root/.cache/sglang-deps-hash-${OPTIONAL_DEPS:-base}"
+WORKSPACE_KEY=$(echo "${GITHUB_WORKSPACE:-$REPO_ROOT}" | md5sum | cut -c1-8)
+HASH_FILE="/root/.cache/sglang-deps-hash-${WORKSPACE_KEY}-${OPTIONAL_DEPS:-base}"
 SKIP_DEPS=false
 
 if [ "${CUSTOM_BUILD_SGL_KERNEL:-}" = "true" ]; then
