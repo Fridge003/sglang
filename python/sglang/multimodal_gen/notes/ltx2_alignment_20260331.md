@@ -29,3 +29,17 @@
   - 用隔离脚本直接验证 `parse_known_args(['generate', '--config', cfg])` 后，`prompt='A beautiful sunset over the ocean'`、`negative_prompt='shaky, glitchy, low quality'`、`seed=1234` 全部正确进入 namespace
 - 当前精度对齐百分比：45%
   - 含义：已经定位并修掉一个会直接改变文本条件输入的真实主根因；还需要远端重新跑真实 two-stage 路径，确认视频内容和 prompt semantics 收敛
+
+## 2026-03-31 Flat `sglang generate` Validation
+
+- 按用户要求，改用平铺参数的 `sglang generate`，完全绕开 `--config` 路径做一次真实 two-stage 复跑
+- 结论：
+  - flat 命令里的参数被真实进程正确接收，CLI 没再退回默认 `seed` / `negative_prompt`
+  - `TextEncodingStage` 和 `LTX2TextConnectorStage` 都已跑通，说明 prompt/text 这条链已经能在真实 generate 路径里执行
+  - 端到端仍然没出片，新的主阻塞点是 `LTX2LoRASwitchStage` 在 stage1 -> stage2 切换时 OOM
+- 远端 run 观察：
+  - `text_encoder` customized loader 因 `Gemma3TextConfig.prefix` 缺失而 fallback 到 native `Gemma3Model`
+  - LoRA 切换时 `deactivate_lora_weights()` 触发 `disable_offload() -> load_all_layers()`，在 H100 80G 上额外申请约 738 MiB 时 OOM
+  - 当前 flat run 没有生成 `/tmp/ltx2_sunset/sglang_flat/sglang_sunset_flat.mp4`
+- 当前精度对齐百分比：50%
+  - 含义：flat generate 已经证明 config 不是当前主阻塞项，真实链路的最新主要问题已经收敛到 text encoder fallback + stage switch OOM
