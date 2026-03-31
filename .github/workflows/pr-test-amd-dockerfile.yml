@@ -12,21 +12,13 @@ on:
         required: false
         type: string
         default: ""
-      gpu_arch:
-        description: "GPU architecture to build"
-        required: false
-        type: choice
-        default: 'gfx942'
-        options:
-          - gfx942
-          - gfx950
 
 concurrency:
   group: pr-test-amd-dockerfile-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
-  build-test-image:
+  build-test-images:
     if: |
       github.repository == 'sgl-project/sglang' &&
       github.event.pull_request.draft != true &&
@@ -34,7 +26,8 @@ jobs:
     runs-on: amd-docker-scale
     environment: 'prod'
     outputs:
-      image_tag: ${{ steps.build.outputs.image_tag }}
+      image_mi30x: ${{ steps.build-mi30x.outputs.image_tag }}
+      image_mi35x: ${{ steps.build-mi35x.outputs.image_tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -53,25 +46,14 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Detected version: ${VERSION}"
 
-      - name: Set build variables
+      - name: Set common build variables
         id: vars
         run: |
           DATE=$(date +%Y%m%d)
-          GPU_ARCH="${{ inputs.gpu_arch || 'gfx942' }}"
-
-          if [ "${GPU_ARCH}" = "gfx942" ]; then
-            ROCM_TAG="rocm700-mi30x"
-          elif [ "${GPU_ARCH}" = "gfx950" ]; then
-            ROCM_TAG="rocm700-mi35x"
-          else
-            echo "::error::Unsupported GPU architecture: ${GPU_ARCH}"
-            exit 1
-          fi
-
-          TAG="v${{ steps.version.outputs.version }}-${ROCM_TAG}-${DATE}_test"
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "gpu_arch=${GPU_ARCH}" >> $GITHUB_OUTPUT
-          echo "Will build image: rocm/sgl-dev:${TAG}"
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          PRETEND_VERSION="${{ steps.version.outputs.version }}.dev${DATE}+g${COMMIT_HASH}"
+          echo "date=${DATE}" >> $GITHUB_OUTPUT
+          echo "pretend_version=${PRETEND_VERSION}" >> $GITHUB_OUTPUT
 
       - name: Login to Docker Hub (AMD)
         uses: docker/login-action@v2
@@ -79,37 +61,56 @@ jobs:
           username: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
           password: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
-      - name: Build and push test image
-        id: build
+      - name: Build and push MI30X (gfx942) image
+        id: build-mi30x
         run: |
-          IMAGE="rocm/sgl-dev:${{ steps.vars.outputs.tag }}"
-          DATE=$(date +%Y%m%d)
-          COMMIT_HASH=$(git rev-parse --short HEAD)
-          PRETEND_VERSION="${{ steps.version.outputs.version }}.dev${DATE}+g${COMMIT_HASH}"
+          TAG="v${{ steps.version.outputs.version }}-rocm700-mi30x-${{ steps.vars.outputs.date }}_test"
+          IMAGE="rocm/sgl-dev:${TAG}"
 
-          echo "Building image: ${IMAGE}"
-          echo "Pretend version: ${PRETEND_VERSION}"
-
+          echo "Building MI30X image: ${IMAGE}"
           docker build . \
             -f docker/rocm.Dockerfile \
             --build-arg SGL_BRANCH=${{ github.event.pull_request.head.ref || github.ref_name }} \
             --build-arg BUILD_TYPE=all \
-            --build-arg GPU_ARCH=${{ steps.vars.outputs.gpu_arch }} \
+            --build-arg GPU_ARCH=gfx942 \
             --build-arg ENABLE_MORI=1 \
             --build-arg NIC_BACKEND=ainic \
-            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${PRETEND_VERSION} \
+            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.vars.outputs.pretend_version }} \
             -t "${IMAGE}" \
             --no-cache
 
           docker push "${IMAGE}"
           echo "image_tag=${IMAGE}" >> $GITHUB_OUTPUT
-          echo "Successfully built and pushed: ${IMAGE}"
+          echo "Successfully built and pushed MI30X: ${IMAGE}"
+
+      - name: Build and push MI35X (gfx950) image
+        id: build-mi35x
+        run: |
+          TAG="v${{ steps.version.outputs.version }}-rocm700-mi35x-${{ steps.vars.outputs.date }}_test"
+          IMAGE="rocm/sgl-dev:${TAG}"
+
+          echo "Building MI35X image: ${IMAGE}"
+          docker build . \
+            -f docker/rocm.Dockerfile \
+            --build-arg SGL_BRANCH=${{ github.event.pull_request.head.ref || github.ref_name }} \
+            --build-arg BUILD_TYPE=all \
+            --build-arg GPU_ARCH=gfx950 \
+            --build-arg ENABLE_MORI=1 \
+            --build-arg NIC_BACKEND=ainic \
+            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${{ steps.vars.outputs.pretend_version }} \
+            -t "${IMAGE}" \
+            --no-cache
+
+          docker push "${IMAGE}"
+          echo "image_tag=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "Successfully built and pushed MI35X: ${IMAGE}"
 
   run-amd-ci:
-    needs: build-test-image
+    needs: build-test-images
     uses: ./.github/workflows/pr-test-amd.yml
     with:
       ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      docker_image: ${{ needs.build-test-image.outputs.image_tag }}
+      docker_image: ${{ needs.build-test-images.outputs.image_mi30x }}
+      docker_image_mi35x: ${{ needs.build-test-images.outputs.image_mi35x }}
       run_all_tests: true
     secrets: inherit
