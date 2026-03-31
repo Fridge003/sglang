@@ -5,6 +5,10 @@
 Latent preparation stage for diffusion pipelines.
 """
 
+import os
+
+import torch
+
 from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.distributed import (
@@ -22,6 +26,14 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def _maybe_save_latent_dump(file_name: str, tensor: torch.Tensor | None) -> None:
+    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
 
 class LatentPreparationStage(PipelineStage):
@@ -106,6 +118,7 @@ class LatentPreparationStage(PipelineStage):
         # Update batch with prepared latents
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
+        _maybe_save_latent_dump("sglang_initial_video_latents.pt", batch.latents)
         return batch
 
     def adjust_video_length(self, batch: Req, server_args: ServerArgs) -> int:
