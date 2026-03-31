@@ -626,6 +626,39 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             a_v_pos = model_audio
                             v_neg = None
                             a_v_neg = None
+
+                            latents = self.scheduler.step(
+                                v_pos, t_device, latents, return_dict=False
+                            )[0]
+                            audio_latents = audio_scheduler.step(
+                                a_v_pos, t_device, audio_latents, return_dict=False
+                            )[0]
+
+                            if do_ti2v:
+                                latents[:, :num_img_tokens, :] = batch.image_latent[
+                                    :, :num_img_tokens, :
+                                ].to(device=latents.device, dtype=latents.dtype)
+
+                            latents = self.post_forward_for_ti2v_task(
+                                batch, server_args, reserved_frames_mask, latents, z
+                            )
+
+                            if batch.return_trajectory_latents:
+                                trajectory_timesteps.append(t_host)
+                                trajectory_latents.append(latents)
+                                if audio_latents is not None:
+                                    trajectory_audio_latents.append(audio_latents)
+
+                            if i == num_timesteps - 1 or (
+                                (i + 1) > num_warmup_steps
+                                and (i + 1) % self.scheduler.order == 0
+                                and progress_bar is not None
+                            ):
+                                progress_bar.update()
+
+                            if not is_warmup:
+                                self.step_profile()
+                            continue
                         else:
                             # Follow ltx-pipelines structure: separate pos/neg forward passes,
                             # then apply CFG on denoised (x0) predictions.
