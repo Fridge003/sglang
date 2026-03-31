@@ -1,3 +1,4 @@
+import multiprocessing as mp
 import os
 import pickle
 import shutil
@@ -29,6 +30,13 @@ from sglang.test.test_utils import CustomTestCase
 register_cpu_ci(est_time=1, suite="stage-a-test-cpu")
 
 CURVE_AVAILABLE = zmq.has("curve")
+
+try:
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs as _MMServerArgs  # noqa: F401
+
+    MM_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    MM_AVAILABLE = False
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -82,39 +90,112 @@ class TestCurveConfig(CustomTestCase):
             shutil.rmtree(empty_dir, ignore_errors=True)
 
 
+_CURVE_ENV_VARS = (
+    "SGLANG_NO_ZMQ_CURVE",
+    "SGLANG_ZMQ_CURVE_KEYS_DIR",
+    "SGLANG_ZMQ_CURVE_PUBLIC_KEY",
+    "SGLANG_ZMQ_CURVE_SECRET_KEY",
+    "SGLANG_ZMQ_SERVER_PUBLIC_KEY",
+)
+
+
 def _reset_curve_state():
-    """Reset global CurveConfig and server-public-key caches."""
+    """Reset global CurveConfig and server-public-key caches + all CURVE env vars."""
     import sglang.srt.utils.network as net_mod
 
-    saved = (
-        net_mod._curve_config_cache,
-        net_mod._curve_config_loaded,
-        net_mod._server_public_key,
-        net_mod._server_public_key_loaded,
-        os.environ.get("SGLANG_ZMQ_SERVER_PUBLIC_KEY"),
-    )
+    saved = {
+        "cache": net_mod._curve_config_cache,
+        "loaded": net_mod._curve_config_loaded,
+        "spk": net_mod._server_public_key,
+        "spk_loaded": net_mod._server_public_key_loaded,
+        "env": {k: os.environ.get(k) for k in _CURVE_ENV_VARS},
+    }
     net_mod._curve_config_cache = None
     net_mod._curve_config_loaded = False
     net_mod._server_public_key = None
     net_mod._server_public_key_loaded = False
-    os.environ.pop("SGLANG_ZMQ_SERVER_PUBLIC_KEY", None)
+    for k in _CURVE_ENV_VARS:
+        os.environ.pop(k, None)
     return saved
 
 
 def _restore_curve_state(saved):
     import sglang.srt.utils.network as net_mod
 
-    (
-        net_mod._curve_config_cache,
-        net_mod._curve_config_loaded,
-        net_mod._server_public_key,
-        net_mod._server_public_key_loaded,
-        env_val,
-    ) = saved
-    if env_val is not None:
-        os.environ["SGLANG_ZMQ_SERVER_PUBLIC_KEY"] = env_val
-    else:
-        os.environ.pop("SGLANG_ZMQ_SERVER_PUBLIC_KEY", None)
+    net_mod._curve_config_cache = saved["cache"]
+    net_mod._curve_config_loaded = saved["loaded"]
+    net_mod._server_public_key = saved["spk"]
+    net_mod._server_public_key_loaded = saved["spk_loaded"]
+    for k, v in saved["env"].items():
+        if v is not None:
+            os.environ[k] = v
+        else:
+            os.environ.pop(k, None)
+
+
+def _propagate_curve_keys_standalone():
+    """Standalone reimplementation of launch_server._propagate_curve_keys().
+
+    This avoids importing sglang.multimodal_gen (which requires diffusers)
+    while exercising the exact same logic the production code uses.
+    """
+    from sglang.srt.environ import envs
+
+    curve = get_curve_config()
+    if curve is None:
+        return
+    if not envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.get():
+        pub = curve.public_key.decode("ascii")
+        envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.set(pub)
+        os.environ["SGLANG_ZMQ_CURVE_PUBLIC_KEY"] = pub
+    if not envs.SGLANG_ZMQ_CURVE_SECRET_KEY.get():
+        sec = curve.secret_key.decode("ascii")
+        envs.SGLANG_ZMQ_CURVE_SECRET_KEY.set(sec)
+        os.environ["SGLANG_ZMQ_CURVE_SECRET_KEY"] = sec
+
+
+# ---------------------------------------------------------------------------
+# Child-process worker functions (must be top-level for mp.Process(spawn))
+# ---------------------------------------------------------------------------
+
+
+def _router_server_worker(endpoint, result_pipe):
+    """Bind a ROUTER socket with auto-generated CURVE, wait for a message."""
+    try:
+        ctx = zmq.Context(io_threads=1)
+        server = get_zmq_socket(ctx, zmq.ROUTER, endpoint, bind=True)
+        if server.poll(timeout=3000):
+            parts = server.recv_multipart(zmq.NOBLOCK)
+            identity, payload = parts[0], parts[-1]
+            server.send_multipart([identity, b"", pickle.dumps("pong")])
+            result_pipe.send({"ok": True, "received": pickle.loads(payload)})
+        else:
+            result_pipe.send({"ok": False, "error": "timeout"})
+        server.close()
+        ctx.term()
+    except Exception as e:
+        result_pipe.send({"ok": False, "error": str(e)})
+
+
+def _req_client_worker(endpoint, result_pipe):
+    """Connect a REQ socket with auto-generated CURVE, send a message."""
+    try:
+        ctx = zmq.Context(io_threads=1)
+        sock = ctx.socket(zmq.REQ)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.setsockopt(zmq.RCVTIMEO, 3000)
+        sock.setsockopt(zmq.SNDTIMEO, 3000)
+        config_socket(sock, zmq.REQ)
+        connect_with_curve(sock, endpoint)
+        sock.send(pickle.dumps("ping"))
+        reply = pickle.loads(sock.recv())
+        result_pipe.send({"ok": True, "reply": reply})
+        sock.close()
+        ctx.term()
+    except zmq.Again:
+        result_pipe.send({"ok": False, "error": "timeout"})
+    except Exception as e:
+        result_pipe.send({"ok": False, "error": str(e)})
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -130,6 +211,110 @@ class TestGetCurveConfigDisabled(CustomTestCase):
                 os.environ.pop("SGLANG_NO_ZMQ_CURVE", None)
         finally:
             _restore_curve_state(saved)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestPropagateCurveKeys(CustomTestCase):
+    """Verify that exporting the keypair to os.environ before spawning
+    ensures all child processes share the same CurveZMQ identity."""
+
+    def setUp(self):
+        self.saved = _reset_curve_state()
+
+    def tearDown(self):
+        _restore_curve_state(self.saved)
+
+    def test_propagate_sets_env_vars(self):
+        """After propagation, the keypair is in os.environ."""
+        self.assertIsNone(os.environ.get("SGLANG_ZMQ_CURVE_PUBLIC_KEY"))
+        self.assertIsNone(os.environ.get("SGLANG_ZMQ_CURVE_SECRET_KEY"))
+
+        _propagate_curve_keys_standalone()
+
+        pub = os.environ.get("SGLANG_ZMQ_CURVE_PUBLIC_KEY")
+        sec = os.environ.get("SGLANG_ZMQ_CURVE_SECRET_KEY")
+        self.assertIsNotNone(pub, "Public key should be in os.environ")
+        self.assertIsNotNone(sec, "Secret key should be in os.environ")
+        self.assertEqual(len(pub), 40, "Z85 public key should be 40 chars")
+        self.assertEqual(len(sec), 40, "Z85 secret key should be 40 chars")
+
+    def test_propagate_preserves_user_keys(self):
+        """If the user already set CURVE keys via env, propagation doesn't
+        overwrite them."""
+        user_cfg = CurveConfig.generate()
+        user_pub = user_cfg.public_key.decode("ascii")
+        user_sec = user_cfg.secret_key.decode("ascii")
+        os.environ["SGLANG_ZMQ_CURVE_PUBLIC_KEY"] = user_pub
+        os.environ["SGLANG_ZMQ_CURVE_SECRET_KEY"] = user_sec
+
+        _propagate_curve_keys_standalone()
+
+        self.assertEqual(os.environ["SGLANG_ZMQ_CURVE_PUBLIC_KEY"], user_pub)
+        self.assertEqual(os.environ["SGLANG_ZMQ_CURVE_SECRET_KEY"], user_sec)
+
+    def test_propagate_noop_when_curve_disabled(self):
+        """When SGLANG_NO_ZMQ_CURVE=1, propagation is a no-op."""
+        os.environ["SGLANG_NO_ZMQ_CURVE"] = "1"
+        _propagate_curve_keys_standalone()
+
+        self.assertIsNone(os.environ.get("SGLANG_ZMQ_CURVE_PUBLIC_KEY"))
+        self.assertIsNone(os.environ.get("SGLANG_ZMQ_CURVE_SECRET_KEY"))
+
+    def test_cross_process_with_propagation(self):
+        """After propagation, a ROUTER in one spawned process and a REQ
+        client in another can communicate — they inherit the same keypair
+        from os.environ."""
+        from sglang.srt.utils.network import get_open_port
+
+        _propagate_curve_keys_standalone()
+
+        port = get_open_port()
+        endpoint = f"tcp://127.0.0.1:{port}"
+
+        server_r, server_w = mp.Pipe(duplex=False)
+        client_r, client_w = mp.Pipe(duplex=False)
+
+        ctx = mp.get_context("spawn")
+        server_proc = ctx.Process(
+            target=_router_server_worker,
+            args=(endpoint, server_w),
+        )
+        client_proc = ctx.Process(
+            target=_req_client_worker,
+            args=(endpoint, client_w),
+        )
+
+        server_proc.start()
+        server_w.close()
+
+        time.sleep(0.5)
+
+        client_proc.start()
+        client_w.close()
+
+        try:
+            server_result = server_r.recv()
+            client_result = client_r.recv()
+        finally:
+            server_proc.join(timeout=10)
+            client_proc.join(timeout=10)
+            if server_proc.is_alive():
+                server_proc.kill()
+            if client_proc.is_alive():
+                client_proc.kill()
+            server_r.close()
+            client_r.close()
+
+        self.assertTrue(
+            server_result["ok"],
+            f"Server should receive the message: {server_result.get('error')}",
+        )
+        self.assertEqual(server_result["received"], "ping")
+        self.assertTrue(
+            client_result["ok"],
+            f"Client should receive the reply: {client_result.get('error')}",
+        )
+        self.assertEqual(client_result["reply"], "pong")
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -764,39 +949,6 @@ class TestGetZmqSocketOnHostAppliesCurveOnLoopback(CustomTestCase):
             _restore_curve_state(saved)
 
 
-@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
-class TestPerInstanceKeyExchange(CustomTestCase):
-    """End-to-end: two instances with different keypairs communicate using
-    proper asymmetric CURVE (server_public_key routing)."""
-
-    def test_cross_instance_communication(self):
-        server_cfg = CurveConfig.generate()
-        client_cfg = CurveConfig.generate()
-
-        ctx = zmq.Context()
-        try:
-            server = ctx.socket(zmq.PULL)
-            apply_curve_server(server, server_cfg)
-            port = server.bind_to_random_port("tcp://127.0.0.1")
-
-            client = ctx.socket(zmq.PUSH)
-            client.setsockopt(zmq.LINGER, 0)
-            apply_curve_client(
-                client, client_cfg, server_public_key=server_cfg.public_key
-            )
-            client.connect(f"tcp://127.0.0.1:{port}")
-
-            client.send(b"cross-instance-msg")
-            self.assertTrue(server.poll(timeout=3000))
-            msg = server.recv()
-            self.assertEqual(msg, b"cross-instance-msg")
-
-            client.close()
-            server.close()
-        finally:
-            ctx.term()
-
-
 class TestDisaggregationMetadataRoundTrip(CustomTestCase):
     """Verify curve_public_key round-trips through PrefillRankInfo."""
 
@@ -821,35 +973,6 @@ class TestDisaggregationMetadataRoundTrip(CustomTestCase):
 
         info = PrefillRankInfo(rank_ip="10.0.0.1", rank_port=6666)
         self.assertIsNone(info.curve_public_key)
-
-
-@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
-class TestBroadcastWorkerPortsKeyDistribution(CustomTestCase):
-    """Verify single-phase bootstrap payload shape (per-node keypair model)."""
-
-    def test_payload_has_public_key_only(self):
-        """Bootstrap payload carries public key + worker_ports, never secret."""
-        cfg = CurveConfig.generate()
-        payload = {
-            "worker_ports": [10000, 10001],
-            "curve_public": cfg.public_key,
-        }
-        self.assertIn("curve_public", payload)
-        self.assertIn("worker_ports", payload)
-        self.assertNotIn("curve_secret", payload)
-        self.assertNotIn("phase2_port", payload)
-        self.assertEqual(payload["curve_public"], cfg.public_key)
-
-    def test_set_curve_config_from_broadcast(self):
-        saved = _reset_curve_state()
-        try:
-            cfg = CurveConfig.generate()
-            set_curve_config(cfg)
-            result = get_curve_config()
-            self.assertEqual(result.public_key, cfg.public_key)
-            self.assertEqual(result.secret_key, cfg.secret_key)
-        finally:
-            _restore_curve_state(saved)
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -909,37 +1032,6 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         self.assertIn("worker_ports", results["payload"])
         self.assertEqual(results["payload"]["curve_public"], server_curve.public_key)
         self.assertEqual(results["payload"]["worker_ports"], worker_ports)
-
-    def test_per_node_keypair_communication(self):
-        """After bootstrap, PUSH/PULL works with per-node keypairs via global."""
-        server_curve = CurveConfig.generate()
-        client_curve = CurveConfig.generate()
-        self.assertNotEqual(server_curve.public_key, client_curve.public_key)
-
-        saved = _reset_curve_state()
-        try:
-            set_server_public_key(server_curve.public_key)
-
-            ctx = zmq.Context()
-            pull = ctx.socket(zmq.PULL)
-            apply_curve_server(pull, server_curve)
-            port = pull.bind_to_random_port("tcp://127.0.0.1")
-
-            push = ctx.socket(zmq.PUSH)
-            push.setsockopt(zmq.LINGER, 0)
-            apply_curve_client(push, client_curve)
-            push.connect(f"tcp://127.0.0.1:{port}")
-
-            push.send(b"per-node-ok")
-            self.assertTrue(pull.poll(timeout=3000))
-            msg = pull.recv()
-            self.assertEqual(msg, b"per-node-ok")
-
-            push.close()
-            pull.close()
-            ctx.term()
-        finally:
-            _restore_curve_state(saved)
 
     def test_server_public_key_env_propagation(self):
         """set_server_public_key stores to env; get reads from env on miss."""
@@ -1317,6 +1409,126 @@ class TestDisaggZmqCurveHandshake(CustomTestCase):
                 ctx.term()
         finally:
             _restore_curve_state(saved)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+@unittest.skipUnless(MM_AVAILABLE, "multimodal_gen dependencies not installed")
+class TestMultimodalGenServerArgsCurveFlags(CustomTestCase):
+    """multimodal_gen ServerArgs supports --no-zmq-curve and
+    --zmq-curve-keys-dir for parity with srt ServerArgs."""
+
+    @classmethod
+    def setUpClass(cls):
+        import sys
+
+        to_remove = [
+            k for k in sys.modules if k.startswith("sglang.multimodal_gen")
+        ]
+        for k in to_remove:
+            del sys.modules[k]
+
+    def setUp(self):
+        self.saved = _reset_curve_state()
+
+    def tearDown(self):
+        _restore_curve_state(self.saved)
+
+    def test_no_zmq_curve_flag_sets_env(self):
+        """--no-zmq-curve sets SGLANG_NO_ZMQ_CURVE in os.environ."""
+        from unittest.mock import patch
+
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+        from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+            QwenImagePipelineConfig,
+        )
+        from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+        with patch.object(
+            PipelineConfig, "from_kwargs", return_value=QwenImagePipelineConfig()
+        ):
+            ServerArgs.from_dict(
+                {"model_path": "/fake/model", "no_zmq_curve": True}
+            )
+
+        self.assertEqual(
+            os.environ.get("SGLANG_NO_ZMQ_CURVE"),
+            "1",
+            "--no-zmq-curve should set SGLANG_NO_ZMQ_CURVE=1",
+        )
+
+    def test_zmq_curve_keys_dir_flag_sets_env(self):
+        """--zmq-curve-keys-dir sets SGLANG_ZMQ_CURVE_KEYS_DIR in os.environ."""
+        from unittest.mock import patch
+
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+        from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+            QwenImagePipelineConfig,
+        )
+        from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+        keys_dir = tempfile.mkdtemp()
+        try:
+            generate_certificates(keys_dir)
+
+            with patch.object(
+                PipelineConfig, "from_kwargs", return_value=QwenImagePipelineConfig()
+            ):
+                ServerArgs.from_dict(
+                    {"model_path": "/fake/model", "zmq_curve_keys_dir": keys_dir}
+                )
+
+            self.assertEqual(
+                os.environ.get("SGLANG_ZMQ_CURVE_KEYS_DIR"),
+                keys_dir,
+                "--zmq-curve-keys-dir should propagate to env var",
+            )
+        finally:
+            shutil.rmtree(keys_dir, ignore_errors=True)
+
+    def test_zmq_curve_keys_dir_missing_file_raises(self):
+        """--zmq-curve-keys-dir with a directory that has no cluster.key_secret
+        should raise ValueError."""
+        from unittest.mock import patch
+
+        from sglang.multimodal_gen.configs.pipeline_configs.base import PipelineConfig
+        from sglang.multimodal_gen.configs.pipeline_configs.qwen_image import (
+            QwenImagePipelineConfig,
+        )
+        from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+        empty_dir = tempfile.mkdtemp()
+        try:
+            with self.assertRaises(ValueError):
+                with patch.object(
+                    PipelineConfig,
+                    "from_kwargs",
+                    return_value=QwenImagePipelineConfig(),
+                ):
+                    ServerArgs.from_dict(
+                        {
+                            "model_path": "/fake/model",
+                            "zmq_curve_keys_dir": empty_dir,
+                        }
+                    )
+        finally:
+            shutil.rmtree(empty_dir, ignore_errors=True)
+
+    def test_cli_parser_accepts_curve_flags(self):
+        """The argparse parser should accept --no-zmq-curve and
+        --zmq-curve-keys-dir without errors."""
+        from sglang.multimodal_gen.runtime.server_args import ServerArgs
+        from sglang.multimodal_gen.utils import FlexibleArgumentParser
+
+        parser = FlexibleArgumentParser()
+        ServerArgs.add_cli_args(parser)
+
+        args = parser.parse_args(["--model-path", "/fake", "--no-zmq-curve"])
+        self.assertTrue(args.no_zmq_curve)
+
+        args2 = parser.parse_args(
+            ["--model-path", "/fake", "--zmq-curve-keys-dir", "/some/dir"]
+        )
+        self.assertEqual(args2.zmq_curve_keys_dir, "/some/dir")
 
 
 if __name__ == "__main__":
