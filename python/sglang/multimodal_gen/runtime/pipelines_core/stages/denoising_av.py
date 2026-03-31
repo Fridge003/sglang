@@ -542,59 +542,58 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             timestep_video = timestep
                         timestep_audio = timestep
 
-                        # Conditions
-                        encoder_hidden_states = batch.prompt_embeds[0]
-                        audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
-                        encoder_attention_mask = batch.prompt_attention_mask
+                        use_official_cfg_path = stage1_guider_params is None
+                        if use_official_cfg_path:
+                            encoder_hidden_states = batch.prompt_embeds[0]
+                            audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
+                            encoder_attention_mask = batch.prompt_attention_mask
+                            if batch.do_classifier_free_guidance:
+                                latent_model_input = torch.cat(
+                                    [latent_model_input] * 2, dim=0
+                                )
+                                audio_latent_model_input = torch.cat(
+                                    [audio_latent_model_input] * 2, dim=0
+                                )
+                                encoder_hidden_states = torch.cat(
+                                    [
+                                        batch.negative_prompt_embeds[0],
+                                        encoder_hidden_states,
+                                    ],
+                                    dim=0,
+                                )
+                                audio_encoder_hidden_states = torch.cat(
+                                    [
+                                        batch.negative_audio_prompt_embeds[0],
+                                        audio_encoder_hidden_states,
+                                    ],
+                                    dim=0,
+                                )
+                                encoder_attention_mask = torch.cat(
+                                    [
+                                        batch.negative_attention_mask,
+                                        encoder_attention_mask,
+                                    ],
+                                    dim=0,
+                                )
+                                timestep_video = timestep_video.expand(
+                                    int(latent_model_input.shape[0])
+                                )
+                                timestep_audio = timestep_audio.expand(
+                                    int(latent_model_input.shape[0])
+                                )
 
-                        # Follow ltx-pipelines structure: separate pos/neg forward passes,
-                        # then apply CFG on denoised (x0) predictions.
-                        with set_forward_context(
-                            current_timestep=i, attn_metadata=attn_metadata
-                        ):
-                            v_pos, a_v_pos = current_model(
-                                hidden_states=latent_model_input,
-                                audio_hidden_states=audio_latent_model_input,
-                                encoder_hidden_states=encoder_hidden_states,
-                                audio_encoder_hidden_states=audio_encoder_hidden_states,
-                                timestep=timestep_video,
-                                audio_timestep=timestep_audio,
-                                encoder_attention_mask=encoder_attention_mask,
-                                audio_encoder_attention_mask=encoder_attention_mask,
-                                num_frames=latent_num_frames,
-                                height=latent_height,
-                                width=latent_width,
-                                fps=batch.fps,
-                                audio_num_frames=audio_num_frames_latent,
-                                video_coords=video_coords,
-                                audio_coords=audio_coords,
-                                return_latents=False,
-                                return_dict=False,
-                            )
-
-                            if (
-                                stage1_guider_params is not None
-                                or batch.do_classifier_free_guidance
+                            with set_forward_context(
+                                current_timestep=i, attn_metadata=attn_metadata
                             ):
-                                neg_encoder_hidden_states = (
-                                    batch.negative_prompt_embeds[0]
-                                )
-                                neg_audio_encoder_hidden_states = (
-                                    batch.negative_audio_prompt_embeds[0]
-                                )
-                                neg_encoder_attention_mask = (
-                                    batch.negative_attention_mask
-                                )
-
-                                v_neg, a_v_neg = current_model(
+                                model_video, model_audio = current_model(
                                     hidden_states=latent_model_input,
                                     audio_hidden_states=audio_latent_model_input,
-                                    encoder_hidden_states=neg_encoder_hidden_states,
-                                    audio_encoder_hidden_states=neg_audio_encoder_hidden_states,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                    audio_encoder_hidden_states=audio_encoder_hidden_states,
                                     timestep=timestep_video,
                                     audio_timestep=timestep_audio,
-                                    encoder_attention_mask=neg_encoder_attention_mask,
-                                    audio_encoder_attention_mask=neg_encoder_attention_mask,
+                                    encoder_attention_mask=encoder_attention_mask,
+                                    audio_encoder_attention_mask=encoder_attention_mask,
                                     num_frames=latent_num_frames,
                                     height=latent_height,
                                     width=latent_width,
@@ -605,16 +604,100 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                     return_latents=False,
                                     return_dict=False,
                                 )
-                            else:
-                                v_neg = None
-                                a_v_neg = None
 
-                        v_pos = v_pos.float()
-                        a_v_pos = a_v_pos.float()
-                        if v_neg is not None:
-                            v_neg = v_neg.float()
-                        if a_v_neg is not None:
-                            a_v_neg = a_v_neg.float()
+                            model_video = model_video.float()
+                            model_audio = model_audio.float()
+                            if batch.do_classifier_free_guidance:
+                                model_video_uncond, model_video_text = (
+                                    model_video.chunk(2)
+                                )
+                                model_audio_uncond, model_audio_text = (
+                                    model_audio.chunk(2)
+                                )
+                                model_video = model_video_uncond + (
+                                    batch.guidance_scale
+                                    * (model_video_text - model_video_uncond)
+                                )
+                                model_audio = model_audio_uncond + (
+                                    batch.guidance_scale
+                                    * (model_audio_text - model_audio_uncond)
+                                )
+                            v_pos = model_video
+                            a_v_pos = model_audio
+                            v_neg = None
+                            a_v_neg = None
+                        else:
+                            # Follow ltx-pipelines structure: separate pos/neg forward passes,
+                            # then apply CFG on denoised (x0) predictions.
+                            encoder_hidden_states = batch.prompt_embeds[0]
+                            audio_encoder_hidden_states = batch.audio_prompt_embeds[0]
+                            encoder_attention_mask = batch.prompt_attention_mask
+                            with set_forward_context(
+                                current_timestep=i, attn_metadata=attn_metadata
+                            ):
+                                v_pos, a_v_pos = current_model(
+                                    hidden_states=latent_model_input,
+                                    audio_hidden_states=audio_latent_model_input,
+                                    encoder_hidden_states=encoder_hidden_states,
+                                    audio_encoder_hidden_states=audio_encoder_hidden_states,
+                                    timestep=timestep_video,
+                                    audio_timestep=timestep_audio,
+                                    encoder_attention_mask=encoder_attention_mask,
+                                    audio_encoder_attention_mask=encoder_attention_mask,
+                                    num_frames=latent_num_frames,
+                                    height=latent_height,
+                                    width=latent_width,
+                                    fps=batch.fps,
+                                    audio_num_frames=audio_num_frames_latent,
+                                    video_coords=video_coords,
+                                    audio_coords=audio_coords,
+                                    return_latents=False,
+                                    return_dict=False,
+                                )
+
+                                if (
+                                    stage1_guider_params is not None
+                                    or batch.do_classifier_free_guidance
+                                ):
+                                    neg_encoder_hidden_states = (
+                                        batch.negative_prompt_embeds[0]
+                                    )
+                                    neg_audio_encoder_hidden_states = (
+                                        batch.negative_audio_prompt_embeds[0]
+                                    )
+                                    neg_encoder_attention_mask = (
+                                        batch.negative_attention_mask
+                                    )
+
+                                    v_neg, a_v_neg = current_model(
+                                        hidden_states=latent_model_input,
+                                        audio_hidden_states=audio_latent_model_input,
+                                        encoder_hidden_states=neg_encoder_hidden_states,
+                                        audio_encoder_hidden_states=neg_audio_encoder_hidden_states,
+                                        timestep=timestep_video,
+                                        audio_timestep=timestep_audio,
+                                        encoder_attention_mask=neg_encoder_attention_mask,
+                                        audio_encoder_attention_mask=neg_encoder_attention_mask,
+                                        num_frames=latent_num_frames,
+                                        height=latent_height,
+                                        width=latent_width,
+                                        fps=batch.fps,
+                                        audio_num_frames=audio_num_frames_latent,
+                                        video_coords=video_coords,
+                                        audio_coords=audio_coords,
+                                        return_latents=False,
+                                        return_dict=False,
+                                    )
+                                else:
+                                    v_neg = None
+                                    a_v_neg = None
+
+                            v_pos = v_pos.float()
+                            a_v_pos = a_v_pos.float()
+                            if v_neg is not None:
+                                v_neg = v_neg.float()
+                            if a_v_neg is not None:
+                                a_v_neg = a_v_neg.float()
 
                         # Velocity -> denoised (x0): x0 = x - sigma * v
                         sigma_val = float(sigma.item())
