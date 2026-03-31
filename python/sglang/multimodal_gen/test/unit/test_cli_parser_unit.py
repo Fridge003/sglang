@@ -33,6 +33,7 @@ class TestFlexibleArgumentParserConfig(unittest.TestCase):
             )
 
         self.assertEqual(args.subparser, "generate")
+        self.assertEqual(args.config, str(config_path))
         self.assertEqual(args.prompt, ["A beautiful sunset over the ocean"])
         self.assertEqual(args.negative_prompt, "shaky, glitchy, low quality")
         self.assertEqual(args.seed, 1234)
