@@ -7,6 +7,9 @@ Prompt encoding stages for diffusion pipelines.
 This module contains implementations of prompt encoding stages for diffusion pipelines.
 """
 
+import inspect
+import os
+
 import torch
 
 from sglang.multimodal_gen.configs.models.encoders import BaseEncoderOutput
@@ -26,6 +29,43 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def _maybe_save_ltx2_stage1_text_dump(
+    batch: Req, file_name: str, tensor: torch.Tensor | None
+) -> None:
+    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
+
+
+def _maybe_save_ltx2_text_encoder_debug(
+    batch: Req,
+    text_encoder: torch.nn.Module | None,
+) -> None:
+    if text_encoder is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+        return
+
+    first_param = next(text_encoder.parameters(), None)
+    config = getattr(text_encoder, "config", None)
+    debug_info = {
+        "text_encoder_type": type(text_encoder).__name__,
+        "training": bool(text_encoder.training),
+        "device": str(first_param.device) if first_param is not None else None,
+        "dtype": str(first_param.dtype) if first_param is not None else None,
+        "attn_implementation": getattr(config, "_attn_implementation", None),
+        "attn_implementation_internal": getattr(
+            config, "_attn_implementation_internal", None
+        ),
+    }
+    if hasattr(torch.backends.cuda, "cudnn_sdp_enabled"):
+        debug_info["cudnn_sdp_enabled"] = bool(torch.backends.cuda.cudnn_sdp_enabled())
+
+    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+    os.makedirs(save_dir, exist_ok=True)
+    torch.save(debug_info, os.path.join(save_dir, "sglang_text_encoder_debug.pt"))
 
 
 class TextEncodingStage(PipelineStage):
@@ -83,6 +123,16 @@ class TextEncodingStage(PipelineStage):
             for am in prompt_masks_list:
                 batch.prompt_attention_mask.append(am)
 
+        if prompt_embeds_list:
+            _maybe_save_ltx2_stage1_text_dump(
+                batch, "sglang_text_prompt_embeds.pt", prompt_embeds_list[0]
+            )
+            _maybe_save_ltx2_text_encoder_debug(batch, self.text_encoders[0])
+        if prompt_masks_list:
+            _maybe_save_ltx2_stage1_text_dump(
+                batch, "sglang_text_prompt_attention_mask.pt", prompt_masks_list[0]
+            )
+
         # Encode negative prompt if CFG is enabled
         if batch.do_classifier_free_guidance:
             assert isinstance(batch.negative_prompt, str)
@@ -104,6 +154,19 @@ class TextEncodingStage(PipelineStage):
                 batch.negative_attention_mask = []
                 for nm in neg_masks_list:
                     batch.negative_attention_mask.append(nm)
+
+            if neg_embeds_list:
+                _maybe_save_ltx2_stage1_text_dump(
+                    batch,
+                    "sglang_text_negative_prompt_embeds.pt",
+                    neg_embeds_list[0],
+                )
+            if neg_masks_list:
+                _maybe_save_ltx2_stage1_text_dump(
+                    batch,
+                    "sglang_text_negative_attention_mask.pt",
+                    neg_masks_list[0],
+                )
 
         return batch
 
@@ -239,7 +302,7 @@ class TextEncodingStage(PipelineStage):
             processed_text_list: list[str] = []
             for prompt_str in texts:
                 preprocessed = preprocess_func(prompt_str)
-                processed_text_list.append(preprocessed)
+                processed_text_list.append(preprocessed.strip())
 
             # Prepare tokenizer args
             tok_kwargs = self.prepare_tokenizer_kwargs(
@@ -261,14 +324,31 @@ class TextEncodingStage(PipelineStage):
                 attention_mask = torch.ones(input_ids.shape[:2], device=target_device)
             else:
                 attention_mask = text_inputs["attention_mask"]
-            with set_forward_context(current_timestep=0, attn_metadata=None):
+            is_ltx2_gemma3 = (
+                type(server_args.pipeline_config).__name__ == "LTX2PipelineConfig"
+                and type(text_encoder).__name__ == "Gemma3ForConditionalGeneration"
+            )
+            if is_ltx2_gemma3:
                 outputs: BaseEncoderOutput = text_encoder(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     output_hidden_states=True,
-                    use_cache=False,
                 )
-            prompt_embeds = postprocess_func(outputs, text_inputs)
+            else:
+                with set_forward_context(current_timestep=0, attn_metadata=None):
+                    outputs: BaseEncoderOutput = text_encoder(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        output_hidden_states=True,
+                        use_cache=False,
+                    )
+            postprocess_sig = inspect.signature(postprocess_func)
+            if len(postprocess_sig.parameters) >= 3:
+                prompt_embeds = postprocess_func(
+                    outputs, text_inputs, server_args.pipeline_config
+                )
+            else:
+                prompt_embeds = postprocess_func(outputs, text_inputs)
             if dtype is not None:
                 prompt_embeds = prompt_embeds.to(dtype=dtype)
 

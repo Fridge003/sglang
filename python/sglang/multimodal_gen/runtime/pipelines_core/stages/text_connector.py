@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
@@ -15,6 +17,15 @@ class LTX2TextConnectorStage(PipelineStage):
     def __init__(self, connectors):
         super().__init__()
         self.connectors = connectors
+
+    def _maybe_save_dump(
+        self, file_name: str, tensor: torch.Tensor | None
+    ) -> None:
+        if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
+            return
+        save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         # Input: batch.prompt_embeds (from Gemma, [B, S, D])
@@ -45,6 +56,18 @@ class LTX2TextConnectorStage(PipelineStage):
                 else None
             )
 
+        self._maybe_save_dump("sglang_text_prompt_embeds.pt", prompt_embeds)
+        self._maybe_save_dump(
+            "sglang_text_prompt_attention_mask.pt", prompt_attention_mask
+        )
+        self._maybe_save_dump(
+            "sglang_text_negative_prompt_embeds.pt", neg_prompt_embeds
+        )
+        self._maybe_save_dump(
+            "sglang_text_negative_attention_mask.pt",
+            neg_prompt_attention_mask,
+        )
+
         # Handle CFG: Concatenate negative and positive inputs
         if batch.do_classifier_free_guidance:
 
@@ -53,6 +76,15 @@ class LTX2TextConnectorStage(PipelineStage):
             prompt_attention_mask = torch.cat(
                 [neg_prompt_attention_mask, prompt_attention_mask], dim=0
             )
+
+        self._maybe_save_dump(
+            "sglang_connector_input_prompt_embeds.pt",
+            prompt_embeds,
+        )
+        self._maybe_save_dump(
+            "sglang_connector_input_attention_mask.pt",
+            prompt_attention_mask,
+        )
 
         # Prepare additive mask for connectors (as per Diffusers implementation)
         dtype = prompt_embeds.dtype
@@ -67,6 +99,19 @@ class LTX2TextConnectorStage(PipelineStage):
                     prompt_embeds, additive_attention_mask, additive_mask=True
                 )
             )
+
+        self._maybe_save_dump(
+            "sglang_connector_prompt_embeds.pt",
+            connector_prompt_embeds,
+        )
+        self._maybe_save_dump(
+            "sglang_connector_audio_prompt_embeds.pt",
+            connector_audio_prompt_embeds,
+        )
+        self._maybe_save_dump(
+            "sglang_connector_attention_mask.pt",
+            connector_mask,
+        )
 
         # Split results if CFG was enabled
         if batch.do_classifier_free_guidance:
