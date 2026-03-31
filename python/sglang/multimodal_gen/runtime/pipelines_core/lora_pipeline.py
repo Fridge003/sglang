@@ -726,7 +726,17 @@ class LoRAPipeline(ComposedPipelineBase):
         if not target_modules:
             return
 
-        with self._temporarily_disable_offload(target_modules=target_modules):
+        modules_requiring_unmerge = []
+        for module_name, lora_layers_dict in target_modules:
+            if self.is_lora_merged.get(module_name, False) or any(
+                getattr(layer, "merged", False) for layer in lora_layers_dict.values()
+            ):
+                modules_requiring_unmerge.append((module_name, lora_layers_dict))
+
+        offload_context = self._temporarily_disable_offload(
+            target_modules=modules_requiring_unmerge
+        )
+        with offload_context:
             for module_name, lora_layers_dict in target_modules:
                 for name, layer in lora_layers_dict.items():
                     if hasattr(layer, "merged") and layer.merged:
