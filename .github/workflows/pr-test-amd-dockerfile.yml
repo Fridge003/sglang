@@ -29,6 +29,7 @@ jobs:
   build-test-image:
     if: |
       github.repository == 'sgl-project/sglang' &&
+      github.event.pull_request.draft != true &&
       (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'rocm-docker'))
     runs-on: amd-docker-scale
     environment: 'prod'
