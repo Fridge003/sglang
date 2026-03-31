@@ -177,12 +177,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             kwargs["formatter_class"] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def parse_args(  # type: ignore[override]
-        self, args=None, namespace=None
-    ) -> argparse.Namespace:
-        if args is None:
-            args = sys.argv[1:]
-
+    def _preprocess_args(self, args: list[str]) -> list[str]:
         if any(arg.startswith("--config") for arg in args):
             args = self._pull_args_from_config(args)
 
@@ -203,9 +198,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        namespace = super().parse_args(processed_args, namespace)
+        return processed_args
 
-        # Track which arguments were explicitly provided
+    def _mark_provided_args(self, namespace: argparse.Namespace, args: list[str]) -> None:
         namespace._provided = set()
 
         i = 0
@@ -229,7 +224,26 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 i += 1
 
-        return namespace  # type: ignore[no-any-return]
+    def parse_known_args(  # type: ignore[override]
+        self, args=None, namespace=None
+    ) -> tuple[argparse.Namespace, list[str]]:
+        if args is None:
+            args = sys.argv[1:]
+        else:
+            args = list(args)
+
+        processed_args = self._preprocess_args(args)
+        namespace, remaining = super().parse_known_args(processed_args, namespace)
+        self._mark_provided_args(namespace, args)
+        return namespace, remaining  # type: ignore[no-any-return]
+
+    def parse_args(  # type: ignore[override]
+        self, args=None, namespace=None
+    ) -> argparse.Namespace:
+        namespace, remaining = self.parse_known_args(args, namespace)
+        if remaining:
+            self.error(f"unrecognized arguments: {' '.join(remaining)}")
+        return namespace
 
     def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file
