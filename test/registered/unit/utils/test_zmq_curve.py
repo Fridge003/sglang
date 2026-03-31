@@ -32,7 +32,9 @@ register_cpu_ci(est_time=1, suite="stage-a-test-cpu")
 CURVE_AVAILABLE = zmq.has("curve")
 
 try:
-    from sglang.multimodal_gen.runtime.server_args import ServerArgs as _MMServerArgs  # noqa: F401
+    from sglang.multimodal_gen.runtime.server_args import (  # noqa: F401
+        ServerArgs as _MMServerArgs,
+    )
 
     MM_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
@@ -505,6 +507,7 @@ def _import_scheduler_client():
         "..",
         "..",
         "..",
+        "..",
         "python",
         "sglang",
         "multimodal_gen",
@@ -739,6 +742,7 @@ class TestMMSchedulerUsesSrtGetZmqSocket(CustomTestCase):
 
         mm_sched_path = os.path.join(
             os.path.dirname(__file__),
+            "..",
             "..",
             "..",
             "..",
@@ -1421,9 +1425,7 @@ class TestMultimodalGenServerArgsCurveFlags(CustomTestCase):
     def setUpClass(cls):
         import sys
 
-        to_remove = [
-            k for k in sys.modules if k.startswith("sglang.multimodal_gen")
-        ]
+        to_remove = [k for k in sys.modules if k.startswith("sglang.multimodal_gen")]
         for k in to_remove:
             del sys.modules[k]
 
@@ -1446,9 +1448,7 @@ class TestMultimodalGenServerArgsCurveFlags(CustomTestCase):
         with patch.object(
             PipelineConfig, "from_kwargs", return_value=QwenImagePipelineConfig()
         ):
-            ServerArgs.from_dict(
-                {"model_path": "/fake/model", "no_zmq_curve": True}
-            )
+            ServerArgs.from_dict({"model_path": "/fake/model", "no_zmq_curve": True})
 
         self.assertEqual(
             os.environ.get("SGLANG_NO_ZMQ_CURVE"),
