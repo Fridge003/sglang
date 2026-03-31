@@ -1,0 +1,114 @@
+name: PR Test AMD Dockerfile
+on:
+  pull_request:
+    branches: [ main ]
+    types: [ opened, synchronize, reopened, labeled ]
+    paths:
+      - "docker/rocm.Dockerfile"
+  workflow_dispatch:
+    inputs:
+      pr_head_sha:
+        description: "PR head SHA to checkout (optional)"
+        required: false
+        type: string
+        default: ""
+      gpu_arch:
+        description: "GPU architecture to build"
+        required: false
+        type: choice
+        default: 'gfx942'
+        options:
+          - gfx942
+          - gfx950
+
+concurrency:
+  group: pr-test-amd-dockerfile-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-image:
+    if: |
+      github.repository == 'sgl-project/sglang' &&
+      (github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'rocm-docker'))
+    runs-on: amd-docker-scale
+    environment: 'prod'
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_head_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Get version from latest tag
+        id: version
+        run: |
+          VERSION=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine version from git tags"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+
+      - name: Set build variables
+        id: vars
+        run: |
+          DATE=$(date +%Y%m%d)
+          GPU_ARCH="${{ inputs.gpu_arch || 'gfx942' }}"
+
+          if [ "${GPU_ARCH}" = "gfx942" ]; then
+            ROCM_TAG="rocm700-mi30x"
+          elif [ "${GPU_ARCH}" = "gfx950" ]; then
+            ROCM_TAG="rocm700-mi35x"
+          else
+            echo "::error::Unsupported GPU architecture: ${GPU_ARCH}"
+            exit 1
+          fi
+
+          TAG="v${{ steps.version.outputs.version }}-${ROCM_TAG}-${DATE}_test"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "gpu_arch=${GPU_ARCH}" >> $GITHUB_OUTPUT
+          echo "Will build image: rocm/sgl-dev:${TAG}"
+
+      - name: Login to Docker Hub (AMD)
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
+
+      - name: Build and push test image
+        id: build
+        run: |
+          IMAGE="rocm/sgl-dev:${{ steps.vars.outputs.tag }}"
+          DATE=$(date +%Y%m%d)
+          COMMIT_HASH=$(git rev-parse --short HEAD)
+          PRETEND_VERSION="${{ steps.version.outputs.version }}.dev${DATE}+g${COMMIT_HASH}"
+
+          echo "Building image: ${IMAGE}"
+          echo "Pretend version: ${PRETEND_VERSION}"
+
+          docker build . \
+            -f docker/rocm.Dockerfile \
+            --build-arg SGL_BRANCH=${{ github.event.pull_request.head.ref || github.ref_name }} \
+            --build-arg BUILD_TYPE=all \
+            --build-arg GPU_ARCH=${{ steps.vars.outputs.gpu_arch }} \
+            --build-arg ENABLE_MORI=1 \
+            --build-arg NIC_BACKEND=ainic \
+            --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=${PRETEND_VERSION} \
+            -t "${IMAGE}" \
+            --no-cache
+
+          docker push "${IMAGE}"
+          echo "image_tag=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "Successfully built and pushed: ${IMAGE}"
+
+  run-amd-ci:
+    needs: build-test-image
+    uses: ./.github/workflows/pr-test-amd.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      docker_image: ${{ needs.build-test-image.outputs.image_tag }}
+      run_all_tests: true
+    secrets: inherit
