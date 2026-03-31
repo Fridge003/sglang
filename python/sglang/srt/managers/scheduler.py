@@ -1454,6 +1454,13 @@ class Scheduler(
         if self.input_blocker is not None:
             recv_reqs = self.input_blocker.handle(recv_reqs)
 
+        # Unwrap shared memory features on rank 0 BEFORE broadcast so that
+        # broadcasts send regular tensors instead of shm_name references.
+        # Other ranks cannot open shm segments created in the tokenizer process.
+        if recv_reqs:
+            for req in recv_reqs:
+                unwrap_shm_features(req)
+
         if self.server_args.enable_dp_attention:
             if self.attn_tp_rank == 0 and self.attn_cp_rank == 0:
                 work_reqs, control_reqs = self._split_work_and_control_reqs(recv_reqs)
@@ -1509,13 +1516,6 @@ class Scheduler(
                 )
                 prepare_abort(req, error_msg, status_code=status_code)
                 self.stream_output([req], req.return_logprob)
-
-        # Unwrap shared memory features AFTER all broadcasts complete,
-        # so that ShmPointerMMData metadata (not full tensor data) is what
-        # gets serialized during broadcast_pyobj.
-        if recv_reqs:
-            for req in recv_reqs:
-                unwrap_shm_features(req)
 
         return recv_reqs
 
