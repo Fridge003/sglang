@@ -5,6 +5,7 @@ from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation import (
     LatentPreparationStage,
+    _maybe_save_latent_dump,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
@@ -100,5 +101,6 @@ class LTX2AVLatentPreparationStage(LatentPreparationStage):
         # Store in batch
         batch.audio_latents = audio_latents
         batch.raw_audio_latent_shape = audio_latents.shape
+        _maybe_save_latent_dump("sglang_initial_audio_latents.pt", batch.audio_latents)
 
         return batch
