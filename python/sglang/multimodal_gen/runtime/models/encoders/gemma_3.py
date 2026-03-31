@@ -734,7 +734,9 @@ class Gemma3TextModel(nn.Module):
                     layer_id=i,
                     config=config,
                     quant_config=self.quant_config,
-                    prefix=f"{config.text_config.prefix}.layers.{i}",
+                    prefix=add_prefix(
+                        f"layers.{i}", getattr(config.text_config, "prefix", "")
+                    ),
                 )
                 for i in range(config.text_config.num_hidden_layers)
             ]
