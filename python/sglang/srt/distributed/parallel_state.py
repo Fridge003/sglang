@@ -1574,8 +1574,17 @@ def graph_capture(stream: Optional[torch.cuda.Stream] = None):
         stream=stream
     ) as context, get_pp_group().graph_capture(context):
         moe_ep = _MOE_EP
-        if moe_ep is not None and moe_ep is not _TP:
+        moe_tp = _MOE_TP
+        need_moe_ep = moe_ep is not None and moe_ep is not _TP
+        need_moe_tp = moe_tp is not None and moe_tp is not _TP and moe_tp is not moe_ep
+        if need_moe_ep and need_moe_tp:
+            with moe_ep.graph_capture(context), moe_tp.graph_capture(context):
+                yield context
+        elif need_moe_ep:
             with moe_ep.graph_capture(context):
+                yield context
+        elif need_moe_tp:
+            with moe_tp.graph_capture(context):
                 yield context
         else:
             yield context
