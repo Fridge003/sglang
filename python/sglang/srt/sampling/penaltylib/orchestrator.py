@@ -70,11 +70,11 @@ class BatchedPenalizerOrchestrator:
         else:
             # Additive: capture into zeros, expand, add
             bs = logits.shape[0] // repeat
-            linear = torch.zeros(
+            additive = torch.zeros(
                 (bs, logits.shape[1]), dtype=torch.float32, device=logits.device
             )
-            self.apply_additive(linear)
-            logits.add_(torch.repeat_interleave(linear, repeat, dim=0))
+            self.accumulate_additive_penalties(additive)
+            logits.add_(torch.repeat_interleave(additive, repeat, dim=0))
             # Scaling: accumulate, expand, apply
             accumulated = self.accumulate_scaling_penalties()
             if accumulated is not None:
@@ -85,7 +85,7 @@ class BatchedPenalizerOrchestrator:
                 expanded = torch.repeat_interleave(accumulated, repeat, dim=0)
                 apply_scaling_penalties(logits, expanded)
 
-    def apply_additive(self, logits: torch.Tensor):
+    def accumulate_additive_penalties(self, logits: torch.Tensor):
         """Apply only additive (non-multiplicative) penalizers."""
         for penalizer in self.penalizers.values():
             if not penalizer.is_multiplicative:

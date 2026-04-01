@@ -47,7 +47,7 @@ class SamplingBatchInfo:
 
     # Penalizer
     penalizer_orchestrator: Optional[penaltylib.BatchedPenalizerOrchestrator] = None
-    acc_linear_penalties: Optional[torch.Tensor] = None  # Used in the overlap mode
+    acc_additive_penalties: Optional[torch.Tensor] = None  # Used in the overlap mode
     acc_scaling_penalties: Optional[torch.Tensor] = (
         None  # Used in the overlap mode for repetition penalty
     )
@@ -234,23 +234,25 @@ class SamplingBatchInfo:
 
     def update_penalties(self):
         if self.penalizer_orchestrator.is_required:
-            self.acc_linear_penalties = torch.zeros(
+            self.acc_additive_penalties = torch.zeros(
                 (len(self.temperatures), self.vocab_size),
                 dtype=torch.float32,
                 device=self.temperatures.device,
             )
-            self.penalizer_orchestrator.apply_additive(self.acc_linear_penalties)
+            self.penalizer_orchestrator.accumulate_additive_penalties(
+                self.acc_additive_penalties
+            )
             self.acc_scaling_penalties = (
                 self.penalizer_orchestrator.accumulate_scaling_penalties()
             )
         else:
-            self.acc_linear_penalties = None
+            self.acc_additive_penalties = None
             self.acc_scaling_penalties = None
 
     def apply_logits_bias(self, logits: torch.Tensor):
-        if self.acc_linear_penalties is not None:
+        if self.acc_additive_penalties is not None:
             # Used in the overlap mode
-            logits.add_(self.acc_linear_penalties)
+            logits.add_(self.acc_additive_penalties)
 
         if self.acc_scaling_penalties is not None:
             # Used in the overlap mode
