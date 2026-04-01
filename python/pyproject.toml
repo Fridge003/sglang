@@ -138,6 +138,7 @@ test = [
   "matplotlib",
   "pandas",
   "parameterized",
+  "polars",
   "peft>=0.18.0",
   "pytest",
   "pytest-cov",
