@@ -199,17 +199,19 @@ class TestUpdatePenalties(CustomTestCase):
         orch.accumulate_scaling_penalties.return_value = None
         info = _make_info(batch_size=2, penalizer_orchestrator=orch)
         info.update_penalties()
-        self.assertIsNotNone(info.acc_linear_penalties)
-        self.assertEqual(info.acc_linear_penalties.shape, (2, VOCAB_SIZE))
-        orch.apply_additive.assert_called_once_with(info.acc_linear_penalties)
+        self.assertIsNotNone(info.acc_additive_penalties)
+        self.assertEqual(info.acc_additive_penalties.shape, (2, VOCAB_SIZE))
+        orch.accumulate_additive_penalties.assert_called_once_with(
+            info.acc_additive_penalties
+        )
         orch.accumulate_scaling_penalties.assert_called_once()
 
     def test_not_required_sets_none(self):
-        """Test that update_penalties sets acc_linear_penalties to None when not required."""
+        """Test that update_penalties sets acc_additive_penalties to None when not required."""
         orch = MagicMock(is_required=False)
         info = _make_info(batch_size=2, penalizer_orchestrator=orch)
         info.update_penalties()
-        self.assertIsNone(info.acc_linear_penalties)
+        self.assertIsNone(info.acc_additive_penalties)
 
 
 # update_regex_vocab_mask
