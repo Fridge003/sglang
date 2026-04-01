@@ -102,19 +102,22 @@ class MRotaryEmbedding(RotaryEmbedding):
         #   Result: [0,1,2, 0,1,2, ...repeated evenly..., 0,1, 0,1, 0,0]
         #   After H/W run out, T fills the remaining slots.
 
-        num_pairs = rotary_dim // 2
-        axis_map = torch.empty(num_pairs, dtype=torch.long)
-        assert sum(self.mrope_section) == num_pairs
-        counts = [0, 0, 0]
-        current_ax = 0
+        if self.mrope_interleaved_glm:
+            num_pairs = rotary_dim // 2
+            axis_map = torch.empty(num_pairs, dtype=torch.long)
+            assert sum(self.mrope_section) == num_pairs
+            counts = [0, 0, 0]
+            current_ax = 0
 
-        for i in range(num_pairs):
-            current_ax = i % 3
-            while counts[current_ax] >= self.mrope_section[current_ax]:
-                current_ax = (current_ax + 1) % 3
+            for i in range(num_pairs):
+                current_ax = i % 3
+                while counts[current_ax] >= self.mrope_section[current_ax]:
+                    current_ax = (current_ax + 1) % 3
 
-            axis_map[i] = current_ax
-            counts[current_ax] += 1
+                axis_map[i] = current_ax
+                counts[current_ax] += 1
+        else:
+            axis_map = torch.empty(0, dtype=torch.long)
 
         self.register_buffer("axis_map", axis_map, persistent=False)
         if get_global_server_args().rl_on_policy_target is not None:
