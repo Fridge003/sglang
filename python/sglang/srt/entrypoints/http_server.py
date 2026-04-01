@@ -142,9 +142,6 @@ from sglang.srt.managers.multi_tokenizer_mixin import (
 from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import ServerStatus, TokenizerManager
 from sglang.srt.metrics.func_timer import enable_func_timer
-from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
-    parse_remote_instance_transfer_engine_info_from_scheduler_infos,
-)
 from sglang.srt.parser.reasoning_parser import ReasoningParser
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
@@ -174,15 +171,6 @@ class _GlobalState:
     tokenizer_manager: Union[TokenizerManager, MultiTokenizerRouter, TokenizerWorker]
     template_manager: TemplateManager
     scheduler_info: Dict
-    # Dict{
-    #   rank: Tuple(
-    #           session_id,
-    #           Dict{
-    #               name: Tuple (d_ptr, numel, element_size)
-    #           }
-    #         )
-    # }
-    remote_instance_transfer_engine_info: Optional[Dict] = None
 
 
 _global_state: Optional[_GlobalState] = None
@@ -974,26 +962,65 @@ async def send_weights_to_remote_instance(
 @app.get("/get_remote_instance_transfer_engine_info")
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def get_remote_instance_transfer_engine_info(rank: int = None):
+    """Get the server information (deprecated - use /remote_instance_transfer_engine_info instead)."""
+    logger.warning(
+        "Endpoint '/get_remote_instance_transfer_engine_info' is deprecated and will be removed in a future version. "
+        "Please use '/remote_instance_transfer_engine_info' instead."
+    )
+    return await remote_instance_transfer_engine_info(rank=rank)
+
+
+@app.get("/remote_instance_transfer_engine_info")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def remote_instance_transfer_engine_info(rank: int = None):
     if rank is None or rank < 0:
-        return Response(status_code=HTTPStatus.BAD_REQUEST)
+        return ORJSONResponse(
+            {"error": {"message": "Missing or invalid rank parameter"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
 
-    if (
-        _global_state.remote_instance_transfer_engine_info is None
-        or len(_global_state.remote_instance_transfer_engine_info) == 0
-    ):
-        return Response(status_code=HTTPStatus.BAD_REQUEST)
-
+    server_args = _global_state.tokenizer_manager.server_args
     try:
-        result = {
-            "rank": rank,
-            "remote_instance_transfer_engine_info": _global_state.remote_instance_transfer_engine_info[
-                rank
-            ],
-        }
-        return result
-    except Exception as e:
-        logger.error(f"Exception: {e}")
-        return Response(status_code=HTTPStatus.BAD_REQUEST)
+        resp = requests.get(
+            f"{server_args.engine_info_bootstrap_url}/get_transfer_engine_info",
+            params={"rank": rank},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logger.warning(f"Failed to get transfer engine info for rank {rank}: {e}")
+
+    return ORJSONResponse(
+        {"error": {"message": f"Failed to get transfer engine info for rank {rank}"}},
+        status_code=HTTPStatus.BAD_REQUEST,
+    )
+
+
+@app.get("/parallelism_config")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def parallelism_config(rank: int = None):
+    """Get per-rank parallelism config from the bootstrap server."""
+    if rank is None or rank < 0:
+        return ORJSONResponse(
+            {"error": {"message": "Missing or invalid rank parameter"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
+
+    server_args = _global_state.tokenizer_manager.server_args
+    try:
+
+        resp = requests.get(
+            f"{server_args.engine_info_bootstrap_url}/get_parallelism_config",
+            params={"rank": rank},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:
+        pass
+
+    return Response(status_code=HTTPStatus.BAD_REQUEST)
 
 
 @app.post("/init_weights_update_group")
@@ -1916,18 +1943,12 @@ def launch_server(
         )
     )
 
-    # Parse info got from the schedulers
-    remote_instance_transfer_engine_info = (
-        parse_remote_instance_transfer_engine_info_from_scheduler_infos(scheduler_infos)
-    )
-
     # Set global states
     set_global_state(
         _GlobalState(
             tokenizer_manager=tokenizer_manager,
             template_manager=template_manager,
             scheduler_info=scheduler_infos[0],
-            remote_instance_transfer_engine_info=remote_instance_transfer_engine_info,
         )
     )
 

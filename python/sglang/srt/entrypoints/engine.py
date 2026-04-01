@@ -27,7 +27,16 @@ import random
 import signal
 import threading
 import time
-from typing import AsyncIterator, Callable, Dict, Iterator, List, Optional, Tuple, Union
+from typing import (
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 
 # Fix a bug of Python threading
 setattr(threading, "_register_atexit", lambda *args, **kwargs: None)
@@ -36,6 +45,9 @@ import torch
 import uvloop
 import zmq
 
+from sglang.srt.entrypoints.engine_info_bootstrap_server import (
+    EngineInfoBootstrapServer,
+)
 from sglang.srt.entrypoints.EngineBase import EngineBase
 from sglang.srt.managers.data_parallel_controller import (
     run_data_parallel_controller_process,
@@ -67,9 +79,6 @@ from sglang.srt.managers.multi_tokenizer_mixin import MultiTokenizerRouter
 from sglang.srt.managers.scheduler import run_scheduler_process
 from sglang.srt.managers.template_manager import TemplateManager
 from sglang.srt.managers.tokenizer_manager import TokenizerManager
-from sglang.srt.model_loader.remote_instance_weight_loader_utils import (
-    parse_remote_instance_transfer_engine_info_from_scheduler_infos,
-)
 from sglang.srt.server_args import PortArgs, ServerArgs
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
 from sglang.srt.utils import (
@@ -86,6 +95,7 @@ from sglang.srt.utils import (
     set_prometheus_multiproc_dir,
     set_ulimit,
 )
+from sglang.srt.utils.common import is_port_available
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.version import __version__
 
@@ -172,12 +182,6 @@ class Engine(EngineBase):
         self.template_manager = template_manager
         self.scheduler_info = scheduler_infos[0]
         self.port_args = port_args
-        self.remote_instance_transfer_engine_info = (
-            parse_remote_instance_transfer_engine_info_from_scheduler_infos(
-                scheduler_infos
-            )
-        )
-
         # Initialize ZMQ sockets
         context = zmq.Context(2)
         if self.server_args.node_rank == 0:
@@ -646,14 +650,23 @@ class Engine(EngineBase):
         self,
         restore_weights_before_load: bool = False,
         post_process_quantization: bool = False,
+        post_load_weights: bool = False,
     ):
         """
         Optional post-processing for updated weights (e.g., Marlin conversion).
         Should be called after weight update is finished.
+
+        Args:
+            restore_weights_before_load: Restore weights to pre-quantization state.
+            post_process_quantization: Re-apply quantization post-processing.
+            post_load_weights: Call model.post_load_weights() for models that
+                need post-load decomposition (e.g., DeepSeek MLA kv_b_proj
+                decomposition into w_kc/w_vc tensors after RDMA weight transfer).
         """
         obj = PostProcessWeightsReqInput(
             restore_weights_before_load=restore_weights_before_load,
             post_process_quantization=post_process_quantization,
+            post_load_weights=post_load_weights,
         )
 
         return self.loop.run_until_complete(
@@ -1055,6 +1068,25 @@ def _launch_subprocesses(
     if port_args is None:
         port_args = PortArgs.init_new(server_args)
     logger.info(f"{server_args=}")
+
+    # Start the engine info bootstrap server if per-rank info is needed.
+    # This must start BEFORE scheduler processes so ModelRunners can register with it.
+    if (
+        server_args.remote_instance_weight_loader_start_seed_via_transfer_engine
+        and server_args.node_rank == 0
+    ):
+        bootstrap_port = server_args.engine_info_bootstrap_port
+        if not is_port_available(bootstrap_port):
+            raise RuntimeError(
+                f"engine_info_bootstrap_port {bootstrap_port} is already in use. "
+                f"When running multiple instances on the same node, each instance must use a "
+                f"different --engine-info-bootstrap-port."
+            )
+        _engine_info_bootstrap_server = EngineInfoBootstrapServer(
+            host=server_args.host, port=bootstrap_port
+        )
+    else:
+        _engine_info_bootstrap_server = None
 
     # Launch scheduler processes
     scheduler_procs, scheduler_pipe_readers = _launch_scheduler_processes(

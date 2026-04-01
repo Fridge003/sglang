@@ -2993,9 +2993,6 @@ class Scheduler(
     ):
         pass
 
-    def get_remote_instance_transfer_engine_info(self):
-        return self.tp_worker.get_remote_instance_transfer_engine_info()
-
 
 class IdleSleeper:
     """
@@ -3145,18 +3142,6 @@ def run_scheduler_process(
             "max_total_num_tokens": scheduler.max_total_num_tokens,
             "max_req_input_len": scheduler.max_req_input_len,
         }
-        if server_args.remote_instance_weight_loader_use_transfer_engine():
-            (
-                remote_instance_transfer_engine_session_id,
-                remote_instance_transfer_engine_weights_info_dict,
-            ) = scheduler.get_remote_instance_transfer_engine_info()
-            result_dict.update(
-                {
-                    "tp_rank": tp_rank,
-                    "remote_instance_transfer_engine_session_id": remote_instance_transfer_engine_session_id,
-                    "remote_instance_transfer_engine_weights_info_dict": remote_instance_transfer_engine_weights_info_dict,
-                }
-            )
 
         pipe_writer.send(result_dict)
 
