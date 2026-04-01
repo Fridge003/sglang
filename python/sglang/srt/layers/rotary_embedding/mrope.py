@@ -116,10 +116,9 @@ class MRotaryEmbedding(RotaryEmbedding):
 
                 axis_map[i] = current_ax
                 counts[current_ax] += 1
+            self.register_buffer("axis_map", axis_map, persistent=False)
         else:
-            axis_map = torch.empty(0, dtype=torch.long)
-
-        self.register_buffer("axis_map", axis_map, persistent=False)
+            self.axis_map = None
         if get_global_server_args().rl_on_policy_target is not None:
             self._forward_method = self.forward_native
 
