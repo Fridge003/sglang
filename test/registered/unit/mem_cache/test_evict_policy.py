@@ -155,6 +155,18 @@ class TestPriorityStrategy(unittest.TestCase):
         self.assertEqual(PriorityStrategy.clamp_priority(100), 99)
         self.assertEqual(PriorityStrategy.clamp_priority(-1), 0)
 
+    def test_pick_stronger_policy_keeps_coherent_tuple(self):
+        priority, retention = PriorityStrategy.pick_stronger_policy(99, 1.0, 50, 300.0)
+        self.assertEqual((priority, retention), (99, 1.0))
+
+    def test_pick_stronger_policy_prefers_longer_retention_on_tie(self):
+        priority, retention = PriorityStrategy.pick_stronger_policy(50, 1.0, 50, 300.0)
+        self.assertEqual((priority, retention), (50, 300.0))
+
+    def test_pick_stronger_policy_treats_zero_retention_as_permanent(self):
+        priority, retention = PriorityStrategy.pick_stronger_policy(50, 10.0, 50, 0.0)
+        self.assertEqual((priority, retention), (50, 0.0))
+
 
 class TestSLRUStrategy(unittest.TestCase):
     def setUp(self):

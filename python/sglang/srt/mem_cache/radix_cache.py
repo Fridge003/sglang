@@ -748,9 +748,10 @@ class RadixCache(BasePrefixCache):
         priority = PriorityStrategy.clamp_priority(priority)
         access_time = time.monotonic()
         node.last_access_time = access_time
-        # Update priority along the path (take max to propagate higher priority)
-        node.priority = max(node.priority, priority)
-        node.retention_duration = max(node.retention_duration, retention_duration)
+        # Shared-prefix nodes must inherit one coherent policy tuple from a leaf.
+        node.priority, node.retention_duration = PriorityStrategy.pick_stronger_policy(
+            node.priority, node.retention_duration, priority, retention_duration
+        )
         if len(key) == 0:
             return 0
 
@@ -767,16 +768,25 @@ class RadixCache(BasePrefixCache):
 
             if prefix_len < len(node.key):
                 new_node = self._split_node(node.key, node, prefix_len)
-                new_node.priority = max(new_node.priority, priority)
-                new_node.retention_duration = max(
-                    new_node.retention_duration, retention_duration
+                (
+                    new_node.priority,
+                    new_node.retention_duration,
+                ) = PriorityStrategy.pick_stronger_policy(
+                    new_node.priority,
+                    new_node.retention_duration,
+                    priority,
+                    retention_duration,
                 )
                 self._inc_hit_count(new_node, chunked)
                 node = new_node
             else:
-                node.priority = max(node.priority, priority)
-                node.retention_duration = max(
-                    node.retention_duration, retention_duration
+                node.priority, node.retention_duration = (
+                    PriorityStrategy.pick_stronger_policy(
+                        node.priority,
+                        node.retention_duration,
+                        priority,
+                        retention_duration,
+                    )
                 )
                 self._inc_hit_count(node, chunked)
             if len(key):

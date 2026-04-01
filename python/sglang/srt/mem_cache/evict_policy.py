@@ -59,6 +59,34 @@ class PriorityStrategy(EvictionStrategy):
             min(PriorityStrategy.MAX_PRIORITY, priority),
         )
 
+    @staticmethod
+    def _retention_rank(retention_duration: float | None) -> float:
+        # 0/None means "never decay", which should dominate finite durations.
+        if retention_duration is None or retention_duration <= 0:
+            return float("inf")
+        return retention_duration
+
+    @classmethod
+    def pick_stronger_policy(
+        cls,
+        current_priority: int | None,
+        current_retention_duration: float | None,
+        new_priority: int | None,
+        new_retention_duration: float | None,
+    ) -> Tuple[int, float]:
+        current_priority = cls.clamp_priority(current_priority or 0)
+        new_priority = cls.clamp_priority(new_priority or 0)
+
+        current_rank = (
+            current_priority,
+            cls._retention_rank(current_retention_duration),
+        )
+        new_rank = (new_priority, cls._retention_rank(new_retention_duration))
+
+        if new_rank > current_rank:
+            return new_priority, new_retention_duration or 0.0
+        return current_priority, current_retention_duration or 0.0
+
     def get_priority(self, node: "TreeNode") -> Tuple[int, float]:
         priority = self.clamp_priority(node.priority)
         if node.retention_duration > 0 and priority > 0:

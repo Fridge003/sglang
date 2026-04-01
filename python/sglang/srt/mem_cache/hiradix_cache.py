@@ -1346,8 +1346,11 @@ class HiRadixCache(RadixCache):
         while len(key) > 0 and child_key in node.children.keys():
             node = node.children[child_key]
             node.last_access_time = time.monotonic()
-            node.priority = max(node.priority, priority)
-            node.retention_duration = max(node.retention_duration, retention_duration)
+            node.priority, node.retention_duration = (
+                PriorityStrategy.pick_stronger_policy(
+                    node.priority, node.retention_duration, priority, retention_duration
+                )
+            )
             prefix_len = self.key_match_fn(node.key, key)
 
             if prefix_len == len(node.key):
@@ -1366,10 +1369,14 @@ class HiRadixCache(RadixCache):
             else:
                 # partial match, split the node
                 new_node = self._split_node(node.key, node, prefix_len)
-                # shared-prefix node should also reflect max priority
-                new_node.priority = max(new_node.priority, priority)
-                new_node.retention_duration = max(
-                    new_node.retention_duration, retention_duration
+                # Shared-prefix nodes must inherit one coherent policy tuple.
+                new_node.priority, new_node.retention_duration = (
+                    PriorityStrategy.pick_stronger_policy(
+                        new_node.priority,
+                        new_node.retention_duration,
+                        priority,
+                        retention_duration,
+                    )
                 )
                 if new_node.evicted:
                     new_node.value = value[:prefix_len].clone()
