@@ -208,7 +208,9 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return processed_args
 
-    def _mark_provided_args(self, namespace: argparse.Namespace, args: list[str]) -> None:
+    def _mark_provided_args(
+        self, namespace: argparse.Namespace, args: list[str]
+    ) -> None:
         namespace._provided = set()
 
         i = 0

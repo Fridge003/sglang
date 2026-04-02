@@ -1,4 +1,5 @@
 import math
+import os
 
 import numpy as np
 import torch
@@ -34,6 +35,37 @@ BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
 
 
+def _resolve_ltx2_two_stage_component_paths(
+    model_path: str, component_paths: dict[str, str]
+) -> dict[str, str]:
+    resolved = dict(component_paths)
+    auto_resolved = []
+
+    if "spatial_upsampler" not in resolved:
+        spatial_candidates = [
+            os.path.join(model_path, "latent_upsampler"),
+            os.path.join(model_path, "ltx-2-spatial-upscaler-x2-1.0.safetensors"),
+        ]
+        for candidate in spatial_candidates:
+            if os.path.exists(candidate):
+                resolved["spatial_upsampler"] = candidate
+                auto_resolved.append(f"spatial_upsampler={candidate}")
+                break
+
+    if "distilled_lora" not in resolved:
+        distilled_lora = os.path.join(
+            model_path, "ltx-2-19b-distilled-lora-384.safetensors"
+        )
+        if os.path.exists(distilled_lora):
+            resolved["distilled_lora"] = distilled_lora
+            auto_resolved.append(f"distilled_lora={distilled_lora}")
+
+    if auto_resolved:
+        logger.info("Auto-resolved LTX2 two-stage components: %s", ", ".join(auto_resolved))
+
+    return resolved
+
+
 def calculate_ltx2_shift(
     image_seq_len: int,
     base_seq_len: int = BASE_SHIFT_ANCHOR,
@@ -47,10 +79,12 @@ def calculate_ltx2_shift(
 
 
 def prepare_ltx2_mu(batch: Req, server_args: ServerArgs):
-    latent_num_frames = (
-        int(batch.num_frames) - 1
-    ) // int(server_args.pipeline_config.vae_temporal_compression) + 1
-    latent_height = int(batch.height) // int(server_args.pipeline_config.vae_scale_factor)
+    latent_num_frames = (int(batch.num_frames) - 1) // int(
+        server_args.pipeline_config.vae_temporal_compression
+    ) + 1
+    latent_height = int(batch.height) // int(
+        server_args.pipeline_config.vae_scale_factor
+    )
     latent_width = int(batch.width) // int(server_args.pipeline_config.vae_scale_factor)
     video_sequence_length = latent_num_frames * latent_height * latent_width
     return "mu", calculate_ltx2_shift(video_sequence_length)
@@ -187,6 +221,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
     def initialize_pipeline(self, server_args: ServerArgs):
         super().initialize_pipeline(server_args)
+        server_args.component_paths = _resolve_ltx2_two_stage_component_paths(
+            self.model_path, server_args.component_paths
+        )
+
         upsampler_path = server_args.component_paths.get("spatial_upsampler")
         if not upsampler_path:
             raise ValueError(

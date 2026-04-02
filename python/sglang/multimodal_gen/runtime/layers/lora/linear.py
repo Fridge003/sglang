@@ -456,9 +456,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
             lora_B_sliced = self.slice_lora_b_weights(
                 lora_B.to(device=input_parallel.device, non_blocking=True)
             )
-            delta_parallel = (
-                input_parallel_lora @ lora_A_sliced.T @ lora_B_sliced.T
-            )
+            delta_parallel = input_parallel_lora @ lora_A_sliced.T @ lora_B_sliced.T
             if self.lora_alpha != self.lora_rank:
                 delta_parallel = delta_parallel * (
                     self.lora_alpha / self.lora_rank  # type: ignore
