@@ -71,7 +71,11 @@ class LTX2AVDenoisingStage(DenoisingStage):
             return int(batch.sp_video_latent_num_frames)
 
         pc = server_args.pipeline_config
-        return int((batch.num_frames - 1) // int(pc.vae_temporal_compression) + 1)
+        return int(
+            (batch.num_frames - 1)
+            // int(pc.vae_config.arch_config.temporal_compression_ratio)
+            + 1
+        )
 
     @staticmethod
     def _truncate_sp_padded_token_latents(
@@ -380,21 +384,15 @@ class LTX2AVDenoisingStage(DenoisingStage):
         # Prepare variables for the denoising loop
 
         prepared_vars = self._prepare_denoising_loop(batch, server_args)
-        extra_step_kwargs = prepared_vars["extra_step_kwargs"]
         target_dtype = prepared_vars["target_dtype"]
         autocast_enabled = prepared_vars["autocast_enabled"]
         timesteps = prepared_vars["timesteps"]
         num_inference_steps = prepared_vars["num_inference_steps"]
         num_warmup_steps = prepared_vars["num_warmup_steps"]
-        image_kwargs = prepared_vars["image_kwargs"]
-        pos_cond_kwargs = prepared_vars["pos_cond_kwargs"]
-        neg_cond_kwargs = prepared_vars["neg_cond_kwargs"]
         latents = prepared_vars["latents"]
         boundary_timestep = prepared_vars["boundary_timestep"]
         z = prepared_vars["z"]
         reserved_frames_mask = prepared_vars["reserved_frames_mask"]
-        seq_len = prepared_vars["seq_len"]
-        guidance = prepared_vars["guidance"]
         stage = batch.extra.get("ltx2_phase", "stage1")
         audio_latents = batch.audio_latents
         audio_scheduler = copy.deepcopy(self.scheduler)
@@ -408,8 +406,14 @@ class LTX2AVDenoisingStage(DenoisingStage):
         latent_num_frames_for_model = self._get_video_latent_num_frames_for_model(
             batch=batch, server_args=server_args, latents=latents
         )
-        latent_height = batch.height // server_args.pipeline_config.vae_scale_factor
-        latent_width = batch.width // server_args.pipeline_config.vae_scale_factor
+        latent_height = (
+            batch.height
+            // server_args.pipeline_config.vae_config.arch_config.spatial_compression_ratio
+        )
+        latent_width = (
+            batch.width
+            // server_args.pipeline_config.vae_config.arch_config.spatial_compression_ratio
+        )
 
         # Initialize lists for ODE trajectory
         trajectory_timesteps: list[torch.Tensor] = []
@@ -986,6 +990,8 @@ class LTX2AVDenoisingStage(DenoisingStage):
         trajectory_audio_latents: list,
         server_args: ServerArgs,
         is_warmup: bool = False,
+        *args,
+        **kwargs,
     ):
         # 1. Handle Trajectory (Video) - Copy from base
         if trajectory_latents:
@@ -1037,6 +1043,7 @@ class LTX2AVDenoisingStage(DenoisingStage):
             batch.latents = latents
             batch.audio_latents = audio_latents
         # 4. Cleanup
+        # TODO: make this a general denoising-stage hook
         if isinstance(self.transformer, OffloadableDiTMixin):
             for manager in self.transformer.layerwise_offload_managers:
                 manager.release_all()
@@ -1083,9 +1090,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
             or V.list_not_empty(x),
         )
         return result
-
-    def do_classifier_free_guidance(self, batch: Req) -> bool:
-        return batch.guidance_scale > 1.0
 
 
 class LTX2RefinementStage(LTX2AVDenoisingStage):
@@ -1201,6 +1205,3 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             batch.do_classifier_free_guidance = original_do_cfg
 
         return batch
-
-    def do_classifier_free_guidance(self, batch: Req) -> bool:
-        return False  # Stage 2 uses simple denoising (no CFG)

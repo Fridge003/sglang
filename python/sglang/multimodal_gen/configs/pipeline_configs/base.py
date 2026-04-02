@@ -421,6 +421,9 @@ class PipelineConfig:
     def prepare_neg_cond_kwargs(self, batch, device, rotary_emb, dtype):
         return {}
 
+    def _unpad_and_unpack_latents(self, latents, audio_latents, batch, vae, audio_vae):
+        raise NotImplementedError("not yet implemented")
+
     @staticmethod
     def add_cli_args(
         parser: FlexibleArgumentParser, prefix: str = ""

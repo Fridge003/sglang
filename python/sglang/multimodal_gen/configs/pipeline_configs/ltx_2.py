@@ -133,16 +133,14 @@ class LTX2PipelineConfig(PipelineConfig):
     vae_config: LTXVideoVAEConfig = field(default_factory=LTXVideoVAEConfig)
     audio_vae_config: LTXAudioVAEConfig = field(default_factory=LTXAudioVAEConfig)
     audio_vae_precision: str = "fp32"
-    audio_vae_temporal_compression_ratio: int = 4
-    audio_vae_mel_compression_ratio: int = 4
 
     @property
     def vae_scale_factor(self):
-        return getattr(self.vae_config.arch_config, "spatial_compression_ratio", 32)
+        return self.vae_config.arch_config.spatial_compression_ratio
 
     @property
     def vae_temporal_compression(self):
-        return getattr(self.vae_config.arch_config, "temporal_compression_ratio", 8)
+        return self.vae_config.arch_config.temporal_compression_ratio
 
     def prepare_latent_shape(self, batch, batch_size, num_frames):
         """Return unpacked latent shape [B, C, F, H, W]."""
@@ -156,7 +154,9 @@ class LTX2PipelineConfig(PipelineConfig):
 
         sample_rate = self.audio_vae_config.arch_config.sample_rate
         hop_length = self.audio_vae_config.arch_config.mel_hop_length
-        temporal_compression = self.audio_vae_temporal_compression_ratio
+        temporal_compression = (
+            self.audio_vae_config.arch_config.temporal_compression_ratio
+        )
 
         latents_per_second = (
             float(sample_rate) / float(hop_length) / float(temporal_compression)
@@ -164,7 +164,7 @@ class LTX2PipelineConfig(PipelineConfig):
         latent_length = round(duration_s * latents_per_second)
 
         num_mel_bins = self.audio_vae_config.arch_config.mel_bins
-        mel_compression_ratio = self.audio_vae_mel_compression_ratio
+        mel_compression_ratio = self.audio_vae_config.arch_config.mel_compression_ratio
         latent_mel_bins = num_mel_bins // mel_compression_ratio
 
         # Default to 8
@@ -518,7 +518,9 @@ class LTX2PipelineConfig(PipelineConfig):
 
         sample_rate = self.audio_vae_config.arch_config.sample_rate
         hop_length = self.audio_vae_config.arch_config.mel_hop_length
-        temporal_compression = self.audio_vae_temporal_compression_ratio
+        temporal_compression = (
+            self.audio_vae_config.arch_config.temporal_compression_ratio
+        )
         duration_s = num_frames / batch.fps
 
         latents_per_second = (
@@ -527,7 +529,7 @@ class LTX2PipelineConfig(PipelineConfig):
         audio_num_frames = round(duration_s * latents_per_second)
 
         num_mel_bins = self.audio_vae_config.arch_config.mel_bins
-        mel_compression_ratio = self.audio_vae_mel_compression_ratio
+        mel_compression_ratio = self.audio_vae_config.arch_config.mel_compression_ratio
         latent_mel_bins = num_mel_bins // mel_compression_ratio
 
         audio_latents = self._unpack_audio_latents(

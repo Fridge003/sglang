@@ -23,6 +23,8 @@ class LTXAudioVAEArchConfig(VAEArchConfig):
     is_causal: bool = True
     mel_bins: Optional[int] = 64
     double_z: bool = True
+    temporal_compression_ratio: int = 4
+    mel_compression_ratio: int = 4
 
 
 @dataclass
