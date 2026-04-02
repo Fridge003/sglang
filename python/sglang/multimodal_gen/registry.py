@@ -824,6 +824,7 @@ _register_configs()
 # Maps pattern -> pipeline_name for models that don't have model_index.json
 _NON_DIFFUSERS_MULTIMODAL_PATTERNS: Dict[str, str] = {
     "hunyuan3d": "Hunyuan3D2Pipeline",
+    "ltx-2": "LTX2Pipeline",
 }
 
 

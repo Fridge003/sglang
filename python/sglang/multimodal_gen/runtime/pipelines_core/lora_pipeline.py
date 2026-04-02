@@ -693,7 +693,7 @@ class LoRAPipeline(ComposedPipelineBase):
                         str(p or self.loaded_adapter_paths.get(n, ""))
                         for n, p in zip(tgt_nicknames, tgt_paths)
                     )
-                    self.is_lora_merged[module_name] = True
+                    self.is_lora_merged[module_name] = merge_weights
                     self.cur_adapter_strength[module_name] = tgt_strengths[0]
                     # Store full configuration for multi-LoRA support (preserves order and all strengths)
                     self.cur_adapter_config[module_name] = (
