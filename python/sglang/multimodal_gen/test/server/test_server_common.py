@@ -65,10 +65,10 @@ def diffusion_server(case: DiffusionTestCase) -> ServerContext:
     sampling_params = case.sampling_params
     extra_args = os.environ.get("SGLANG_TEST_SERVE_ARGS", "")
 
-    # In GT generation mode, force --backend diffusers
+    # In GT generation mode, force --backend sglang (native backend)
     if os.environ.get("SGLANG_GEN_GT", "0") == "1":
         if "--backend" not in extra_args:
-            extra_args = "--backend diffusers " + extra_args.strip()
+            extra_args = "--backend sglang " + extra_args.strip()
 
     extra_args += f" --num-gpus {server_args.num_gpus}"
 
