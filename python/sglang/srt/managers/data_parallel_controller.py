@@ -20,7 +20,7 @@ import signal
 import threading
 import time
 from enum import Enum, auto
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple, cast
 
 import psutil
 import setproctitle
@@ -58,12 +58,86 @@ from sglang.srt.utils.network import (
     NetworkAddress,
     bind_port,
     get_zmq_socket,
+    propagate_curve_keys_to_env,
 )
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.utils.watchdog import Watchdog
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 logger = logging.getLogger(__name__)
+
+BOOTSTRAP_MAGIC = b"SGLANG_DP_BOOTSTRAP_V1"
+
+
+def _parse_ascii_int(
+    frame: bytes, *, field_name: str, min_value: int = 0, max_value: int = 2**31 - 1
+) -> int:
+    try:
+        value = int(frame.decode("ascii"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid {field_name}: {frame!r}") from exc
+
+    if not (min_value <= value <= max_value):
+        raise RuntimeError(
+            f"{field_name} out of range [{min_value}, {max_value}]: {value}"
+        )
+    return value
+
+
+def _validate_curve_public_key(curve_public: bytes) -> bytes:
+    if not curve_public:
+        return b""
+    try:
+        curve_public.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("Invalid bootstrap CurveZMQ public key encoding") from exc
+    if len(curve_public) != 40:
+        raise RuntimeError(
+            f"Invalid bootstrap CurveZMQ public key length: {len(curve_public)}"
+        )
+    return curve_public
+
+
+def encode_bootstrap_payload(
+    worker_ports: List[int], curve_public: Optional[bytes] = None
+) -> List[bytes]:
+    frames = [
+        BOOTSTRAP_MAGIC,
+        str(len(worker_ports)).encode("ascii"),
+        *[str(port).encode("ascii") for port in worker_ports],
+        curve_public or b"",
+    ]
+    return frames
+
+
+def decode_bootstrap_payload(
+    frames: List[bytes], *, expected_ports: Optional[int] = None
+) -> Tuple[List[int], Optional[bytes]]:
+    if len(frames) < 3:
+        raise RuntimeError("Incomplete bootstrap payload")
+    if frames[0] != BOOTSTRAP_MAGIC:
+        raise RuntimeError(f"Invalid bootstrap magic: {frames[0]!r}")
+
+    port_count = _parse_ascii_int(
+        frames[1], field_name="bootstrap worker port count", max_value=4096
+    )
+    if expected_ports is not None and port_count != expected_ports:
+        raise RuntimeError(
+            f"Bootstrap worker port count mismatch: expected {expected_ports}, "
+            f"received {port_count}"
+        )
+    if len(frames) != port_count + 3:
+        raise RuntimeError(
+            f"Invalid bootstrap frame count: expected {port_count + 3}, "
+            f"received {len(frames)}"
+        )
+
+    worker_ports = [
+        _parse_ascii_int(frame, field_name="bootstrap worker port", max_value=65535)
+        for frame in frames[2 : 2 + port_count]
+    ]
+    curve_public = _validate_curve_public_key(frames[-1])
+    return worker_ports, curve_public or None
 
 
 class LoadBalanceMethod(Enum):
@@ -313,6 +387,8 @@ class DataParallelController:
             na = NetworkAddress(na.host, na.port + DP_ATTENTION_HANDSHAKE_PORT_DELTA)
 
         if server_args.node_rank == 0:
+            if worker_ports is None:
+                raise ValueError("worker_ports must be preallocated on node 0")
             return self._broadcast_ports_as_server(
                 na, server_args.nnodes - 1, worker_ports
             )
@@ -332,25 +408,32 @@ class DataParallelController:
 
         curve = get_curve_config()
         endpoint = na.to_tcp()
-
-        payload = {"worker_ports": worker_ports}
+        curve_public: Optional[bytes] = None
 
         if curve is not None:
             set_server_public_key(curve.public_key)
-            payload["curve_public"] = curve.public_key
+            curve_public = curve.public_key
             logger.info(
                 "Multi-node bootstrap: distributing CurveZMQ public key on %s",
                 endpoint,
             )
 
-        socket = get_zmq_socket(
-            self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED
+        socket = cast(
+            zmq.Socket,
+            get_zmq_socket(self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED),
         )
         try:
             for _ in range(expected_clients):
-                client_rank = socket.recv().decode()
+                client_rank = _parse_ascii_int(
+                    socket.recv(),
+                    field_name="bootstrap client rank",
+                    min_value=1,
+                    max_value=max(expected_clients, 1),
+                )
                 logger.debug("Bootstrap handshake from node %s", client_rank)
-                socket.send_pyobj(payload)
+                socket.send_multipart(
+                    encode_bootstrap_payload(worker_ports, curve_public)
+                )
         finally:
             socket.close()
 
@@ -371,15 +454,20 @@ class DataParallelController:
         timeout_ms = 600 * 1000  # 10 minutes
 
         logger.debug("Connecting to node 0 for bootstrap")
-        socket = get_zmq_socket(
-            self.context, zmq.REQ, endpoint, False, curve=CURVE_DISABLED
+        socket = cast(
+            zmq.Socket,
+            get_zmq_socket(
+                self.context, zmq.REQ, endpoint, False, curve=CURVE_DISABLED
+            ),
         )
         socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
         socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
 
         try:
             socket.send(str(node_rank).encode())
-            payload = socket.recv_pyobj()
+            worker_ports, curve_public = decode_bootstrap_payload(
+                socket.recv_multipart(), expected_ports=self.server_args.dp_size
+            )
         except zmq.Again:
             logger.error("Timeout waiting for bootstrap handshake from node 0")
             raise RuntimeError(
@@ -387,12 +475,6 @@ class DataParallelController:
             )
         finally:
             socket.close()
-
-        if not isinstance(payload, dict):
-            return payload
-
-        worker_ports = payload["worker_ports"]
-        curve_public = payload.get("curve_public")
 
         if curve_public is not None:
             set_server_public_key(curve_public)
@@ -506,6 +588,7 @@ class DataParallelController:
                 )
 
                 with self.env_lock, maybe_reindex_device_id(gpu_id) as gpu_id:
+                    propagate_curve_keys_to_env()
                     proc = mp.Process(
                         target=self.run_scheduler_process_func,
                         args=(
@@ -615,6 +698,7 @@ def run_data_parallel_controller_process(
     parent_process = psutil.Process().parent()
 
     configure_logger(server_args)
+    propagate_curve_keys_to_env()
     if server_args.enable_trace:
         process_tracing_init(server_args.otlp_traces_endpoint, "sglang")
         thread_label = "DP Controller"

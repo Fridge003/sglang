@@ -1050,6 +1050,9 @@ def _create_zmq_rpc_broadcast(
     sock.bind("tcp://*:0")
     bound_port = int(sock.getsockopt_string(zmq.LAST_ENDPOINT).rsplit(":", 1)[1])
     local_addr = f"tcp://{_get_local_ip_by_remote()}:{bound_port}"
+    local_curve_public_key = (
+        curve.public_key.decode("ascii") if curve is not None else None
+    )
 
     def serve_loop():
         while True:
@@ -1067,23 +1070,34 @@ def _create_zmq_rpc_broadcast(
     print(f"[Dumper.ZmqRpc] rank={rank} server started at {local_addr}")
 
     if dist.is_initialized():
-        all_addresses = [None] * world_size
+        all_targets = [None] * world_size
         _collective_with_timeout(
-            lambda: dist.all_gather_object(all_addresses, local_addr),
+            lambda: dist.all_gather_object(
+                all_targets, (local_addr, local_curve_public_key)
+            ),
             operation_name="all_gather_object in _create_zmq_rpc_broadcast",
             timeout_seconds=timeout_seconds,
         )
     else:
-        all_addresses = [local_addr]
-    print(f"[Dumper.ZmqRpc] rank={rank} all_addresses={all_addresses}")
+        all_targets = [(local_addr, local_curve_public_key)]
+    print(
+        f"[Dumper.ZmqRpc] rank={rank} all_addresses="
+        f"{[target[0] for target in all_targets]}"
+    )
 
     if rank == 0:
         from sglang.srt.utils.network import connect_with_curve
 
         handles = []
-        for i, addr in enumerate(all_addresses):
+        for i, (addr, curve_public_key) in enumerate(all_targets):
             req_socket = ctx.socket(zmq.REQ)
-            connect_with_curve(req_socket, addr)
+            connect_with_curve(
+                req_socket,
+                addr,
+                server_public_key=(
+                    curve_public_key.encode("ascii") if curve_public_key else None
+                ),
+            )
             handles.append(_ZmqRpcHandle(req_socket, debug_name=f"rank-{i}"))
         return _ZmqRpcBroadcast(handles)
     else:

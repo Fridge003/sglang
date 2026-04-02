@@ -164,6 +164,26 @@ def set_curve_config(config: CurveConfig) -> None:
         _curve_config_loaded = True
 
 
+def propagate_curve_keys_to_env() -> Optional[CurveConfig]:
+    """Ensure spawned subprocesses inherit the current CURVE keypair.
+
+    When CURVE is enabled without explicit raw env vars, ``get_curve_config()``
+    may auto-generate a process-local keypair.  Exporting that keypair to
+    ``SGLANG_ZMQ_CURVE_PUBLIC_KEY`` / ``SGLANG_ZMQ_CURVE_SECRET_KEY`` before
+    ``mp.Process.start()`` makes ``spawn`` children reuse the same identity.
+    """
+    curve = get_curve_config()
+    if curve is None:
+        return None
+
+    if not envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.get():
+        envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.set(curve.public_key.decode("ascii"))
+    if not envs.SGLANG_ZMQ_CURVE_SECRET_KEY.get():
+        envs.SGLANG_ZMQ_CURVE_SECRET_KEY.set(curve.secret_key.decode("ascii"))
+
+    return curve
+
+
 _server_public_key: Optional[bytes] = None
 _server_public_key_loaded: bool = False
 

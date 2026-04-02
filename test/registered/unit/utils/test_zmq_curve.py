@@ -21,6 +21,7 @@ from sglang.srt.utils.network import (
     get_server_public_key,
     get_zmq_socket,
     get_zmq_socket_on_host,
+    propagate_curve_keys_to_env,
     set_curve_config,
     set_server_public_key,
 )
@@ -39,6 +40,13 @@ try:
     MM_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     MM_AVAILABLE = False
+
+try:
+    import mori  # noqa: F401
+
+    MORI_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    MORI_AVAILABLE = False
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -136,24 +144,8 @@ def _restore_curve_state(saved):
 
 
 def _propagate_curve_keys_standalone():
-    """Standalone reimplementation of launch_server._propagate_curve_keys().
-
-    This avoids importing sglang.multimodal_gen (which requires diffusers)
-    while exercising the exact same logic the production code uses.
-    """
-    from sglang.srt.environ import envs
-
-    curve = get_curve_config()
-    if curve is None:
-        return
-    if not envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.get():
-        pub = curve.public_key.decode("ascii")
-        envs.SGLANG_ZMQ_CURVE_PUBLIC_KEY.set(pub)
-        os.environ["SGLANG_ZMQ_CURVE_PUBLIC_KEY"] = pub
-    if not envs.SGLANG_ZMQ_CURVE_SECRET_KEY.get():
-        sec = curve.secret_key.decode("ascii")
-        envs.SGLANG_ZMQ_CURVE_SECRET_KEY.set(sec)
-        os.environ["SGLANG_ZMQ_CURVE_SECRET_KEY"] = sec
+    """Call the production helper used before mp.Process fan-out."""
+    return propagate_curve_keys_to_env()
 
 
 # ---------------------------------------------------------------------------
@@ -979,12 +971,70 @@ class TestDisaggregationMetadataRoundTrip(CustomTestCase):
         self.assertIsNone(info.curve_public_key)
 
 
+class TestDPBootstrapPayload(CustomTestCase):
+    def test_round_trip_with_curve_public_key(self):
+        from sglang.srt.managers.data_parallel_controller import (
+            decode_bootstrap_payload,
+            encode_bootstrap_payload,
+        )
+
+        worker_ports = [10000, 10001, 10002]
+        frames = encode_bootstrap_payload(worker_ports, b"A" * 40)
+        decoded_ports, decoded_curve_key = decode_bootstrap_payload(
+            frames, expected_ports=len(worker_ports)
+        )
+
+        self.assertEqual(decoded_ports, worker_ports)
+        self.assertEqual(decoded_curve_key, b"A" * 40)
+
+    def test_round_trip_without_curve_public_key(self):
+        from sglang.srt.managers.data_parallel_controller import (
+            decode_bootstrap_payload,
+            encode_bootstrap_payload,
+        )
+
+        frames = encode_bootstrap_payload([4321], None)
+        decoded_ports, decoded_curve_key = decode_bootstrap_payload(
+            frames, expected_ports=1
+        )
+
+        self.assertEqual(decoded_ports, [4321])
+        self.assertIsNone(decoded_curve_key)
+
+    def test_invalid_magic_raises(self):
+        from sglang.srt.managers.data_parallel_controller import (
+            decode_bootstrap_payload,
+        )
+
+        with self.assertRaises(RuntimeError):
+            decode_bootstrap_payload(
+                [b"bad-magic", b"1", b"9999", b""], expected_ports=1
+            )
+
+    def test_invalid_curve_key_raises(self):
+        from sglang.srt.managers.data_parallel_controller import (
+            BOOTSTRAP_MAGIC,
+            decode_bootstrap_payload,
+        )
+
+        with self.assertRaises(RuntimeError):
+            decode_bootstrap_payload(
+                [BOOTSTRAP_MAGIC, b"1", b"9999", b"too-short"],
+                expected_ports=1,
+            )
+
+
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
 class TestSinglePhaseBootstrap(CustomTestCase):
-    """Integration: single-phase bootstrap distributes public key only."""
+    """Integration: bootstrap framing distributes public key only."""
 
     def test_public_key_exchange(self):
-        """Server sends public key in plaintext; client stores it."""
+        """Server sends public key in validated frames; client stores it."""
+        from sglang.srt.managers.data_parallel_controller import (
+            decode_bootstrap_payload,
+            encode_bootstrap_payload,
+        )
+
         server_curve = CurveConfig.generate()
         worker_ports = [10000, 10001, 10002]
 
@@ -1011,9 +1061,12 @@ class TestSinglePhaseBootstrap(CustomTestCase):
                 config_socket(req, zmq.REQ)
                 req.connect(f"tcp://127.0.0.1:{port}")
                 req.send(b"1")
-                received = req.recv_pyobj()
+                received_ports, received_curve_public = decode_bootstrap_payload(
+                    req.recv_multipart(), expected_ports=len(worker_ports)
+                )
                 req.close()
-                results["payload"] = received
+                results["worker_ports"] = received_ports
+                results["curve_public"] = received_curve_public
                 cctx.term()
             except Exception as e:
                 error_box[0] = e
@@ -1022,7 +1075,9 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         t.start()
 
         server_socket.recv()
-        server_socket.send_pyobj(payload)
+        server_socket.send_multipart(
+            encode_bootstrap_payload(payload["worker_ports"], payload["curve_public"])
+        )
         server_socket.close()
 
         t.join(timeout=10)
@@ -1030,12 +1085,8 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         _restore_curve_state(saved)
 
         self.assertIsNone(error_box[0], f"Client thread failed: {error_box[0]}")
-        self.assertNotIn("curve_secret", results["payload"])
-        self.assertNotIn("phase2_port", results["payload"])
-        self.assertIn("curve_public", results["payload"])
-        self.assertIn("worker_ports", results["payload"])
-        self.assertEqual(results["payload"]["curve_public"], server_curve.public_key)
-        self.assertEqual(results["payload"]["worker_ports"], worker_ports)
+        self.assertEqual(results["curve_public"], server_curve.public_key)
+        self.assertEqual(results["worker_ports"], worker_ports)
 
     def test_server_public_key_env_propagation(self):
         """set_server_public_key stores to env; get reads from env on miss."""
@@ -1114,6 +1165,74 @@ class TestRequireServerKey(CustomTestCase):
             ctx.term()
         finally:
             _restore_curve_state(saved)
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestShmBroadcastCurveKey(CustomTestCase):
+    def test_writer_exports_remote_curve_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        from sglang.srt.distributed.device_communicators.shm_broadcast import (
+            MessageQueue,
+        )
+
+        curve = CurveConfig.generate()
+        fake_context = MagicMock()
+        fake_socket = MagicMock()
+        fake_context.socket.return_value = fake_socket
+
+        with patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.Context",
+            return_value=fake_context,
+        ), patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.get_open_port",
+            return_value=54321,
+        ), patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.get_curve_config",
+            return_value=curve,
+        ), patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.apply_curve_server"
+        ) as mock_apply_curve_server:
+            queue = MessageQueue(n_reader=1, n_local_reader=0, connect_ip="127.0.0.1")
+
+        self.assertEqual(
+            queue.handle.remote_curve_public_key,
+            curve.public_key.decode("ascii"),
+        )
+        mock_apply_curve_server.assert_called_once_with(fake_socket, curve)
+
+    def test_remote_reader_uses_exported_server_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        from sglang.srt.distributed.device_communicators.shm_broadcast import (
+            Handle,
+            MessageQueue,
+        )
+
+        fake_context = MagicMock()
+        fake_socket = MagicMock()
+        fake_context.socket.return_value = fake_socket
+        handle = Handle(
+            connect_ip="127.0.0.1",
+            local_reader_ranks=[],
+            remote_subscribe_port=65432,
+            remote_curve_public_key="A" * 40,
+        )
+
+        with patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.Context",
+            return_value=fake_context,
+        ), patch(
+            "sglang.srt.distributed.device_communicators.shm_broadcast.connect_with_curve"
+        ) as mock_connect:
+            queue = MessageQueue.create_from_handle(handle, rank=7)
+
+        self.assertTrue(queue._is_remote_reader)
+        mock_connect.assert_called_once()
+        self.assertEqual(
+            mock_connect.call_args.kwargs["server_public_key"],
+            b"A" * 40,
+        )
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -1227,6 +1346,79 @@ class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
             self.assertIsNone(data.get("curve_public_key"))
         finally:
             server.close()
+
+
+class TestCommonKVReceiverBootstrapCacheRefresh(CustomTestCase):
+    def test_refreshes_cached_curve_key_when_registration_changes(self):
+        from sglang.srt.disaggregation.common.conn import CommonKVReceiver
+
+        class DummyReceiver(CommonKVReceiver):
+            def poll(self):
+                return None
+
+        class DummyKVManager:
+            def __init__(self):
+                self.connection_pool = {}
+                self.is_mla_backend = False
+                self.failures = []
+                self.status_updates = []
+
+            def record_failure(self, room, message):
+                self.failures.append((room, message))
+
+            def update_status(self, room, status):
+                self.status_updates.append((room, status))
+
+        kv_mgr = DummyKVManager()
+        receiver = DummyReceiver.__new__(DummyReceiver)
+        receiver.kv_mgr = kv_mgr
+        receiver.bootstrap_addr = "127.0.0.1:8000"
+        receiver.bootstrap_room = 11
+        receiver.prefill_dp_rank = 0
+        receiver.target_cp_ranks = [0]
+        receiver.target_tp_ranks = [0]
+        receiver.target_pp_ranks = [0]
+        receiver.target_tp_rank = 0
+        receiver.conclude_state = None
+
+        response_box = [
+            {
+                "rank_ip": "127.0.0.1",
+                "rank_port": 9000,
+                "curve_public_key": "A" * 40,
+            }
+        ]
+        register_calls = []
+
+        def fake_get_bootstrap_info(*_args):
+            return response_box[0].copy()
+
+        def fake_register_kv_args():
+            register_calls.append([info.copy() for info in receiver.bootstrap_infos])
+
+        receiver._get_bootstrap_info_from_server = fake_get_bootstrap_info
+        receiver._register_kv_args = fake_register_kv_args
+
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+
+        response_box[0] = {
+            "rank_ip": "127.0.0.1",
+            "rank_port": 9000,
+            "curve_public_key": "B" * 40,
+        }
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+
+        bootstrap_key = "127.0.0.1:8000_0_0_0"
+        self.assertEqual(len(register_calls), 2)
+        self.assertEqual(register_calls[0][0]["curve_public_key"], "A" * 40)
+        self.assertEqual(register_calls[1][0]["curve_public_key"], "B" * 40)
+        self.assertEqual(
+            kv_mgr.connection_pool[bootstrap_key][0]["curve_public_key"],
+            "B" * 40,
+        )
+        self.assertEqual(receiver.bootstrap_infos[0]["curve_public_key"], "B" * 40)
+        self.assertEqual(kv_mgr.failures, [])
 
 
 class TestTransferInfoFromZmq(CustomTestCase):
@@ -1344,6 +1536,122 @@ class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
             b"",
         ]
         info = KVArgsRegisterInfo.from_zmq(msg)
+        self.assertIsNone(info.curve_public_key)
+
+
+@unittest.skipUnless(MORI_AVAILABLE, "mori dependencies not installed")
+class TestMoriTransferInfoFromZmq(CustomTestCase):
+    def test_with_curve_public_key(self):
+        import numpy as np
+
+        from sglang.srt.disaggregation.mori.conn import TransferInfo
+
+        kv_indices = np.array([4, 5], dtype=np.int32)
+        msg = [
+            b"8",
+            b"10.0.0.1",
+            b"7001",
+            b"engine-xyz",
+            kv_indices.tobytes(),
+            b"3",
+            b"",
+            b"2",
+            b"E" * 40,
+        ]
+        info = TransferInfo.from_zmq(msg)
+
+        self.assertEqual(info.room, 8)
+        self.assertEqual(info.endpoint, "10.0.0.1")
+        self.assertEqual(info.dst_port, 7001)
+        self.assertEqual(info.engine_key, "engine-xyz")
+        self.assertEqual(info.curve_public_key, "E" * 40)
+
+    def test_without_curve_public_key(self):
+        import numpy as np
+
+        from sglang.srt.disaggregation.mori.conn import TransferInfo
+
+        kv_indices = np.array([9], dtype=np.int32)
+        msg = [
+            b"1",
+            b"10.0.0.2",
+            b"7002",
+            b"engine-no-key",
+            kv_indices.tobytes(),
+            b"0",
+            b"",
+            b"1",
+        ]
+        info = TransferInfo.from_zmq(msg)
+
+        self.assertIsNone(info.curve_public_key)
+
+
+@unittest.skipUnless(MORI_AVAILABLE, "mori dependencies not installed")
+class TestMoriKVArgsRegisterInfoFromZmq(CustomTestCase):
+    def test_with_curve_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        from sglang.srt.disaggregation.mori.conn import KVArgsRegisterInfo
+
+        msg = [
+            b"unused-room",
+            b"10.0.0.3",
+            b"7003",
+            b"packed-engine-desc",
+            b"packed-kv-mem-descs",
+            b"packed-aux-mem-descs",
+            b"packed-state-mem-descs",
+            b"0",
+            b"2",
+            b"1",
+            b"128",
+            b"F" * 40,
+        ]
+
+        fake_engine_desc = MagicMock(key="engine-key")
+        with patch(
+            "sglang.srt.disaggregation.mori.conn.EngineDesc.unpack",
+            return_value=fake_engine_desc,
+        ), patch(
+            "sglang.srt.disaggregation.mori.conn._unpack_mem_desc_list",
+            return_value=[],
+        ):
+            info = KVArgsRegisterInfo.from_zmq(msg)
+
+        self.assertEqual(info.endpoint, "10.0.0.3")
+        self.assertEqual(info.dst_port, 7003)
+        self.assertEqual(info.curve_public_key, "F" * 40)
+
+    def test_without_curve_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        from sglang.srt.disaggregation.mori.conn import KVArgsRegisterInfo
+
+        msg = [
+            b"unused-room",
+            b"10.0.0.4",
+            b"7004",
+            b"packed-engine-desc",
+            b"packed-kv-mem-descs",
+            b"packed-aux-mem-descs",
+            b"packed-state-mem-descs",
+            b"1",
+            b"4",
+            b"3",
+            b"256",
+        ]
+
+        fake_engine_desc = MagicMock(key="engine-key")
+        with patch(
+            "sglang.srt.disaggregation.mori.conn.EngineDesc.unpack",
+            return_value=fake_engine_desc,
+        ), patch(
+            "sglang.srt.disaggregation.mori.conn._unpack_mem_desc_list",
+            return_value=[],
+        ):
+            info = KVArgsRegisterInfo.from_zmq(msg)
+
         self.assertIsNone(info.curve_public_key)
 
 

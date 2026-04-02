@@ -171,6 +171,7 @@ class Handle:
     buffer: Optional[ShmRingBuffer] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
+    remote_curve_public_key: Optional[str] = None
 
 
 class MessageQueue:
@@ -237,6 +238,9 @@ class MessageQueue:
             curve = get_curve_config()
             if curve is not None:
                 apply_curve_server(self.remote_socket, curve)
+                remote_curve_public_key = curve.public_key.decode("ascii")
+            else:
+                remote_curve_public_key = None
             address = na.to_tcp()
             logger.debug(f"class MessageQueue: Binding remote socket to {address=}")
             self.remote_socket.bind(address)
@@ -244,6 +248,7 @@ class MessageQueue:
         else:
             remote_subscribe_port = None
             self.remote_socket = None
+            remote_curve_public_key = None
 
         self._is_writer = True
         self._is_local_reader = False
@@ -257,6 +262,7 @@ class MessageQueue:
             buffer=self.buffer,
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
+            remote_curve_public_key=remote_curve_public_key,
         )
 
         logger.debug("Message queue communication handle: %s", self.handle)
@@ -303,7 +309,16 @@ class MessageQueue:
                 self.remote_socket.setsockopt(IPV6, 1)
             socket_addr = na.to_tcp()
             logger.debug("Connecting to %s", socket_addr)
-            connect_with_curve(self.remote_socket, socket_addr)
+            server_public_key = (
+                handle.remote_curve_public_key.encode("ascii")
+                if handle.remote_curve_public_key
+                else None
+            )
+            connect_with_curve(
+                self.remote_socket,
+                socket_addr,
+                server_public_key=server_public_key,
+            )
 
         return self
 

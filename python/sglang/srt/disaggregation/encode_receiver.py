@@ -31,6 +31,7 @@ from sglang.srt.utils import ImageData
 from sglang.srt.utils.hf_transformers_utils import get_processor
 from sglang.srt.utils.network import (
     NetworkAddress,
+    get_curve_config,
     get_local_ip_auto,
     get_zmq_socket_on_host,
 )
@@ -55,6 +56,13 @@ def _normalize_embedding_ports(embedding_port):
     if isinstance(embedding_port, list):
         return embedding_port
     return [embedding_port]
+
+
+def _current_curve_public_key() -> Optional[str]:
+    curve = get_curve_config()
+    if curve is None:
+        return None
+    return curve.public_key.decode("ascii")
 
 
 def _grpc_scheduler_receive_url(target, req_id, receive_url, receive_count):
@@ -405,6 +413,7 @@ class WaitingImageRequest:
         self.embedding_port, self.recv_socket = get_zmq_socket_on_host(
             zmq.Context(), zmq.PULL, host=host_name
         )
+        self.curve_public_key = _current_curve_public_key()
         logger.info(f"Waiting for input {self.embedding_port = }")
         self.recv_embedding_data = None
         # ok=1 pending=0 fail=-1
@@ -454,6 +463,7 @@ class WaitingImageRequest:
                             "receive_url": NetworkAddress(
                                 host_name, embedding_port
                             ).to_host_port_str(),
+                            "curve_public_key": self.curve_public_key,
                             "modality": modality.name,
                         }
                         logger.info(
@@ -609,6 +619,7 @@ class MMReceiverBase(ABC):
         self.encoder_transfer_backend = server_args.encoder_transfer_backend
         self.encode_urls = server_args.encoder_urls
         self.host = get_local_ip_auto(server_args.host)
+        self.curve_public_key = _current_curve_public_key()
         if self.encoder_transfer_backend == "mooncake":
             self.dtype = dtype
             self.embeddings_engine = get_mooncake_transfer_engine()
@@ -1122,6 +1133,7 @@ class MMReceiverHTTP(MMReceiverBase):
                         "modality": modality.name,  # convert enum to string for json serialization
                         "prefill_host": self.host,
                         "embedding_port": embedding_port,
+                        "curve_public_key": self.curve_public_key,
                     }
                 )
                 cum_idx += 1

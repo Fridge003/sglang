@@ -21,6 +21,7 @@ from sglang.srt.utils.network import (
     apply_curve_server,
     get_curve_config,
     get_local_ip_auto,
+    propagate_curve_keys_to_env,
 )
 
 PORT_BASE = envs.SGLANG_BACKUP_PORT_BASE.get()
@@ -188,6 +189,7 @@ def run_expert_backup_manager(
     server_args: ServerArgs,
     port_args: PortArgs,
 ):
+    propagate_curve_keys_to_env()
     proc = mp.Process(
         target=run_expert_backup_manager_process,
         args=(server_args, port_args),
