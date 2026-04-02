@@ -240,7 +240,7 @@ class TextEncodingStage(PipelineStage):
 
             if preprocess_func is not None:
                 processed_text_list: list[str] = [
-                    preprocess_func(prompt_str).strip() for prompt_str in texts
+                    preprocess_func(prompt_str) for prompt_str in texts
                 ]
             else:
                 processed_text_list = texts
