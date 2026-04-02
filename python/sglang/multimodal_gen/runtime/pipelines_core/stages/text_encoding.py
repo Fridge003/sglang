@@ -8,6 +8,7 @@ This module contains implementations of prompt encoding stages for diffusion pip
 """
 
 import inspect
+
 import torch
 
 from sglang.multimodal_gen.configs.models.encoders import BaseEncoderOutput
