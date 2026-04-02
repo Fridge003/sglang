@@ -4,6 +4,7 @@ via the GitHub API (same pattern as publish_traces.py).
 """
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -14,11 +15,11 @@ if __package__:
     from ..publish_traces import (
         create_blobs,
         create_commit,
-        create_tree,
         get_branch_sha,
         get_tree_sha,
         is_permission_error,
         is_rate_limit_error,
+        make_github_request,
         update_branch_ref,
         verify_token_permissions,
     )
@@ -27,11 +28,11 @@ else:
     from publish_traces import (
         create_blobs,
         create_commit,
-        create_tree,
         get_branch_sha,
         get_tree_sha,
         is_permission_error,
         is_rate_limit_error,
+        make_github_request,
         update_branch_ref,
         verify_token_permissions,
     )
@@ -61,6 +62,38 @@ def collect_images(source_dir):
     return files
 
 
+def get_recursive_tree(repo_owner, repo_name, tree_sha, token):
+    """Get the full recursive tree listing for a commit."""
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees/{tree_sha}?recursive=1"
+    response = make_github_request(url, token)
+    data = json.loads(response)
+    return data.get("tree", [])
+
+
+def build_tree_without_base(repo_owner, repo_name, tree_items, token, max_retries=3):
+    """Create a new tree from scratch (no base_tree), using full list of items."""
+    import time
+
+    url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/git/trees"
+    data = {"tree": tree_items}
+
+    for attempt in range(max_retries):
+        try:
+            response = make_github_request(url, token, method="POST", data=data)
+            return json.loads(response)["sha"]
+        except Exception as e:
+            if is_rate_limit_error(e):
+                raise
+            if attempt < max_retries - 1:
+                wait_time = 2**attempt
+                print(
+                    f"Tree creation failed (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                raise
+
+
 def publish(source_dir):
     token = os.getenv("GITHUB_TOKEN")
     if not token:
@@ -85,9 +118,9 @@ def publish(source_dir):
         print("Token permission verification failed.")
         sys.exit(1)
 
-    # Create blobs
+    # Create blobs for new images
     try:
-        tree_items = create_blobs(REPO_OWNER, REPO_NAME, files_to_upload, token)
+        new_tree_items = create_blobs(REPO_OWNER, REPO_NAME, files_to_upload, token)
     except Exception as e:
         if is_rate_limit_error(e):
             print("Rate-limited during blob creation, skipping.")
@@ -106,8 +139,32 @@ def publish(source_dir):
         try:
             branch_sha = get_branch_sha(REPO_OWNER, REPO_NAME, BRANCH, token)
             tree_sha = get_tree_sha(REPO_OWNER, REPO_NAME, branch_sha, token)
-            new_tree_sha = create_tree(
-                REPO_OWNER, REPO_NAME, tree_sha, tree_items, token
+
+            # Get the full recursive tree, keep everything outside TARGET_DIR,
+            # then add our new blob entries.  This avoids the base_tree bug
+            # where GitHub rejects existing sub-tree SHAs as invalid blobs.
+            existing_tree = get_recursive_tree(
+                REPO_OWNER, REPO_NAME, tree_sha, token
+            )
+            target_prefix = TARGET_DIR + "/"
+            kept_items = [
+                {
+                    "path": item["path"],
+                    "mode": item["mode"],
+                    "type": item["type"],
+                    "sha": item["sha"],
+                }
+                for item in existing_tree
+                if item["type"] == "blob"
+                and not item["path"].startswith(target_prefix)
+            ]
+            all_tree_items = kept_items + new_tree_items
+            print(
+                f"Building tree: {len(kept_items)} existing blobs + {len(new_tree_items)} new GT images"
+            )
+
+            new_tree_sha = build_tree_without_base(
+                REPO_OWNER, REPO_NAME, all_tree_items, token
             )
             commit_msg = f"diffusion-ci: update consistency_gt images ({len(files_to_upload)} files) [automated]"
             commit_sha = create_commit(
