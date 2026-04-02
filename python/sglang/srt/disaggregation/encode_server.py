@@ -1411,6 +1411,7 @@ async def handle_encode_request(request: dict):
                             req_id=req_id,
                             prefill_host=request["prefill_host"],
                             embedding_port=port,
+                            curve_public_key=request.get("curve_public_key"),
                         )
             return ORJSONResponse(
                 status_code=error_code,

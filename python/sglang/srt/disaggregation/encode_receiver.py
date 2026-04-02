@@ -65,13 +65,29 @@ def _current_curve_public_key() -> Optional[str]:
     return curve.public_key.decode("ascii")
 
 
-def _grpc_scheduler_receive_url(target, req_id, receive_url, receive_count):
+_GRPC_CURVE_PUBLIC_KEY_METADATA = "x-sglang-curve-public-key"
+
+
+def _grpc_curve_metadata(curve_public_key: Optional[str]):
+    if not curve_public_key:
+        return None
+    return ((_GRPC_CURVE_PUBLIC_KEY_METADATA, curve_public_key),)
+
+
+def _grpc_scheduler_receive_url(
+    target,
+    req_id,
+    receive_url,
+    receive_count,
+    curve_public_key: Optional[str] = None,
+):
     import grpc
     from smg_grpc_proto import sglang_encoder_pb2, sglang_encoder_pb2_grpc
 
     timeout_secs = envs.SGLANG_ENCODER_GRPC_TIMEOUT_SECS.get()
     channel = grpc.insecure_channel(target)
     stub = sglang_encoder_pb2_grpc.SglangEncoderStub(channel)
+    metadata = _grpc_curve_metadata(curve_public_key)
     try:
         stub.SchedulerReceiveUrl(
             sglang_encoder_pb2.SchedulerReceiveUrlRequest(
@@ -80,6 +96,7 @@ def _grpc_scheduler_receive_url(target, req_id, receive_url, receive_count):
                 receive_count=receive_count,
             ),
             timeout=timeout_secs,
+            metadata=metadata,
         )
     finally:
         channel.close()
@@ -92,6 +109,7 @@ def _grpc_encode_request(target, encode_request):
     timeout_secs = envs.SGLANG_ENCODER_GRPC_TIMEOUT_SECS.get()
     channel = grpc.insecure_channel(target)
     stub = sglang_encoder_pb2_grpc.SglangEncoderStub(channel)
+    metadata = _grpc_curve_metadata(encode_request.get("curve_public_key"))
     try:
         response = stub.Encode(
             sglang_encoder_pb2.EncodeRequest(
@@ -105,6 +123,7 @@ def _grpc_encode_request(target, encode_request):
                 ),
             ),
             timeout=timeout_secs,
+            metadata=metadata,
         )
         return response
     finally:
@@ -118,6 +137,7 @@ def _grpc_send_request(target, request_json):
     timeout_secs = envs.SGLANG_ENCODER_GRPC_TIMEOUT_SECS.get()
     channel = grpc.insecure_channel(target)
     stub = sglang_encoder_pb2_grpc.SglangEncoderStub(channel)
+    metadata = _grpc_curve_metadata(request_json.get("curve_public_key"))
     try:
         stub.Send(
             sglang_encoder_pb2.SendRequest(
@@ -128,6 +148,7 @@ def _grpc_send_request(target, request_json):
                 buffer_address=request_json["buffer_address"],
             ),
             timeout=timeout_secs,
+            metadata=metadata,
         )
     finally:
         channel.close()
@@ -569,6 +590,7 @@ class WaitingImageRequestGrpc(WaitingImageRequest):
                         req_id,
                         receive_url,
                         receive_count,
+                        self.curve_public_key,
                     )
                 )
 
@@ -1297,6 +1319,7 @@ class MMReceiverGrpc(MMReceiverBase):
                     "req_id": req_id,
                     "prefill_host": self.host,
                     "embedding_port": embedding_port,
+                    "curve_public_key": self.curve_public_key,
                 }
             )
             cum_idx += 1
@@ -1321,6 +1344,7 @@ class MMReceiverGrpc(MMReceiverBase):
                     "req_id": encode_request["req_id"],
                     "prefill_host": encode_request["prefill_host"],
                     "embedding_port": encode_request["embedding_port"],
+                    "curve_public_key": encode_request.get("curve_public_key"),
                     "encoder_idx": encode_request["encoder_idx"],
                     "part_idx": encode_request["part_idx"],
                     "embedding_size": response.embedding_size,
