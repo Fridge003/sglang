@@ -10,6 +10,7 @@ import PIL.Image
 import torch
 from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
 from diffusers.models.modeling_outputs import AutoencoderKLOutput
+from diffusers.utils.torch_utils import randn_tensor
 
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.models.vision_utils import (
@@ -1162,43 +1163,50 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         reference_tensor: torch.Tensor, batch: Req
     ) -> torch.Tensor:
         generator = getattr(batch, "generator", None)
-        if isinstance(generator, torch.Generator):
-            return torch.randn(
-                reference_tensor.shape,
-                device=reference_tensor.device,
-                dtype=reference_tensor.dtype,
-                generator=generator,
-            )
         if isinstance(generator, list):
             bsz = int(reference_tensor.shape[0])
             valid_generators = [g for g in generator if isinstance(g, torch.Generator)]
             if len(valid_generators) == 1:
-                return torch.randn(
-                    reference_tensor.shape,
-                    device=reference_tensor.device,
-                    dtype=reference_tensor.dtype,
-                    generator=valid_generators[0],
-                )
-            if len(valid_generators) >= bsz:
-                per_sample_noise = []
-                for i in range(bsz):
-                    per_sample_noise.append(
-                        torch.randn(
-                            (1, *reference_tensor.shape[1:]),
-                            device=reference_tensor.device,
-                            dtype=reference_tensor.dtype,
-                            generator=valid_generators[i],
-                        )
-                    )
-                return torch.cat(per_sample_noise, dim=0)
-        return torch.randn(
+                generator = valid_generators[0]
+            elif len(valid_generators) >= bsz:
+                generator = valid_generators[:bsz]
+            else:
+                generator = None
+        elif not isinstance(generator, torch.Generator):
+            generator = None
+
+        return randn_tensor(
             reference_tensor.shape,
+            generator=generator,
             device=reference_tensor.device,
             dtype=reference_tensor.dtype,
         )
 
+    @staticmethod
+    def _reset_stage2_generators(batch: Req) -> None:
+        generator = getattr(batch, "generator", None)
+        if isinstance(generator, list) and generator:
+            generator_device = str(generator[0].device)
+        elif isinstance(generator, torch.Generator):
+            generator_device = str(generator.device)
+        else:
+            generator_device = "cpu"
+
+        seeds = getattr(batch, "seeds", None)
+        if not seeds:
+            seed = getattr(batch, "seed", None)
+            if seed is None:
+                return
+            seeds = [int(seed)]
+
+        batch.generator = [
+            torch.Generator(device=generator_device).manual_seed(int(seed))
+            for seed in seeds
+        ]
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         batch.extra["ltx2_phase"] = "stage2"
+        self._reset_stage2_generators(batch)
         noise_scale = self.distilled_sigmas[0].to(batch.latents.device)
         video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
         batch.latents = video_noise * noise_scale + batch.latents * (1 - noise_scale)
@@ -1213,6 +1221,11 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             batch.audio_latents = (
                 audio_noise * audio_noise_scale
                 + batch.audio_latents * (1 - audio_noise_scale)
+            )
+        batch.latents = batch.latents.to(device=batch.latents.device, dtype=torch.float32)
+        if isinstance(batch.audio_latents, torch.Tensor):
+            batch.audio_latents = batch.audio_latents.to(
+                device=batch.audio_latents.device, dtype=torch.float32
             )
 
         # Stage 2 runs at full resolution, so Stage 1 TI2V conditioning is invalid.
