@@ -1,5 +1,3 @@
-import os
-
 import torch
 
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
@@ -9,14 +7,6 @@ from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-
-
-def _maybe_save_ltx2_latent_dump(file_name: str, tensor: torch.Tensor | None) -> None:
-    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
-        return
-    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
 
 
 class LTX2HalveResolutionStage(PipelineStage):
@@ -123,7 +113,6 @@ class LTX2UpsampleStage(PipelineStage):
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         device = get_local_torch_device()
         latents = self._upsample_video_latents(batch.latents, server_args, device)
-        _maybe_save_ltx2_latent_dump("sglang_upsampled_video_latents.pt", latents)
         logger.info("Upsampled video latents: %s", list(latents.shape))
         self._restore_full_resolution(batch)
         self._pack_video_latents(batch, latents, server_args)
