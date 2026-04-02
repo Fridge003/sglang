@@ -50,15 +50,6 @@ LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS = {
     "audio_stg_blocks": (29,),
 }
 
-
-def _maybe_save_ltx2_latent_dump(file_name: str, tensor: torch.Tensor | None) -> None:
-    if tensor is None or not os.environ.get("SAVE_INTERMEDIATE_TENSORS"):
-        return
-    save_dir = os.environ.get("EXPERIMENTS_DIR", "/tmp")
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save(tensor.detach().cpu(), os.path.join(save_dir, file_name))
-
-
 class LTX2AVDenoisingStage(DenoisingStage):
     """
     LTX-2 specific denoising stage that handles joint video and audio generation.
@@ -142,7 +133,11 @@ class LTX2AVDenoisingStage(DenoisingStage):
         if pipeline_name != "LTX2TwoStagePipeline":
             return None
 
-        return batch.extra.get("ltx2_stage1_guider_params")
+        params = batch.extra.get("ltx2_stage1_guider_params")
+        if params is None:
+            params = copy.deepcopy(LTX2_TWO_STAGE_STAGE1_GUIDER_DEFAULTS)
+            batch.extra["ltx2_stage1_guider_params"] = params
+        return params
 
     @staticmethod
     def _ltx2_should_skip_step(step_index: int, skip_step: int) -> bool:
@@ -609,15 +604,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             model_video = model_video.float()
                             model_audio = model_audio.float()
                             if batch.do_classifier_free_guidance:
-                                if i == 0 and stage == "stage1":
-                                    _maybe_save_ltx2_latent_dump(
-                                        "sglang_stage1_step0_model_video_raw.pt",
-                                        model_video,
-                                    )
-                                    _maybe_save_ltx2_latent_dump(
-                                        "sglang_stage1_step0_model_audio_raw.pt",
-                                        model_audio,
-                                    )
                                 model_video_uncond, model_video_text = (
                                     model_video.chunk(2)
                                 )
@@ -632,15 +618,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
                                     batch.guidance_scale
                                     * (model_audio_text - model_audio_uncond)
                                 )
-                            if i == 0 and stage == "stage1":
-                                _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_model_video_guided.pt",
-                                    model_video,
-                                )
-                                _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_model_audio_guided.pt",
-                                    model_audio,
-                                )
                             v_pos = model_video
                             a_v_pos = model_audio
                             v_neg = None
@@ -652,16 +629,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
                             audio_latents = audio_scheduler.step(
                                 a_v_pos, t_device, audio_latents, return_dict=False
                             )[0]
-                            if i == 0 and stage == "stage1":
-                                _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_video_latents_after.pt",
-                                    latents,
-                                )
-                                _maybe_save_ltx2_latent_dump(
-                                    "sglang_stage1_step0_audio_latents_after.pt",
-                                    audio_latents,
-                                )
-
                             if do_ti2v:
                                 latents[:, :num_img_tokens, :] = batch.image_latent[
                                     :, :num_img_tokens, :
@@ -1087,17 +1054,6 @@ class LTX2AVDenoisingStage(DenoisingStage):
 
             batch.latents = latents
             batch.audio_latents = audio_latents
-            ltx2_phase = batch.extra.get("ltx2_phase")
-            if ltx2_phase in {"stage1", "stage2"}:
-                _maybe_save_ltx2_latent_dump(
-                    f"sglang_{ltx2_phase}_video_latents.pt", batch.latents
-                )
-                if isinstance(batch.audio_latents, torch.Tensor):
-                    _maybe_save_ltx2_latent_dump(
-                        f"sglang_{ltx2_phase}_audio_latents.pt",
-                        batch.audio_latents,
-                    )
-
         # 4. Cleanup
         offload_mgr = getattr(self.transformer, "_layerwise_offload_manager", None)
         if offload_mgr is not None and getattr(offload_mgr, "enabled", False):

@@ -43,3 +43,92 @@
   - 当前 flat run 没有生成 `/tmp/ltx2_sunset/sglang_flat/sglang_sunset_flat.mp4`
 - 当前精度对齐百分比：50%
   - 含义：flat generate 已经证明 config 不是当前主阻塞项，真实链路的最新主要问题已经收敛到 text encoder fallback + stage switch OOM
+
+## 2026-04-02 Denoising Stall Summary
+
+- 当前真正卡住的地方是 `stage1 denoising`，不是 post-denoising stages。
+- 已经可以稳定成立的结论：
+  - `refinement` / `decode` 不是主矛盾。
+  - `stage1 step0` 的 latent-side DiT 输入是 exact 对齐的。
+  - `step0 model_raw` 已经非零，说明误差最早出现在 denoising 内部。
+  - `step0` 的 block-level injected check 说明：
+    - `block0 self-attn` 不是主因。
+    - `caption_projection / audio_caption_projection` 权重 live-vs-live exact。
+    - 仅凭 “inject step0 输入后一小段局部更近” 不能推出整段 denoising 没问题。
+- 这段时间没有收敛的原因：
+  - 混用了两种不同目标：
+    1. 局部数值对齐
+    2. 最终视频是否变好
+  - `step0` injected 只能回答 “这一个 step 某些局部模块是否明显错”，不能直接回答端到端观感。
+  - 因此，不能再用 “一步 injected 后成片还是差” 去反推 pre-denoising 或某个局部模块一定有错。
+- 接下来需要的不是继续泛扫更多 stage，而是：
+  - 固定在 `stage1 denoising`
+  - 只查一个完整 step 内：
+    - block loop
+    - final projection / output head
+    - scheduler step
+  - 用二分法找第一个真正放大误差的位置
+
+## 2026-04-02 Scheduler Check
+
+- 这轮只做了一个最小 real-path 实验：
+  - official: live `diffusers` dump 目录 `/tmp/ltx2_official_live_part3_step0`
+  - native: real `sglang generate`
+  - 在 `stage1 step0` 里，仅在 `scheduler.step` 前把 `model_video_guided / model_audio_guided` 覆盖成 official dump
+- 为避免再犯之前的错误，这次额外保存了注入后的 guided tensor 本身，先验证 inject 是否真正打到：
+  - `diffusers_stage1_step0_model_video_guided` vs `sglang_stage1_step0_model_video_guided_injected`: `MAD = 0`
+  - `diffusers_stage1_step0_model_audio_guided` vs `sglang_stage1_step0_model_audio_guided_injected`: `MAD = 0`
+- 在此基础上，`scheduler.step` 后输出也是 exact：
+  - `diffusers_stage1_step0_video_latents_after` vs native: `MAD = 0`
+  - `diffusers_stage1_step0_audio_latents_after` vs native: `MAD = 0`
+- 结论：
+  - `stage1 step0` 的 `scheduler.step` 不是主因
+  - 现在可以把主线继续收紧到：
+    - block loop
+    - final projection / output head
+  - 不需要再回头查 scheduler 语义
+
+## 2026-04-02 Step0 Block Binary Search
+
+- 这轮只看 `stage1 step0` 的 real-path block 内部，不看成片。
+- official:
+  - live `LTX2Pipeline`
+  - dump 目录 `/tmp/ltx2_official_step0_blocks0247`
+  - `target block = 0,23,47`
+- native:
+  - real `sglang generate`
+  - dump 目录 `/tmp/ltx2_sglang_step0_blocks0247`
+  - 与 official 用同名 `audio_hidden_states_after_ff` compare
+- block 级结果：
+  - `block0 audio_hidden_states_after_ff MAD = 1.4376e-03`
+  - `block23 audio_hidden_states_after_ff MAD = 1.8511e-02`
+  - `block47 audio_hidden_states_after_ff MAD = 3.7373e-02`
+- 结论：
+  - 误差不是从中后段 block 才开始出现
+  - `block0` 就已经非零，之后持续放大
+
+## 2026-04-02 Step0 Block0 Audio Path
+
+- 这轮继续只看 `step0 block0` 的 audio 路线，official/native 都走真实 pipeline。
+- 对拍点和结果：
+  - `norm1_audio_hidden_states = 0`
+  - `attn1_audio_return = 0`
+  - `audio_hidden_states_after_attn1 = 0`
+  - `norm2_audio_hidden_states = 0`
+  - `attn2_audio_hidden_states = 3.4509e-04`
+  - `audio_hidden_states_after_attn2 = 3.4749e-04`
+  - `v2a_attn_audio_hidden_states = 8.7386e-04`
+  - `audio_hidden_states_after_v2a = 3.6339e-04`
+  - `norm3_audio_hidden_states = 4.0375e-05`
+  - `ff_audio_hidden_states = 2.6512e-03`
+  - `audio_hidden_states_after_ff = 1.4376e-03`
+- 当前最早可信非零点：
+  - `stage1 step0 block0 audio_attn2`
+- 当前最大放大点：
+  - `stage1 step0 block0 ff_audio_hidden_states`
+- 结论：
+  - `block0 self-attn` 不是主因
+  - `scheduler.step` 不是主因
+  - 主线继续收紧到：
+    - `block0 audio_attn2`
+    - `block0 ff`
