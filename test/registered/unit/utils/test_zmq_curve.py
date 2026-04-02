@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 
+import torch
 import zmq
 
 from sglang.srt.utils.common import safe_pickle_load
@@ -31,6 +32,7 @@ from sglang.test.test_utils import CustomTestCase
 register_cpu_ci(est_time=1, suite="stage-a-test-cpu")
 
 CURVE_AVAILABLE = zmq.has("curve")
+GPU_AVAILABLE = torch.cuda.is_available()
 
 try:
     from sglang.multimodal_gen.runtime.server_args import (  # noqa: F401
@@ -945,6 +947,9 @@ class TestGetZmqSocketOnHostAppliesCurveOnLoopback(CustomTestCase):
             _restore_curve_state(saved)
 
 
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestDisaggregationMetadataRoundTrip(CustomTestCase):
     """Verify curve_public_key round-trips through PrefillRankInfo."""
 
@@ -971,6 +976,9 @@ class TestDisaggregationMetadataRoundTrip(CustomTestCase):
         self.assertIsNone(info.curve_public_key)
 
 
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestDPBootstrapPayload(CustomTestCase):
     def test_round_trip_with_curve_public_key(self):
         from sglang.srt.managers.data_parallel_controller import (
@@ -1025,6 +1033,9 @@ class TestDPBootstrapPayload(CustomTestCase):
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestSinglePhaseBootstrap(CustomTestCase):
     """Integration: bootstrap framing distributes public key only."""
 
@@ -1168,6 +1179,9 @@ class TestRequireServerKey(CustomTestCase):
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestShmBroadcastCurveKey(CustomTestCase):
     def test_writer_exports_remote_curve_public_key(self):
         from unittest.mock import MagicMock, patch
@@ -1236,6 +1250,9 @@ class TestShmBroadcastCurveKey(CustomTestCase):
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
     """Integration: spin up a real CommonKVBootstrapServer, register a prefill
     worker with curve_public_key, and verify the decode-side GET returns it."""
@@ -1348,6 +1365,9 @@ class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
             server.close()
 
 
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestCommonKVReceiverBootstrapCacheRefresh(CustomTestCase):
     def test_refreshes_cached_curve_key_when_registration_changes(self):
         from sglang.srt.disaggregation.common.conn import CommonKVReceiver
@@ -1421,6 +1441,9 @@ class TestCommonKVReceiverBootstrapCacheRefresh(CustomTestCase):
         self.assertEqual(kv_mgr.failures, [])
 
 
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestTransferInfoFromZmq(CustomTestCase):
     """Verify TransferInfo.from_zmq parses the curve_public_key frame."""
 
@@ -1487,6 +1510,9 @@ class TestTransferInfoFromZmq(CustomTestCase):
         self.assertEqual(info.curve_public_key, "C" * 40)
 
 
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
     """Verify KVArgsRegisterInfo.from_zmq parses the curve_public_key frame."""
 
@@ -1540,6 +1566,9 @@ class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
 
 
 @unittest.skipUnless(MORI_AVAILABLE, "mori dependencies not installed")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestMoriTransferInfoFromZmq(CustomTestCase):
     def test_with_curve_public_key(self):
         import numpy as np
@@ -1588,6 +1617,9 @@ class TestMoriTransferInfoFromZmq(CustomTestCase):
 
 
 @unittest.skipUnless(MORI_AVAILABLE, "mori dependencies not installed")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
 class TestMoriKVArgsRegisterInfoFromZmq(CustomTestCase):
     def test_with_curve_public_key(self):
         from unittest.mock import MagicMock, patch
