@@ -266,6 +266,7 @@ class LocalAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Apply local attention between query, key and value tensors.
@@ -284,7 +285,42 @@ class LocalAttention(nn.Module):
         forward_context: ForwardContext = get_forward_context()
         ctx_attn_metadata = forward_context.attn_metadata
 
-        output = self.attn_impl.forward(q, k, v, attn_metadata=ctx_attn_metadata)
+        if attn_mask is None:
+            output = self.attn_impl.forward(q, k, v, attn_metadata=ctx_attn_metadata)
+            return output
+
+        # Current local attention backends only expose q/k/v + metadata. When a
+        # masked local cross-attn path is required, fall back to SDPA so the KV
+        # mask semantics are preserved without widening every backend interface.
+        q_ = q.transpose(1, 2)
+        k_ = k.transpose(1, 2)
+        v_ = v.transpose(1, 2)
+
+        sdpa_mask = None
+        if torch.is_floating_point(attn_mask):
+            m = attn_mask
+            if m.dim() == 2:
+                m = m[:, None, None, :]
+            elif m.dim() == 3:
+                m = m[:, None, :, :]
+            sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
+        else:
+            m = attn_mask.to(dtype=q_.dtype, device=q_.device)
+            if m.dim() == 2:
+                m = m[:, None, None, :]
+            elif m.dim() == 3:
+                m = m[:, None, :, :]
+            sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
+
+        output = torch.nn.functional.scaled_dot_product_attention(
+            q_,
+            k_,
+            v_,
+            attn_mask=sdpa_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=self.softmax_scale,
+        ).transpose(1, 2)
         return output
 
 

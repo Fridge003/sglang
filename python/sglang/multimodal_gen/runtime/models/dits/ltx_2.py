@@ -21,7 +21,7 @@ from sglang.multimodal_gen.runtime.distributed import (
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     tensor_model_parallel_all_reduce,
 )
-from sglang.multimodal_gen.runtime.layers.attention import USPAttention
+from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -446,6 +446,7 @@ class LTX2Attention(nn.Module):
         dim_head: int = 64,
         norm_eps: float = 1e-6,
         qk_norm: bool = True,
+        use_local_attention: bool = False,
         supported_attention_backends: set[AttentionBackendEnum] | None = None,
         prefix: str = "",
         quant_config: QuantizationConfig | None = None,
@@ -459,6 +460,7 @@ class LTX2Attention(nn.Module):
         self.inner_dim = self.heads * self.dim_head
         self.norm_eps = float(norm_eps)
         self.qk_norm = bool(qk_norm)
+        self.use_local_attention = bool(use_local_attention)
 
         tp_size = get_tp_world_size()
         if tp_size <= 0:
@@ -527,16 +529,27 @@ class LTX2Attention(nn.Module):
             nn.Identity(),
         )
 
-        self.attn = USPAttention(
-            num_heads=self.local_heads,
-            head_size=self.dim_head,
-            num_kv_heads=self.local_heads,
-            dropout_rate=0,
-            softmax_scale=None,
-            causal=False,
-            supported_attention_backends=supported_attention_backends,
-            prefix=f"{prefix}.attn",
-        )
+        if self.use_local_attention:
+            self.attn = LocalAttention(
+                num_heads=self.local_heads,
+                head_size=self.dim_head,
+                num_kv_heads=self.local_heads,
+                softmax_scale=None,
+                causal=False,
+                supported_attention_backends=supported_attention_backends,
+                prefix=f"{prefix}.attn",
+            )
+        else:
+            self.attn = USPAttention(
+                num_heads=self.local_heads,
+                head_size=self.dim_head,
+                num_kv_heads=self.local_heads,
+                dropout_rate=0,
+                softmax_scale=None,
+                causal=False,
+                supported_attention_backends=supported_attention_backends,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -585,31 +598,8 @@ class LTX2Attention(nn.Module):
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
             k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
 
-            use_sdpa = get_tp_world_size() == 1 and get_sp_world_size() == 1
-            if use_sdpa:
-                q_ = q.transpose(1, 2)
-                k_ = k.transpose(1, 2)
-                v_ = v.transpose(1, 2)
-                sdpa_mask = None
-                if mask is not None:
-                    if torch.is_floating_point(mask):
-                        m = mask
-                        if m.dim() == 2:
-                            m = m[:, None, None, :]
-                        elif m.dim() == 3:
-                            m = m[:, None, :, :]
-                        sdpa_mask = m.to(dtype=q_.dtype, device=q_.device)
-                    else:
-                        m = mask.to(dtype=q_.dtype, device=q_.device)
-                        if m.dim() == 2:
-                            m = m[:, None, None, :]
-                        elif m.dim() == 3:
-                            m = m[:, None, :, :]
-                        sdpa_mask = (m - 1.0) * torch.finfo(q_.dtype).max
-
-                out = torch.nn.functional.scaled_dot_product_attention(
-                    q_, k_, v_, attn_mask=sdpa_mask, dropout_p=0.0, is_causal=False
-                ).transpose(1, 2)
+            if self.use_local_attention:
+                out = self.attn(q, k, v, attn_mask=mask)
             else:
                 out = self.attn(q, k, v)
 
@@ -729,6 +719,8 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         # 2. Prompt Cross-Attention
+        # Prompt KV is replicated across SP ranks, so prompt cross-attn should
+        # stay local and preserve the explicit KV mask semantics from official.
         self.attn2 = LTX2Attention(
             query_dim=dim,
             context_dim=cross_attention_dim,
@@ -736,6 +728,7 @@ class LTX2TransformerBlock(nn.Module):
             dim_head=attention_head_dim,
             norm_eps=norm_eps,
             qk_norm=qk_norm,
+            use_local_attention=True,
             supported_attention_backends=supported_attention_backends,
             prefix=f"{prefix}.attn2",
             quant_config=quant_config,
@@ -747,6 +740,7 @@ class LTX2TransformerBlock(nn.Module):
             dim_head=audio_attention_head_dim,
             norm_eps=norm_eps,
             qk_norm=qk_norm,
+            use_local_attention=True,
             supported_attention_backends=supported_attention_backends,
             prefix=f"{prefix}.audio_attn2",
             quant_config=quant_config,
