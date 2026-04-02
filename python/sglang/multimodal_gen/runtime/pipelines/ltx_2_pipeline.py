@@ -304,7 +304,6 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self.add_stage(LTX2HalveResolutionStage())
         self.add_stage(
             LTX2LoRASwitchStage(pipeline=self, phase="stage1"),
-            stage_name="ltx2_lora_switch_stage1",
         )
         _add_ltx2_stage1_generation_stages(self)
         self.add_stages(
