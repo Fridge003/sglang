@@ -735,14 +735,11 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
         # Ensure that the dtype of the vision_tower and mm_projector matches that of the language_model.
         # This solves the dtype mismatch issue when using device_map="auto" and torch_dtype.
-        if (
-            not self.language_only
-            and not self.encoder_only
-            and hasattr(self.language_model, "dtype")
-        ):
-            target_dtype = self.language_model.dtype
-            self.vision_tower = self.vision_tower.to(dtype=target_dtype)
-            self.mm_projector = self.mm_projector.to(dtype=target_dtype)
+        if not self.language_only and not self.encoder_only:
+            if hasattr(self.language_model, "dtype"):
+                target_dtype = self.language_model.dtype
+                self.vision_tower = self.vision_tower.to(dtype=target_dtype)
+                self.mm_projector = self.mm_projector.to(dtype=target_dtype)
 
     def get_image_feature(self, items: List[MultimodalDataItem]) -> torch.Tensor:
         pixel_values = torch.cat([item.feature for item in items], dim=0).type(
