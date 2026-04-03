@@ -696,31 +696,50 @@ class KimiK25ForConditionalGeneration(nn.Module):
         self.config = config
         self.quant_config = quant_config
         self.use_data_parallel = get_global_server_args().mm_enable_dp_encoder
-        # Create vision tower
-        self.vision_tower = MoonViT3dPretrainedModel(
-            config.vision_config,
-            use_data_parallel=self.use_data_parallel,
-            quant_config=(
-                quant_config if isinstance(quant_config, ModelSlimConfig) else None
-            ),
-            prefix="vision_tower",
-        )
-        # Create mm projector
-        self.mm_projector = K2VLMultiModalProjector(config.vision_config)
 
-        self.language_model = DeepseekV3ForCausalLM(
-            config.text_config,
-            quant_config,
-            prefix=(
-                "language_model" if isinstance(quant_config, ModelSlimConfig) else ""
-            ),
-        )
+        self.encoder_only = getattr(config, "encoder_only", False)
+        self.language_only = getattr(config, "language_only", False)
 
-        self.model = self.language_model.model
+        # Create vision tower and mm projector (always needed unless language_only)
+        if not self.language_only:
+            self.vision_tower = MoonViT3dPretrainedModel(
+                config.vision_config,
+                use_data_parallel=self.use_data_parallel,
+                quant_config=(
+                    quant_config
+                    if isinstance(quant_config, ModelSlimConfig)
+                    else None
+                ),
+                prefix="vision_tower",
+            )
+            # Create mm projector
+            self.mm_projector = K2VLMultiModalProjector(config.vision_config)
+
+        # Create language model (skip in encoder_only mode)
+        if not self.encoder_only:
+            self.language_model = DeepseekV3ForCausalLM(
+                config.text_config,
+                quant_config,
+                prefix=(
+                    "language_model"
+                    if isinstance(quant_config, ModelSlimConfig)
+                    else ""
+                ),
+            )
+
+            self.model = self.language_model.model
+        else:
+            # encoder_only mode: no language model needed
+            self.language_model = None
+            self.model = None
 
         # Ensure that the dtype of the vision_tower and mm_projector matches that of the language_model.
         # This solves the dtype mismatch issue when using device_map="auto" and torch_dtype.
-        if hasattr(self.language_model, "dtype"):
+        if (
+            not self.language_only
+            and not self.encoder_only
+            and hasattr(self.language_model, "dtype")
+        ):
             target_dtype = self.language_model.dtype
             self.vision_tower = self.vision_tower.to(dtype=target_dtype)
             self.mm_projector = self.mm_projector.to(dtype=target_dtype)
@@ -761,14 +780,20 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
     @property
     def start_layer(self) -> int:
+        if self.language_model is None:
+            return 0
         return self.language_model.start_layer
 
     @property
     def end_layer(self) -> int:
+        if self.language_model is None:
+            return 0
         return self.language_model.end_layer
 
     @property
     def routed_experts_weights_of_layer(self):
+        if self.language_model is None:
+            return None
         return self.language_model._routed_experts_weights_of_layer.value
 
     def forward(
@@ -804,26 +829,31 @@ class KimiK25ForConditionalGeneration(nn.Module):
 
         for name, loaded_weight in weights:
             if "vision_tower" in name or "mm_projector" in name:
+                # In language_only mode, skip vision/encoder weights
+                if self.language_only:
+                    continue
                 name = name.replace(r"wqkv.", r"attn.qkv_proj.")
                 name = name.replace(r"wo.", r"attn.proj.")
                 name = name.replace("mm_projector.proj.0", "mm_projector.linear_1")
                 name = name.replace("mm_projector.proj.2", "mm_projector.linear_2")
                 vision_weights.append((name, loaded_weight))
             else:
+                # In encoder_only mode, skip language model weights
+                if self.encoder_only:
+                    continue
                 name = name.replace("language_model.", "")
                 # All other weights go to language model
                 language_weights.append((name, loaded_weight))
 
         # Load vision tower weights
-        vision_state_dict = dict(vision_weights)
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in vision_state_dict.items():
-            if name not in params_dict:
-                raise ValueError(f"Weight {name} not found in params_dict")
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            # loaded_weight = self._pad_vit_attn_dummy_heads(name, loaded_weight)
-            weight_loader(param, loaded_weight)
+        if vision_weights:
+            params_dict = dict(self.named_parameters(remove_duplicate=False))
+            for name, loaded_weight in vision_weights:
+                if name not in params_dict:
+                    raise ValueError(f"Weight {name} not found in params_dict")
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
 
         # Load language model weights
         if language_weights:
