@@ -275,12 +275,12 @@ class TextEncodingStage(PipelineStage):
             with set_forward_context(current_timestep=0, attn_metadata=None):
                 outputs: BaseEncoderOutput = text_encoder(**encoder_forward_kwargs)
             postprocess_sig = inspect.signature(postprocess_func)
-            if len(postprocess_sig.parameters) >= 3:
-                prompt_embeds = postprocess_func(
-                    outputs, text_inputs, server_args.pipeline_config
-                )
-            else:
-                prompt_embeds = postprocess_func(outputs, text_inputs)
+
+            postprocess_kwargs = {}
+            if "pipeline_config" in postprocess_sig.parameters:
+                # required by models like LTX
+                postprocess_kwargs["pipeline_config"] = server_args.pipeline_config
+            prompt_embeds = postprocess_func(outputs, text_inputs, **postprocess_kwargs)
             if dtype is not None:
                 prompt_embeds = prompt_embeds.to(dtype=dtype)
 
