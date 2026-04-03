@@ -82,6 +82,7 @@ class TransferInfo:
     required_dst_info_num: int
     is_dummy: bool
     curve_public_key: Optional[str] = None
+    # Note: always put the optional staging field at the final (it will be set through 'STAGING_RSP' pkg when needed)
     staging: Optional[StagingTransferInfo] = None
 
     @classmethod
@@ -137,7 +138,10 @@ class KVArgsRegisterInfo:
     # for mamba state different tp slice transfer
     dst_state_item_lens: list[int]
     dst_state_dim_per_tensor: list[int]
+    # HiSparse: decode host pool stores KV at token granularity
+    enable_hisparse: bool = False
     curve_public_key: Optional[str] = None
+    # Staging must remain last (optional multi-field payload).
     staging: Optional[StagingRegisterInfo] = None
 
     @classmethod
@@ -149,18 +153,51 @@ class KVArgsRegisterInfo:
           [4] dst_kv_ptrs, [5] dst_aux_ptrs, [6] dst_state_data_ptrs,
           [7] dst_tp_rank, [8] dst_attn_tp_size, [9] dst_kv_item_len,
           [10] dst_state_item_lens, [11] dst_state_dim_per_tensor,
-          [12] staging_base_ptr (optional), [13] staging_total_size (optional),
+
+        Optional tail (two layouts):
+
+        Current (HiSparse + staging + CurveZMQ):
+          [12] enable_hisparse (ascii '0' or '1'),
+          [13] staging_base_ptr, [14] staging_total_size,
+          [15] curve_public_key (optional)
+
+        Legacy with staging (no HiSparse flag):
+          [12] staging_base_ptr, [13] staging_total_size,
           [14] curve_public_key (optional)
+
+        Legacy without staging:
+          [12] curve_public_key (optional)
         """
-        staging = StagingRegisterInfo.from_zmq_fields(msg, 12)
-        if len(msg) > 14 and msg[14]:
-            curve_key = msg[14].decode("ascii")
-        elif staging is None and len(msg) > 12 and msg[12]:
-            # Backward compatibility for pre-staging payloads that put the key
-            # directly after dst_state_dim_per_tensor.
-            curve_key = msg[12].decode("ascii")
-        else:
-            curve_key = None
+        dst_state_item_lens = (
+            list(struct.unpack(f"{len(msg[10])//4}I", msg[10]))
+            if len(msg) > 10 and len(msg[10]) > 0
+            else []
+        )
+        dst_state_dim_per_tensor = (
+            list(struct.unpack(f"{len(msg[11])//4}I", msg[11]))
+            if len(msg) > 11 and len(msg[11]) > 0
+            else []
+        )
+
+        enable_hisparse = False
+        staging: Optional[StagingRegisterInfo] = None
+        curve_key: Optional[str] = None
+
+        if len(msg) > 12:
+            m12 = msg[12]
+            if len(m12) == 1 and m12 in (b"0", b"1"):
+                enable_hisparse = m12 == b"1"
+                staging = StagingRegisterInfo.from_zmq_fields(msg, 13)
+                if len(msg) > 15 and msg[15]:
+                    curve_key = msg[15].decode("ascii")
+            else:
+                staging = StagingRegisterInfo.from_zmq_fields(msg, 12)
+                if len(msg) > 14 and msg[14]:
+                    curve_key = msg[14].decode("ascii")
+                elif staging is None and msg[12]:
+                    # Pre-staging payloads: curve directly after dst_state_dim_per_tensor.
+                    curve_key = msg[12].decode("ascii")
+
         return cls(
             room=str(msg[0].decode("ascii")),
             endpoint=msg[1].decode("ascii"),
@@ -172,16 +209,9 @@ class KVArgsRegisterInfo:
             dst_tp_rank=int(msg[7].decode("ascii")),
             dst_attn_tp_size=int(msg[8].decode("ascii")),
             dst_kv_item_len=int(msg[9].decode("ascii")),
-            dst_state_item_lens=(
-                list(struct.unpack(f"{len(msg[10])//4}I", msg[10]))
-                if len(msg) > 10 and len(msg[10]) > 0
-                else []
-            ),
-            dst_state_dim_per_tensor=(
-                list(struct.unpack(f"{len(msg[11])//4}I", msg[11]))
-                if len(msg) > 11 and len(msg[11]) > 0
-                else []
-            ),
+            dst_state_item_lens=dst_state_item_lens,
+            dst_state_dim_per_tensor=dst_state_dim_per_tensor,
+            enable_hisparse=enable_hisparse,
             curve_public_key=curve_key,
             staging=staging,
         )
@@ -725,6 +755,49 @@ class MooncakeKVManager(CommonKVManager):
             executor=executor,
         )
 
+    def send_kvcache_hisparse(
+        self,
+        mooncake_session_id: str,
+        prefill_kv_indices: npt.NDArray[np.int32],
+        dst_kv_ptrs: list[int],
+        dst_kv_indices: npt.NDArray[np.int32],
+        page_index_slice: slice,
+        executor: concurrent.futures.ThreadPoolExecutor,
+    ):
+        """HiSparse transfer: prefill page_size > decode host page_size=1.
+
+        Receives page-level prefill_kv_indices and the full token-level
+        dst_kv_indices.  Expands both to token granularity before transfer.
+        """
+        page_size = self.kv_args.page_size
+        per_token_item_lens = [il // page_size for il in self.kv_args.kv_item_lens]
+
+        # Expand page-level src indices to token-level
+        base = np.repeat(prefill_kv_indices * page_size, page_size)
+        offsets = np.tile(np.arange(page_size, dtype=np.int32), len(prefill_kv_indices))
+        expanded_src = base + offsets
+
+        # Expand page-level index_slice to token-level for dst
+        token_start = page_index_slice.start * page_size
+        token_end = min(page_index_slice.stop * page_size, len(dst_kv_indices))
+        expanded_dst = dst_kv_indices[token_start:token_end]
+
+        # Clip src to match dst length (last page may be partial)
+        expanded_src = expanded_src[: len(expanded_dst)]
+
+        logger.debug(
+            f"Send KVCache for hisparse: {expanded_src.shape} -> {expanded_dst.shape}"
+        )
+        return self._send_kvcache_generic(
+            mooncake_session_id=mooncake_session_id,
+            src_data_ptrs=self.kv_args.kv_data_ptrs,
+            dst_data_ptrs=dst_kv_ptrs,
+            item_lens=per_token_item_lens,
+            prefill_data_indices=expanded_src,
+            dst_data_indices=expanded_dst,
+            executor=executor,
+        )
+
     def send_kvcache_slice(
         self,
         mooncake_session_id: str,
@@ -1217,13 +1290,23 @@ class MooncakeKVManager(CommonKVManager):
                             self.attn_tp_size
                             == target_rank_registration_info.dst_attn_tp_size
                         ):
-                            ret = self.send_kvcache(
-                                req.mooncake_session_id,
-                                kv_chunk.prefill_kv_indices,
-                                target_rank_registration_info.dst_kv_ptrs,
-                                chunked_dst_kv_indice,
-                                executor,
-                            )
+                            if target_rank_registration_info.enable_hisparse:
+                                ret = self.send_kvcache_hisparse(
+                                    req.mooncake_session_id,
+                                    kv_chunk.prefill_kv_indices,
+                                    target_rank_registration_info.dst_kv_ptrs,
+                                    req.dst_kv_indices,
+                                    kv_chunk.index_slice,
+                                    executor,
+                                )
+                            else:
+                                ret = self.send_kvcache(
+                                    req.mooncake_session_id,
+                                    kv_chunk.prefill_kv_indices,
+                                    target_rank_registration_info.dst_kv_ptrs,
+                                    chunked_dst_kv_indice,
+                                    executor,
+                                )
                         elif (
                             self.enable_staging
                             and staging_strategy is not None
@@ -1779,6 +1862,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
             dst_tp_rank = str(tp_rank).encode("ascii")
             dst_attn_tp_size = str(self.kv_mgr.attn_tp_size).encode("ascii")
             dst_kv_item_len = str(kv_item_len).encode("ascii")
+            enable_hisparse = b"1" if self.kv_mgr.server_args.enable_hisparse else b"0"
 
             if (
                 self.kv_mgr.enable_staging
@@ -1808,6 +1892,7 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         dst_kv_item_len,
                         packed_state_item_lens,
                         packed_state_dim_per_tensor,
+                        enable_hisparse,
                         packed_staging_base_ptr,
                         staging_total_size_str,
                         curve_pub,
