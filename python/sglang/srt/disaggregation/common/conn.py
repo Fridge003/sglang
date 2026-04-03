@@ -566,57 +566,50 @@ class CommonKVReceiver(BaseKVReceiver):
         for target_cp_rank in self.target_cp_ranks:
             bootstrap_key = f"{self.bootstrap_addr}_{self.prefill_dp_rank}_{target_cp_rank}_{self.target_tp_rank}"
 
-            bootstrap_infos = []
-            for target_tp_rank in self.target_tp_ranks:
-                # Enable higher PP ranks to be bootstrapped earlier to make PP PD requests bootstrap more robust
-                for target_pp_rank in reversed(self.target_pp_ranks):
-                    bootstrap_info = self._get_bootstrap_info_from_server(
-                        self.prefill_dp_rank,
-                        target_cp_rank,
-                        target_tp_rank,
-                        target_pp_rank,
-                    )
-                    if bootstrap_info is not None:
-                        if self.kv_mgr.is_mla_backend:
-                            # For MLA: target_tp_rank is the selected real rank, others are dummy ranks
-                            bootstrap_info["is_dummy"] = not bool(
-                                target_tp_rank == self.target_tp_rank
-                                or self.target_tp_rank is None
-                            )
-                        else:
-                            # For non-MLA: all target_tp_ranks are selected real ranks
-                            bootstrap_info["is_dummy"] = False
-                        logger.debug(
-                            f"Fetched bootstrap info: {bootstrap_info} for DP {self.prefill_dp_rank} CP {target_cp_rank} TP {target_tp_rank} PP {target_pp_rank}"
-                        )
-                        bootstrap_infos.append(bootstrap_info)
-                    else:
-                        self.kv_mgr.record_failure(
-                            self.bootstrap_room,
-                            f"Could not fetch bootstrap info for: prefill_dp_rank: {self.prefill_dp_rank} prefill_cp_rank: {target_cp_rank} target_tp_rank: {target_tp_rank} and target_pp_rank {target_pp_rank}",
-                        )
-                        self.conclude_state = KVPoll.Failed
-                        self.kv_mgr.update_status(self.bootstrap_room, KVPoll.Failed)
-                        return
-
             cached_infos = self.kv_mgr.connection_pool.get(bootstrap_key)
-            if cached_infos != bootstrap_infos:
-                if cached_infos is not None:
-                    logger.info(
-                        "Refreshing cached bootstrap info for %s because the remote "
-                        "registration changed",
-                        bootstrap_key,
-                    )
+            if cached_infos is not None:
+                self.bootstrap_infos = [info.copy() for info in cached_infos]
+            else:
+                bootstrap_infos = []
+                for target_tp_rank in self.target_tp_ranks:
+                    # Enable higher PP ranks to be bootstrapped earlier to make PP PD requests bootstrap more robust
+                    for target_pp_rank in reversed(self.target_pp_ranks):
+                        bootstrap_info = self._get_bootstrap_info_from_server(
+                            self.prefill_dp_rank,
+                            target_cp_rank,
+                            target_tp_rank,
+                            target_pp_rank,
+                        )
+                        if bootstrap_info is not None:
+                            if self.kv_mgr.is_mla_backend:
+                                # For MLA: target_tp_rank is the selected real rank, others are dummy ranks
+                                bootstrap_info["is_dummy"] = not bool(
+                                    target_tp_rank == self.target_tp_rank
+                                    or self.target_tp_rank is None
+                                )
+                            else:
+                                # For non-MLA: all target_tp_ranks are selected real ranks
+                                bootstrap_info["is_dummy"] = False
+                            logger.debug(
+                                f"Fetched bootstrap info: {bootstrap_info} for DP {self.prefill_dp_rank} CP {target_cp_rank} TP {target_tp_rank} PP {target_pp_rank}"
+                            )
+                            bootstrap_infos.append(bootstrap_info)
+                        else:
+                            self.kv_mgr.record_failure(
+                                self.bootstrap_room,
+                                f"Could not fetch bootstrap info for: prefill_dp_rank: {self.prefill_dp_rank} prefill_cp_rank: {target_cp_rank} target_tp_rank: {target_tp_rank} and target_pp_rank {target_pp_rank}",
+                            )
+                            self.conclude_state = KVPoll.Failed
+                            self.kv_mgr.update_status(
+                                self.bootstrap_room, KVPoll.Failed
+                            )
+                            return
+
                 self.bootstrap_infos = [info.copy() for info in bootstrap_infos]
                 self.kv_mgr.connection_pool[bootstrap_key] = [
                     info.copy() for info in bootstrap_infos
                 ]
-
-                # Register kv_args only when the bootstrap target changed so
-                # restarted prefill workers get the current decode-side metadata.
                 self._register_kv_args()
-            else:
-                self.bootstrap_infos = [info.copy() for info in cached_infos]
 
             assert len(self.bootstrap_infos) > 0
             all_bootstrap_infos.extend(self.bootstrap_infos)

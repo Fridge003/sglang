@@ -1370,6 +1370,8 @@ class TestDisaggBootstrapCurveKeyRoundTrip(CustomTestCase):
 )
 class TestCommonKVReceiverBootstrapCacheRefresh(CustomTestCase):
     def test_refreshes_cached_curve_key_when_registration_changes(self):
+        """After explicit cache invalidation, _setup_bootstrap_infos re-fetches
+        and picks up a changed curve_public_key from the bootstrap server."""
         from sglang.srt.disaggregation.common.conn import CommonKVReceiver
 
         class DummyReceiver(CommonKVReceiver):
@@ -1420,18 +1422,22 @@ class TestCommonKVReceiverBootstrapCacheRefresh(CustomTestCase):
         receiver._register_kv_args = fake_register_kv_args
 
         CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(len(register_calls), 1)
+        self.assertEqual(register_calls[0][0]["curve_public_key"], "A" * 40)
+
         CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(len(register_calls), 1, "Cache hit must not re-register")
 
         response_box[0] = {
             "rank_ip": "127.0.0.1",
             "rank_port": 9000,
             "curve_public_key": "B" * 40,
         }
+        kv_mgr.connection_pool.clear()
         CommonKVReceiver._setup_bootstrap_infos(receiver)
 
         bootstrap_key = "127.0.0.1:8000_0_0_0"
         self.assertEqual(len(register_calls), 2)
-        self.assertEqual(register_calls[0][0]["curve_public_key"], "A" * 40)
         self.assertEqual(register_calls[1][0]["curve_public_key"], "B" * 40)
         self.assertEqual(
             kv_mgr.connection_pool[bootstrap_key][0]["curve_public_key"],
@@ -1753,6 +1759,362 @@ class TestDisaggZmqCurveHandshake(CustomTestCase):
                 ctx.term()
         finally:
             _restore_curve_state(saved)
+
+
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required for disaggregation CURVE runtime tests"
+)
+class TestBootstrapCacheFastPath(CustomTestCase):
+    """Verify that _setup_bootstrap_infos skips HTTP on warm cache hits."""
+
+    def test_cache_hit_skips_http_and_register(self):
+        from sglang.srt.disaggregation.common.conn import CommonKVReceiver
+
+        class DummyReceiver(CommonKVReceiver):
+            def poll(self):
+                return None
+
+        class DummyKVManager:
+            def __init__(self):
+                self.connection_pool = {}
+                self.is_mla_backend = False
+                self.failures = []
+                self.status_updates = []
+
+            def record_failure(self, room, message):
+                self.failures.append((room, message))
+
+            def update_status(self, room, status):
+                self.status_updates.append((room, status))
+
+        kv_mgr = DummyKVManager()
+        receiver = DummyReceiver.__new__(DummyReceiver)
+        receiver.kv_mgr = kv_mgr
+        receiver.bootstrap_addr = "127.0.0.1:8000"
+        receiver.bootstrap_room = 11
+        receiver.prefill_dp_rank = 0
+        receiver.target_cp_ranks = [0]
+        receiver.target_tp_ranks = [0]
+        receiver.target_pp_ranks = [0]
+        receiver.target_tp_rank = 0
+        receiver.conclude_state = None
+
+        fetch_count = [0]
+        register_calls = []
+
+        def fake_get_bootstrap_info(*_args):
+            fetch_count[0] += 1
+            return {
+                "rank_ip": "127.0.0.1",
+                "rank_port": 9000,
+                "curve_public_key": "A" * 40,
+            }
+
+        def fake_register_kv_args():
+            register_calls.append(True)
+
+        receiver._get_bootstrap_info_from_server = fake_get_bootstrap_info
+        receiver._register_kv_args = fake_register_kv_args
+
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(fetch_count[0], 1, "First call must fetch from HTTP")
+        self.assertEqual(len(register_calls), 1, "First call must register")
+
+        fetch_count[0] = 0
+        register_calls.clear()
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(fetch_count[0], 0, "Second call must skip HTTP (cache hit)")
+        self.assertEqual(len(register_calls), 0, "Second call must skip registration")
+
+        bootstrap_key = "127.0.0.1:8000_0_0_0"
+        self.assertIn(bootstrap_key, kv_mgr.connection_pool)
+        self.assertEqual(
+            kv_mgr.connection_pool[bootstrap_key][0]["curve_public_key"],
+            "A" * 40,
+        )
+
+    def test_cache_invalidation_forces_refetch(self):
+        """After clearing connection_pool, the next call must fetch again."""
+        from sglang.srt.disaggregation.common.conn import CommonKVReceiver
+
+        class DummyReceiver(CommonKVReceiver):
+            def poll(self):
+                return None
+
+        class DummyKVManager:
+            def __init__(self):
+                self.connection_pool = {}
+                self.is_mla_backend = False
+
+            def record_failure(self, room, message):
+                pass
+
+            def update_status(self, room, status):
+                pass
+
+        kv_mgr = DummyKVManager()
+        receiver = DummyReceiver.__new__(DummyReceiver)
+        receiver.kv_mgr = kv_mgr
+        receiver.bootstrap_addr = "127.0.0.1:8000"
+        receiver.bootstrap_room = 11
+        receiver.prefill_dp_rank = 0
+        receiver.target_cp_ranks = [0]
+        receiver.target_tp_ranks = [0]
+        receiver.target_pp_ranks = [0]
+        receiver.target_tp_rank = 0
+        receiver.conclude_state = None
+
+        fetch_count = [0]
+
+        def fake_get_bootstrap_info(*_args):
+            fetch_count[0] += 1
+            return {"rank_ip": "127.0.0.1", "rank_port": 9000}
+
+        receiver._get_bootstrap_info_from_server = fake_get_bootstrap_info
+        receiver._register_kv_args = lambda: None
+
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(fetch_count[0], 1)
+
+        kv_mgr.connection_pool.clear()
+        fetch_count[0] = 0
+        CommonKVReceiver._setup_bootstrap_infos(receiver)
+        self.assertEqual(
+            fetch_count[0], 1, "After invalidation, must fetch from HTTP again"
+        )
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+@unittest.skipUnless(
+    GPU_AVAILABLE, "GPU required – expert_backup_client import chain needs sgl_kernel"
+)
+class TestExpertBackupClientPeerKeys(CustomTestCase):
+    """Verify ExpertBackupClient gathers (ip, curve_public_key) tuples
+    and passes peer server_public_key into connect_with_curve."""
+
+    def test_gathers_ip_and_curve_key_tuples(self):
+        from unittest.mock import MagicMock, patch
+
+        server_curve = CurveConfig.generate()
+        peer_curve = CurveConfig.generate()
+        local_ip = "10.0.0.1"
+        peer_ip = "10.0.0.2"
+        local_pub = server_curve.public_key.decode("ascii")
+        peer_pub = peer_curve.public_key.decode("ascii")
+
+        world_size = 2
+
+        def fake_all_gather(output_list, local_val, group=None):
+            output_list[0] = (local_ip, local_pub)
+            output_list[1] = (peer_ip, peer_pub)
+
+        mock_world_group = MagicMock()
+
+        with patch(
+            "sglang.srt.elastic_ep.expert_backup_client.get_local_ip_auto",
+            return_value=local_ip,
+        ), patch(
+            "sglang.srt.elastic_ep.expert_backup_client.get_curve_config",
+            return_value=server_curve,
+        ), patch(
+            "sglang.srt.elastic_ep.expert_backup_client.get_world_size",
+            return_value=world_size,
+        ), patch(
+            "sglang.srt.elastic_ep.expert_backup_client.get_world_group",
+            return_value=mock_world_group,
+        ), patch(
+            "torch.distributed.all_gather_object", side_effect=fake_all_gather
+        ), patch(
+            "sglang.srt.elastic_ep.expert_backup_client.connect_with_curve"
+        ) as mock_connect, patch(
+            "zmq.Context"
+        ) as mock_ctx_cls:
+            mock_ctx = MagicMock()
+            mock_ctx_cls.return_value = mock_ctx
+            mock_socket = MagicMock()
+            mock_ctx.socket.return_value = mock_socket
+
+            mock_server_args = MagicMock()
+            mock_server_args.nnodes = 2
+            mock_server_args.node_rank = 0
+            mock_model_runner = MagicMock()
+            mock_model_runner.moe_ep_size = 2
+            mock_model_runner.model_config = MagicMock()
+            mock_model_runner.moe_ep_rank = 0
+
+            from sglang.srt.elastic_ep.expert_backup_client import ExpertBackupClient
+
+            _orig_init = ExpertBackupClient.__init__
+
+            def patched_init(self_inner, sa, mr):
+                self_inner.server_args = sa
+                self_inner.engine_num = sa.nnodes
+                self_inner.engine_rank = sa.node_rank
+                self_inner.recv_list = [None] * self_inner.engine_num
+                self_inner.ready_sockets = [None] * self_inner.engine_num
+                self_inner.model_runner = mr
+                self_inner.moe_ep_size = mr.moe_ep_size
+                self_inner.model_config = mr.model_config
+                self_inner.moe_ep_rank = mr.moe_ep_rank
+                self_inner.dram_map_list = [None] * self_inner.engine_num
+                self_inner.session_id_list = [None] * self_inner.engine_num
+                self_inner.transfer_engine = None
+                self_inner.gpu_buffer = None
+                self_inner.buffer_size = 0
+                self_inner.use_backup = False
+                _orig_init(self_inner, sa, mr)
+
+            with patch.object(ExpertBackupClient, "__init__", patched_init):
+                client = ExpertBackupClient(mock_server_args, mock_model_runner)
+
+        connect_calls = mock_connect.call_args_list
+        self.assertTrue(
+            len(connect_calls) >= 4,
+            f"Expected >= 4 connect_with_curve calls, got {len(connect_calls)}",
+        )
+
+        for c in connect_calls:
+            self.assertIn(
+                "server_public_key",
+                c.kwargs,
+                "connect_with_curve must receive server_public_key kwarg",
+            )
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestSchedulerClientPassesServerKey(CustomTestCase):
+    """Verify SchedulerClient.initialize passes server_public_key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sc_mod = _import_scheduler_client()
+
+    def test_initialize_passes_server_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        server_key = CurveConfig.generate().public_key
+
+        mock_server_args = MagicMock()
+        mock_server_args.scheduler_endpoint = "tcp://10.0.0.5:9999"
+
+        client = self.sc_mod.SchedulerClient()
+
+        with patch.object(
+            self.sc_mod, "connect_with_curve"
+        ) as mock_connect, patch.object(
+            self.sc_mod, "get_server_public_key", return_value=server_key
+        ):
+            client.initialize(mock_server_args)
+
+        mock_connect.assert_called_once()
+        _, kwargs = mock_connect.call_args
+        self.assertEqual(
+            kwargs.get("server_public_key"),
+            server_key,
+            "SchedulerClient must pass server_public_key to connect_with_curve",
+        )
+        client.close()
+
+    def test_initialize_passes_none_when_no_server_key(self):
+        from unittest.mock import MagicMock, patch
+
+        mock_server_args = MagicMock()
+        mock_server_args.scheduler_endpoint = "tcp://127.0.0.1:9999"
+
+        client = self.sc_mod.SchedulerClient()
+
+        with patch.object(
+            self.sc_mod, "connect_with_curve"
+        ) as mock_connect, patch.object(
+            self.sc_mod, "get_server_public_key", return_value=None
+        ):
+            client.initialize(mock_server_args)
+
+        mock_connect.assert_called_once()
+        _, kwargs = mock_connect.call_args
+        self.assertIsNone(
+            kwargs.get("server_public_key"),
+            "When no server key is configured, server_public_key should be None",
+        )
+        client.close()
+
+
+@unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
+class TestKvEventsPublisherServerKey(CustomTestCase):
+    """Verify ZmqEventPublisher passes server_public_key in connect mode."""
+
+    def test_connect_mode_passes_server_public_key(self):
+        from unittest.mock import MagicMock, patch
+
+        server_key = CurveConfig.generate().public_key
+
+        with patch(
+            "sglang.srt.disaggregation.kv_events.zmq.Context"
+        ) as mock_ctx_cls, patch(
+            "sglang.srt.disaggregation.kv_events.ZmqEventPublisher.offset_endpoint_port",
+            side_effect=lambda ep, _rank: ep,
+        ), patch(
+            "sglang.srt.utils.network.get_curve_config",
+            return_value=CurveConfig.generate(),
+        ), patch(
+            "sglang.srt.utils.network.connect_with_curve"
+        ) as mock_connect:
+            mock_ctx = MagicMock()
+            mock_ctx_cls.instance.return_value = mock_ctx
+            mock_socket = MagicMock()
+            mock_ctx.socket.return_value = mock_socket
+
+            from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+
+            pub = ZmqEventPublisher(
+                attn_dp_rank=0,
+                endpoint="tcp://10.0.0.1:5557",
+                server_public_key=server_key,
+            )
+            pub.shutdown()
+
+        mock_connect.assert_called_once()
+        _, kwargs = mock_connect.call_args
+        self.assertEqual(
+            kwargs.get("server_public_key"),
+            server_key,
+            "ZmqEventPublisher in connect mode must pass server_public_key",
+        )
+
+    def test_bind_mode_does_not_use_server_key(self):
+        from unittest.mock import MagicMock, patch
+
+        curve = CurveConfig.generate()
+
+        with patch(
+            "sglang.srt.disaggregation.kv_events.zmq.Context"
+        ) as mock_ctx_cls, patch(
+            "sglang.srt.disaggregation.kv_events.ZmqEventPublisher.offset_endpoint_port",
+            side_effect=lambda ep, _rank: ep,
+        ), patch(
+            "sglang.srt.utils.network.get_curve_config",
+            return_value=curve,
+        ), patch(
+            "sglang.srt.utils.network.apply_curve_server"
+        ) as mock_apply_server, patch(
+            "sglang.srt.utils.network.connect_with_curve"
+        ) as mock_connect:
+            mock_ctx = MagicMock()
+            mock_ctx_cls.instance.return_value = mock_ctx
+            mock_socket = MagicMock()
+            mock_ctx.socket.return_value = mock_socket
+
+            from sglang.srt.disaggregation.kv_events import ZmqEventPublisher
+
+            pub = ZmqEventPublisher(
+                attn_dp_rank=0,
+                endpoint="tcp://*:5557",
+                server_public_key=CurveConfig.generate().public_key,
+            )
+            pub.shutdown()
+
+        mock_connect.assert_not_called()
+        mock_apply_server.assert_called_once()
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")

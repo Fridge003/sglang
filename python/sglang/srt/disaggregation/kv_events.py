@@ -176,6 +176,7 @@ class ZmqEventPublisher(EventPublisher):
         hwm: int = 100_000,
         max_queue_size: int = 100_000,
         topic: str = "",
+        server_public_key: Optional[bytes] = None,
     ) -> None:
         # Storage
         super().__init__(attn_dp_rank)
@@ -192,6 +193,7 @@ class ZmqEventPublisher(EventPublisher):
             replay_endpoint, self._dp_rank
         )
         self._hwm = hwm
+        self._server_public_key = server_public_key
         self._socket_setup()
 
         # Payload
@@ -277,7 +279,11 @@ class ZmqEventPublisher(EventPublisher):
                 )
                 self._pub.bind(self._endpoint)
             else:
-                connect_with_curve(self._pub, self._endpoint)
+                connect_with_curve(
+                    self._pub,
+                    self._endpoint,
+                    server_public_key=self._server_public_key,
+                )
 
         if self._replay_endpoint is not None:
             self._replay = self._ctx.socket(zmq.ROUTER)

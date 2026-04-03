@@ -10,6 +10,7 @@ from sglang.srt.utils.network import (
     apply_curve_server,
     connect_with_curve,
     get_curve_config,
+    get_server_public_key,
 )
 
 logger = init_logger(__name__)
@@ -75,7 +76,11 @@ class SchedulerClient:
         self.scheduler_socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         scheduler_endpoint = self.server_args.scheduler_endpoint
-        connect_with_curve(self.scheduler_socket, scheduler_endpoint)
+        connect_with_curve(
+            self.scheduler_socket,
+            scheduler_endpoint,
+            server_public_key=get_server_public_key(),
+        )
         logger.debug(
             f"SchedulerClient connected to backend scheduler at {scheduler_endpoint}"
         )
@@ -103,7 +108,9 @@ class SchedulerClient:
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
-        connect_with_curve(ping_socket, endpoint)
+        connect_with_curve(
+            ping_socket, endpoint, server_public_key=get_server_public_key()
+        )
 
         try:
             ping_socket.send_pyobj({"method": "ping"})
@@ -160,7 +167,7 @@ class AsyncSchedulerClient:
         socket.setsockopt(zmq.RCVTIMEO, 6000000)
 
         endpoint = self.server_args.scheduler_endpoint
-        connect_with_curve(socket, endpoint)
+        connect_with_curve(socket, endpoint, server_public_key=get_server_public_key())
 
         try:
             await socket.send(pickle.dumps(batch))
@@ -185,7 +192,9 @@ class AsyncSchedulerClient:
         ping_socket.setsockopt(zmq.RCVTIMEO, 2000)
 
         endpoint = self.server_args.scheduler_endpoint
-        connect_with_curve(ping_socket, endpoint)
+        connect_with_curve(
+            ping_socket, endpoint, server_public_key=get_server_public_key()
+        )
 
         try:
             await ping_socket.send(pickle.dumps({"method": "ping"}))
