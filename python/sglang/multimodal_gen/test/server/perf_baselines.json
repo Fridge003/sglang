@@ -1102,7 +1102,7 @@
                 "LTX2AVDenoisingStage": 53324.98,
                 "LTX2UpsampleStage": 1894.17,
                 "LTX2RefinementStage": 4330.57,
-                "LTX2AVDecodingStage": 337.68,
+                "LTX2AVDecodingStage": 337.68
             },
             "denoise_step_ms": {
                 "0": 1206.17,
