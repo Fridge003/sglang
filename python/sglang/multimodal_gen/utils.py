@@ -35,25 +35,21 @@ logger = init_logger(__name__)
 T = TypeVar("T")
 
 
-def _expand_path_value(field_name: str, value: Any) -> Any:
-    eu = os.path.expanduser
-    if field_name.endswith("_path") and isinstance(value, str):
-        return eu(value)
-    if field_name.endswith("_path") and isinstance(value, list):
-        return [eu(x) if isinstance(x, str) else x for x in value]
-    if field_name.endswith("_paths") and isinstance(value, dict):
-        return {k: eu(p) if isinstance(p, str) else p for k, p in value.items()}
-    return value
-
-
-def expand_path_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
-    return {key: _expand_path_value(key, value) for key, value in kwargs.items()}
-
-
 def expand_path_fields(obj) -> None:
     """In-place expanduser on all dataclass fields whose name ends with '_path' or '_paths'."""
+    eu = os.path.expanduser
     for f in fields(obj):
-        setattr(obj, f.name, _expand_path_value(f.name, getattr(obj, f.name)))
+        v = getattr(obj, f.name)
+        if f.name.endswith("_path") and isinstance(v, str):
+            setattr(obj, f.name, eu(v))
+        elif f.name.endswith("_path") and isinstance(v, list):
+            setattr(obj, f.name, [eu(x) if isinstance(x, str) else x for x in v])
+        elif f.name.endswith("_paths") and isinstance(v, dict):
+            setattr(
+                obj,
+                f.name,
+                {k: eu(p) if isinstance(p, str) else p for k, p in v.items()},
+            )
 
 
 # TODO(will): used to convert server_args.precision to torch.dtype. Find a
@@ -181,15 +177,11 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             kwargs["formatter_class"] = SortedHelpFormatter
         super().__init__(*args, **kwargs)
 
-    def _get_config_path(self, args: list[str]) -> str | None:
-        for i, arg in enumerate(args):
-            if arg.startswith("--config="):
-                return arg.split("=", 1)[1]
-            if arg == "--config" and i + 1 < len(args):
-                return args[i + 1]
-        return None
-
-    def _preprocess_args(self, args: list[str]) -> list[str]:
+    def parse_args(  # type: ignore[override]
+        self, args=None, namespace=None
+    ) -> argparse.Namespace:
+        if args is None:
+            args = sys.argv[1:]
         if any(arg.startswith("--config") for arg in args):
             args = self._pull_args_from_config(args)
 
@@ -210,11 +202,8 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 processed_args.append(arg)
 
-        return processed_args
+        namespace = super().parse_args(processed_args, namespace)
 
-    def _mark_provided_args(
-        self, namespace: argparse.Namespace, args: list[str]
-    ) -> None:
         namespace._provided = set()
 
         i = 0
@@ -238,29 +227,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             else:
                 i += 1
 
-    def parse_known_args(  # type: ignore[override]
-        self, args=None, namespace=None
-    ) -> tuple[argparse.Namespace, list[str]]:
-        if args is None:
-            args = sys.argv[1:]
-        else:
-            args = list(args)
-
-        config_path = self._get_config_path(args)
-        processed_args = self._preprocess_args(args)
-        namespace, remaining = super().parse_known_args(processed_args, namespace)
-        if config_path is not None and hasattr(namespace, "config"):
-            setattr(namespace, "config", config_path)
-        self._mark_provided_args(namespace, args)
-        return namespace, remaining  # type: ignore[no-any-return]
-
-    def parse_args(  # type: ignore[override]
-        self, args=None, namespace=None
-    ) -> argparse.Namespace:
-        namespace, remaining = self.parse_known_args(args, namespace)
-        if remaining:
-            self.error(f"unrecognized arguments: {' '.join(remaining)}")
-        return namespace
+        return namespace  # type: ignore[no-any-return]
 
     def _pull_args_from_config(self, args: list[str]) -> list[str]:
         """Method to pull arguments specified in the config file
