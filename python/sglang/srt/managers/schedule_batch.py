@@ -2119,7 +2119,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if self.is_spec_v2:
             draft_input: EagleDraftInput = self.spec_info
             if draft_input.verify_done is not None:
-                draft_input.verify_done.synchronize()
+                if envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
+                    torch.cuda.current_stream().wait_event(draft_input.verify_done)
+                else:
+                    draft_input.verify_done.synchronize()
 
     def filter_batch(
         self,
@@ -2168,10 +2171,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.multimodal_inputs = [self.multimodal_inputs[i] for i in keep_indices]
         self.req_pool_indices = self.req_pool_indices[keep_indices_device]
         self.seq_lens = self.seq_lens[keep_indices_device]
-        self.seq_lens_cpu = self.seq_lens_cpu[keep_indices]
+        if self.seq_lens_cpu is not None:
+            self.seq_lens_cpu = self.seq_lens_cpu[keep_indices]
         self.orig_seq_lens = self.orig_seq_lens[keep_indices_device]
         self.out_cache_loc = None
-        self.seq_lens_sum = self.seq_lens.sum().item()
+        if envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
+            self.seq_lens_sum = None
+        else:
+            self.seq_lens_sum = self.seq_lens.sum().item()
+            if self.seq_lens_cpu is None:
+                self.seq_lens_cpu = self.seq_lens.cpu()
 
         if self.output_ids is not None:
             self.output_ids = self.output_ids[keep_indices_device]
@@ -2210,7 +2219,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # In disagg decode + overlap, merge_batch can be called before
         # filter_batch, so running_batch.seq_lens may still be a forward_stream
         # future. Synchronize here to avoid a cross-stream data race.
-        self.maybe_wait_verify_done()
+        if not envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
+            self.maybe_wait_verify_done()
 
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
         # orchestrator.merge() depends on Batch.reqs during preparation of each penalizers, so it
@@ -2225,10 +2235,20 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             [self.req_pool_indices, other.req_pool_indices]
         )
         self.seq_lens = torch.cat([self.seq_lens, other.seq_lens])
-        self.seq_lens_cpu = torch.cat([self.seq_lens_cpu, other.seq_lens_cpu])
+        if self.seq_lens_cpu is not None and other.seq_lens_cpu is not None:
+            self.seq_lens_cpu = torch.cat([self.seq_lens_cpu, other.seq_lens_cpu])
+        elif not envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
+            self.seq_lens_cpu = self.seq_lens.cpu()
+        else:
+            self.seq_lens_cpu = None
         self.orig_seq_lens = torch.cat([self.orig_seq_lens, other.orig_seq_lens])
         self.out_cache_loc = None
-        self.seq_lens_sum += other.seq_lens_sum
+        if self.seq_lens_sum is not None and other.seq_lens_sum is not None:
+            self.seq_lens_sum += other.seq_lens_sum
+        elif not envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
+            self.seq_lens_sum = self.seq_lens.sum().item()
+        else:
+            self.seq_lens_sum = None
         if self.output_ids is not None:
             self.output_ids = torch.cat([self.output_ids, other.output_ids])
         self.mamba_track_indices = None
@@ -2439,7 +2459,7 @@ class ModelWorkerBatch:
     out_cache_loc: torch.Tensor
     # The sequence length tensor on CPU
     seq_lens_cpu: Optional[torch.Tensor]
-    seq_lens_sum: int
+    seq_lens_sum: Optional[int]
 
     # For logprob
     return_logprob: bool

@@ -358,6 +358,11 @@ class EagleDraftWorker(BaseDraftWorker):
             self.target_worker.model_runner.attn_backend.get_verify_buffers_to_fill_after_draft()
         )
 
+        if model_worker_batch.seq_lens_sum is None and tree_mask_buf is None:
+            model_worker_batch.seq_lens_sum = (
+                model_worker_batch.seq_lens.sum().item()
+            )
+
         (
             tree_mask,
             position,
@@ -371,7 +376,7 @@ class EagleDraftWorker(BaseDraftWorker):
             top_scores_index,
             draft_tokens,
             model_worker_batch.seq_lens,
-            model_worker_batch.seq_lens_sum,
+            model_worker_batch.seq_lens_sum or 0,
             self.topk,
             self.speculative_num_steps,
             self.speculative_num_draft_tokens,

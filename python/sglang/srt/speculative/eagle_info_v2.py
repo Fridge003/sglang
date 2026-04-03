@@ -22,6 +22,7 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
 )
+from sglang.srt.environ import envs
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
@@ -34,6 +35,7 @@ from sglang.srt.utils.common import is_cuda, is_hip, is_npu, next_power_of_2
 _is_cuda = is_cuda()
 _is_hip = is_hip()
 _is_npu = is_npu()
+
 
 if TYPE_CHECKING:
     from sglang.srt.managers.tp_worker import TpModelWorker
@@ -86,8 +88,10 @@ class EagleDraftInputV2Mixin:
 
         bs = batch.batch_size()
 
-        # Now seq_lens is correct
-        batch.maybe_wait_verify_done()
+        skip_cpu_sync = envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get()
+
+        if not skip_cpu_sync:
+            batch.maybe_wait_verify_done()
 
         page_size = batch.token_to_kv_pool_allocator.page_size
         cur_kv_lens_cpu = []
@@ -103,14 +107,18 @@ class EagleDraftInputV2Mixin:
             r.kv_allocated_len += x
             r.decode_batch_idx += 1
 
-        cur_kv_lens_cpu = torch.tensor(cur_kv_lens_cpu, dtype=torch.int32, device="cpu")
-        nxt_kv_lens_cpu = torch.tensor(nxt_kv_lens_cpu, dtype=torch.int32, device="cpu")
+        cur_kv_lens_cpu = torch.tensor(
+            cur_kv_lens_cpu, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        nxt_kv_lens_cpu = torch.tensor(
+            nxt_kv_lens_cpu, dtype=torch.int32, device="cpu", pin_memory=True
+        )
 
         if page_size == 1:
             out_cache_loc = alloc_token_slots(batch.tree_cache, num_needed_tokens)
         else:
-            cur_kv_lens = cur_kv_lens_cpu.to(device=batch.device)
-            nxt_kv_lens = nxt_kv_lens_cpu.to(device=batch.device)
+            cur_kv_lens = cur_kv_lens_cpu.to(device=batch.device, non_blocking=True)
+            nxt_kv_lens = nxt_kv_lens_cpu.to(device=batch.device, non_blocking=True)
             last_loc = get_last_loc(
                 batch.req_to_token_pool.req_to_token,
                 batch.req_pool_indices,
@@ -129,15 +137,18 @@ class EagleDraftInputV2Mixin:
         assign_req_to_token_pool_func(
             batch.req_pool_indices,
             batch.req_to_token_pool.req_to_token,
-            cur_kv_lens_cpu.to(device=batch.device),
-            nxt_kv_lens_cpu.to(device=batch.device),
+            cur_kv_lens_cpu.to(device=batch.device, non_blocking=True),
+            nxt_kv_lens_cpu.to(device=batch.device, non_blocking=True),
             out_cache_loc,
             bs,
         )
 
-        # FIXME(lsyin): make this sync optional
-        batch.seq_lens_cpu = batch.seq_lens.cpu()
-        batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
+        if skip_cpu_sync:
+            batch.seq_lens_cpu = None
+            batch.seq_lens_sum = None
+        else:
+            batch.seq_lens_cpu = batch.seq_lens.cpu()
+            batch.seq_lens_sum = batch.seq_lens_cpu.sum().item()
 
     def prepare_for_v2_draft(
         self: EagleDraftInput,
@@ -185,16 +196,27 @@ class EagleDraftInputV2Mixin:
         draft_model_runner: Any,
         cuda_graph_runner: Any,
     ):
-        seq_lens_cpu_ = batch.seq_lens_cpu
-        extend_num_tokens = len(batch.seq_lens) * num_draft_tokens
+        bs = len(batch.seq_lens)
+        extend_num_tokens = bs * num_draft_tokens
+        gpu_only = batch.seq_lens_cpu is None
 
         batch.spec_info = self
         batch.input_ids = predict
-        batch.seq_lens = batch.seq_lens + num_draft_tokens
-        batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
-        batch.seq_lens_sum += extend_num_tokens
-        batch.extend_seq_lens = [num_draft_tokens for _ in range(len(batch.seq_lens))]
-        batch.extend_prefix_lens = seq_lens_cpu_.tolist()
+        if gpu_only:
+            extend_prefix_lens = batch.seq_lens.to(torch.int32)
+            batch.seq_lens = batch.seq_lens + num_draft_tokens
+            batch.extend_seq_lens = torch.full(
+                (bs,), num_draft_tokens, dtype=torch.int32, device=batch.seq_lens.device
+            )
+            batch.extend_prefix_lens = extend_prefix_lens
+        else:
+            seq_lens_cpu_ = batch.seq_lens_cpu
+            batch.seq_lens = batch.seq_lens + num_draft_tokens
+            batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
+            batch.extend_seq_lens = [num_draft_tokens for _ in range(bs)]
+            batch.extend_prefix_lens = seq_lens_cpu_.tolist()
+        if batch.seq_lens_sum is not None:
+            batch.seq_lens_sum += extend_num_tokens
         batch.extend_num_tokens = extend_num_tokens
         batch.capture_hidden_mode = CaptureHiddenMode.FULL
         batch.forward_mode = (
