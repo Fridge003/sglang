@@ -241,6 +241,22 @@ class DiffusionSamplingParams:
 
 
 @dataclass(frozen=True)
+class ConsistencyCheckConfig:
+    enabled: bool = True
+    min_ssim: float = 0.95
+    min_psnr: float = 28.0
+    max_mean_abs_diff: float = 8.0
+
+
+DEFAULT_IMAGE_CONSISTENCY_CHECK = ConsistencyCheckConfig()
+DEFAULT_VIDEO_CONSISTENCY_CHECK = ConsistencyCheckConfig(
+    min_ssim=0.92,
+    min_psnr=24.0,
+    max_mean_abs_diff=10.0,
+)
+
+
+@dataclass(frozen=True)
 class DiffusionTestCase:
     """Configuration for a single model/scenario test case."""
 
@@ -248,6 +264,7 @@ class DiffusionTestCase:
     server_args: DiffusionServerArgs
     sampling_params: DiffusionSamplingParams
     run_perf_check: bool = True
+    consistency_check: ConsistencyCheckConfig | None = None
     run_models_api_check: bool = True
     run_t2v_input_reference_check: bool = True
     run_lora_basic_api_check: bool = False
@@ -256,6 +273,14 @@ class DiffusionTestCase:
     run_multi_lora_api_check: bool = False
 
     def __post_init__(self) -> None:
+        if self.consistency_check is None:
+            default_consistency = None
+            if self.server_args.modality == "image":
+                default_consistency = DEFAULT_IMAGE_CONSISTENCY_CHECK
+            elif self.server_args.modality == "video":
+                default_consistency = DEFAULT_VIDEO_CONSISTENCY_CHECK
+            object.__setattr__(self, "consistency_check", default_consistency)
+
         if os.environ.get("SGLANG_DISABLE_PERF_CHECK", "0") == "1":
             object.__setattr__(self, "run_perf_check", False)
 

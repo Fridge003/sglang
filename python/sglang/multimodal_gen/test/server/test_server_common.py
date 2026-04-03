@@ -20,6 +20,12 @@ from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import RequestPerfRecord
 from sglang.multimodal_gen.test.server import conftest
+from sglang.multimodal_gen.test.server.consistency_utils import (
+    compare_frames_with_gt,
+    format_consistency_failure,
+    load_gt_frames,
+    output_frames_from_content,
+)
 from sglang.multimodal_gen.test.server.test_server_utils import (
     VALIDATOR_REGISTRY,
     PerformanceValidator,
@@ -487,6 +493,53 @@ Consider updating perf_baselines.json with the snippets below:
             output_path.write_bytes(content)
             logger.info(f"Saved GT image: {output_path} (format: {detected_format})")
 
+    def _validate_consistency(
+        self,
+        case: DiffusionTestCase,
+        content: bytes,
+    ) -> None:
+        if case.consistency_check is None or not case.consistency_check.enabled:
+            return
+
+        if os.environ.get("SGLANG_SKIP_CONSISTENCY", "0") == "1":
+            logger.info(
+                "[Consistency] Skipping consistency check for %s (SGLANG_SKIP_CONSISTENCY=1)",
+                case.id,
+            )
+            return
+
+        if not content:
+            logger.warning(
+                "[Consistency] Skipping consistency check for %s because content is empty",
+                case.id,
+            )
+            return
+
+        try:
+            gt_filenames, gt_frames = load_gt_frames(case, content)
+        except FileNotFoundError as exc:
+            pytest.fail(
+                f"Missing GT for {case.id}. Expected published GT at: {exc}",
+                pytrace=False,
+            )
+
+        output_frames = output_frames_from_content(case, content)
+        result = compare_frames_with_gt(case, output_frames, gt_filenames, gt_frames)
+        if not result.passed:
+            pytest.fail(format_consistency_failure(result), pytrace=False)
+
+        logger.info(
+            "[Consistency] %s passed (min_ssim=%s, min_psnr=%s, max_mean_abs_diff=%s)",
+            case.id,
+            f"{result.min_ssim:.4f}" if result.min_ssim is not None else "n/a",
+            f"{result.min_psnr:.2f}" if result.min_psnr is not None else "n/a",
+            (
+                f"{result.max_mean_abs_diff:.2f}"
+                if result.max_mean_abs_diff is not None
+                else "n/a"
+            ),
+        )
+
     def _test_lora_api_functionality(
         self,
         ctx: ServerContext,
@@ -874,6 +927,9 @@ Consider updating perf_baselines.json with the snippets below:
 
         # Validation 1: Performance
         self._validate_and_record(case, perf_record)
+
+        # Validation 2: Consistency against published GT
+        self._validate_consistency(case, content)
 
         # Mesh correctness check (Chamfer Distance) for 3D models
         if case.server_args.custom_validator == "mesh":
