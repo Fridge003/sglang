@@ -388,6 +388,33 @@ class MMEncoder:
             logger.warning(f"Failed to load image processor: {e}")
             self.image_processor = None
 
+        # Fallback: for models like Kimi K2.5 whose image processing is
+        # handled inside AutoProcessor (no standalone AutoImageProcessor),
+        # load via AutoProcessor and keep the full processor.
+        if self.image_processor is None:
+            try:
+                _proc = AutoProcessor.from_pretrained(
+                    server_args.tokenizer_path or server_args.model_path,
+                    trust_remote_code=server_args.trust_remote_code,
+                    revision=server_args.revision,
+                    use_fast=not server_args.disable_fast_image_processor,
+                )
+                if hasattr(_proc, "media_processor") or hasattr(
+                    _proc, "image_processor"
+                ):
+                    self.image_processor = _proc
+                    logger.info(
+                        "Loaded image processor via AutoProcessor fallback."
+                    )
+                else:
+                    logger.warning(
+                        "AutoProcessor fallback loaded but has no media/image processor."
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to load image processor via AutoProcessor fallback: {e}"
+                )
+
         try:
             self.video_processor = AutoVideoProcessor.from_pretrained(
                 server_args.tokenizer_path or server_args.model_path,
@@ -584,6 +611,18 @@ class MMEncoder:
         if modality == Modality.AUDIO:
             input_length = self.get_num_patches(grid, modality)
             return self._get_feat_extract_output_lengths(input_length)
+        elif self.model_type == "kimi_k25":
+            # Kimi K2.5: tpool_patch_merger collapses the temporal dimension
+            # (mean over time) and spatially merges with merge_kernel_size (2,2).
+            # Output tokens = (h / merge_h) * (w / merge_w), independent of t.
+            h, w = int(grid[1]), int(grid[2])
+            merge_kernel_size = getattr(
+                self.model_config.hf_config.vision_config,
+                "merge_kernel_size",
+                (2, 2),
+            )
+            merge_h, merge_w = merge_kernel_size
+            return (h // merge_h) * (w // merge_w)
         else:
             merge_size = getattr(self.image_processor, "merge_size", 2)
             return self.get_num_patches(grid, modality) // (merge_size**2)
@@ -852,7 +891,16 @@ class MMEncoder:
         if modality == Modality.IMAGE and self.image_processor:
             images = await self._flatten_and_load_images(mm_items)
             image_config = self.vision_config.get("image", {})
-            processor_input = self.image_processor(images=images, **image_config)
+            if self.model_type == "kimi_k25":
+                # Kimi K2.5 HF processor expects images wrapped as medias
+                medias = [{"type": "image", "image": img} for img in images]
+                processor_input = self.image_processor(
+                    medias=medias, **image_config
+                )
+            else:
+                processor_input = self.image_processor(
+                    images=images, **image_config
+                )
             feature = processor_input["pixel_values"]
             if hasattr(self.model, "thinker"):  # for omni models
                 get_feature_method = self.model.thinker.get_image_feature
