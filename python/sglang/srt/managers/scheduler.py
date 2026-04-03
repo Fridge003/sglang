@@ -2603,8 +2603,6 @@ class Scheduler(
 
             for req in retracted_reqs:
                 self._add_request_to_queue(req, is_retracted=True)
-                if self.enable_hisparse:
-                    self.hisparse_coordinator.retract_req(req)
         else:
             self.new_token_ratio = max(
                 self.new_token_ratio - self.new_token_ratio_decay,
