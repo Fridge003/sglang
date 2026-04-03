@@ -122,6 +122,44 @@ def generate_markdown_report(
     return summary
 
 
+def generate_simple_markdown_report(
+    results: List[BenchmarkResult], default_gpu_config: str = "MI325"
+) -> str:
+    """Generate a simplified markdown report without traces and cost columns.
+
+    Used by AMD perf tests where Perfetto profiling is not available.
+    Skips the first result if it's a warmup run (duplicate batch_size).
+
+    Args:
+        results: List of BenchmarkResult from a benchmark run.
+        default_gpu_config: Fallback when GPU_CONFIG env is unset
+            (e.g. "MI325", "MI35x", "AMD").
+    """
+    model_header = results[0].model_path
+    if results[0].run_name and results[0].run_name != "default":
+        model_header += f" ({results[0].run_name})"
+
+    gpu_config = os.getenv("GPU_CONFIG", default_gpu_config)
+    if gpu_config:
+        model_header += f" [{gpu_config}]"
+
+    summary = f"### {model_header}\n"
+    summary += "| batch size | input len | latency (s) | input throughput (tok/s) | output throughput (tok/s) | ITL (ms) |\n"
+    summary += "| ---------- | --------- | ----------- | ------------------------ | ------------------------- | -------- |\n"
+
+    report_results = (
+        results[1:]
+        if len(results) > 1 and results[0].batch_size == results[1].batch_size
+        else results
+    )
+
+    for result in report_results:
+        itl = 1 / (result.output_throughput / result.batch_size) * 1000
+        summary += f"| {result.batch_size} | {result.input_len} | {result.latency:.2f} | {result.input_throughput:.2f} | {result.output_throughput:.2f} | {itl:.2f} |\n"
+
+    return summary
+
+
 def save_results_as_pydantic_models(
     results: List,
     pydantic_result_filename: str,
