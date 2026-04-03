@@ -83,6 +83,7 @@ def main():
     os.environ["SGLANG_SKIP_CONSISTENCY"] = (
         "1"  # Skip consistency checks in GT gen mode
     )
+    os.environ["SGLANG_DISABLE_PERF_CHECK"] = "1"
 
     logger.info(f"GT generation mode enabled")
     logger.info(f"Output directory: {out_dir}")
