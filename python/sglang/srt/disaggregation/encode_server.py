@@ -124,7 +124,7 @@ def _convert(data):
 
 
 _mm_grid_attrs = {
-    Modality.IMAGE: ["image_grid_thw", "image_grid_hws"],
+    Modality.IMAGE: ["image_grid_thw", "image_grid_hws", "grid_thws"],
     Modality.VIDEO: ["video_grid_thw"],
     Modality.AUDIO: ["audio_feature_lens_raw"],
 }
