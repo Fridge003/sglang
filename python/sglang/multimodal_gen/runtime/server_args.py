@@ -386,10 +386,14 @@ class ServerArgs:
                 "Warmup enabled, the launch time is expected to be longer than usual"
             )
 
+    _DEFAULT_MASTER_PORT = 30005
+
     def _adjust_network_ports(self):
-        # Resolve master_port default (shared by both strict and non-strict paths)
         if self.master_port is None:
-            self.master_port = 30005 + random.randint(0, 100)
+            if self.strict_ports:
+                self.master_port = self._DEFAULT_MASTER_PORT
+            else:
+                self.master_port = self._DEFAULT_MASTER_PORT + random.randint(0, 100)
 
         if self.strict_ports:
             # Strict mode: fail if port is unavailable
