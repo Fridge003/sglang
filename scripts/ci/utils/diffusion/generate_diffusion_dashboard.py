@@ -529,9 +529,7 @@ def generate_dashboard(
 
     # ---- SGLang Performance Trend (raw data table, at the end) ----
     if history:
-        lines.append(
-            f"\n## SGLang Performance Trend (Last {len(history) + 1} Runs)\n"
-        )
+        lines.append(f"\n## SGLang Performance Trend (Last {len(history) + 1} Runs)\n")
 
         header = "| Date | Commit |"
         sep = "|------|--------|"
@@ -607,14 +605,23 @@ def _find_alert_issue(repo: str) -> tuple[str | None, bool]:
     for state in ("open", "closed"):
         result = subprocess.run(
             [
-                "gh", "issue", "list",
-                "--repo", repo,
-                "--label", ALERT_LABEL,
-                "--state", state,
-                "--json", "number",
-                "--limit", "1",
+                "gh",
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--label",
+                ALERT_LABEL,
+                "--state",
+                state,
+                "--json",
+                "number",
+                "--limit",
+                "1",
             ],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode != 0 or not result.stdout.strip():
             continue
@@ -668,21 +675,34 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
             if not is_open:
                 subprocess.run(
                     [
-                        "gh", "issue", "reopen", existing,
-                        "--repo", repo,
+                        "gh",
+                        "issue",
+                        "reopen",
+                        existing,
+                        "--repo",
+                        repo,
                     ],
-                    capture_output=True, text=True, timeout=30,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
                 print(f"Reopened alert issue #{existing}")
 
             # Add comment
             result = subprocess.run(
                 [
-                    "gh", "issue", "comment", existing,
-                    "--repo", repo,
-                    "--body", body,
+                    "gh",
+                    "issue",
+                    "comment",
+                    existing,
+                    "--repo",
+                    repo,
+                    "--body",
+                    body,
                 ],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if result.returncode == 0:
                 print(f"Commented on alert issue #{existing}")
@@ -694,18 +714,22 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
         else:
             # Create a new issue
             cmd = [
-                "gh", "issue", "create",
-                "--repo", repo,
-                "--title", ALERT_ISSUE_TITLE,
-                "--body", body,
-                "--label", ALERT_LABEL,
+                "gh",
+                "issue",
+                "create",
+                "--repo",
+                repo,
+                "--title",
+                ALERT_ISSUE_TITLE,
+                "--body",
+                body,
+                "--label",
+                ALERT_LABEL,
             ]
             for user in ALERT_ASSIGNEES:
                 cmd += ["--assignee", user]
 
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=30
-            )
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 print(f"Created alert issue: {result.stdout.strip()}")
             else:

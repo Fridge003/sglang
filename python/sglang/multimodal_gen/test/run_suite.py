@@ -28,6 +28,7 @@ _UPDATE_WEIGHTS_MODEL_PAIR_IDS = (
     "Qwen-Image",
 )
 
+
 def _discover_unit_tests() -> list[str]:
     """Auto-discover all test_*.py files in the unit/ directory."""
     unit_dir = Path(__file__).resolve().parent / "unit"
