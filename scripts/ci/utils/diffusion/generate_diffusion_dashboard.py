@@ -593,11 +593,41 @@ ALERT_ASSIGNEES = ["mickqian", "bbuf", "yhyang201"]
 ALERT_LABEL = "perf-regression"
 
 
-def _create_alert_issue(alert_reasons: list[str]) -> None:
-    """Create a GitHub Issue so assignees get a real notification.
+ALERT_ISSUE_TITLE = "[Diffusion CI] Performance regression tracker"
 
-    Uses `gh issue create` (GitHub CLI) which is available in all GitHub
-    Actions runners.  Falls back silently outside CI.
+
+def _find_open_alert_issue(repo: str) -> str | None:
+    """Return the issue number of the open perf-regression tracker, or None."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "gh", "issue", "list",
+            "--repo", repo,
+            "--label", ALERT_LABEL,
+            "--state", "open",
+            "--json", "number,title",
+            "--limit", "1",
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    issues = json.loads(result.stdout)
+    if issues:
+        return str(issues[0]["number"])
+    return None
+
+
+def _create_alert_issue(alert_reasons: list[str]) -> None:
+    """Create or update a single GitHub Issue for perf alerts.
+
+    If an open issue with the perf-regression label already exists, append a
+    comment with the new alert.  Otherwise create a new issue.  This ensures
+    at most one open tracking issue exists at any time.
+
+    Uses `gh` (GitHub CLI) which is available in all GitHub Actions runners.
+    Falls back silently outside CI.
     """
     import subprocess
 
@@ -609,10 +639,9 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
         run_url = f"{server_url}/{repo}/actions/runs/{run_id}"
 
     date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    title = f"[Diffusion CI] Performance alert — {date}"
 
     body_lines = [
-        "## Performance Alert",
+        f"## Performance Alert — {date}",
         "",
         "The nightly diffusion benchmark detected the following issue(s):",
         "",
@@ -621,38 +650,54 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
         body_lines.append(f"- {reason}")
     if run_url:
         body_lines += ["", f"**CI Run:** {run_url}"]
-
     body = "\n".join(body_lines)
 
-    cmd = [
-        "gh",
-        "issue",
-        "create",
-        "--repo",
-        repo,
-        "--title",
-        title,
-        "--body",
-        body,
-        "--label",
-        ALERT_LABEL,
-    ]
-    for user in ALERT_ASSIGNEES:
-        cmd += ["--assignee", user]
-
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        if result.returncode == 0:
-            print(f"Created alert issue: {result.stdout.strip()}")
-        else:
-            print(
-                f"Warning: failed to create alert issue (rc={result.returncode}): "
-                f"{result.stderr.strip()}"
+        existing = _find_open_alert_issue(repo)
+
+        if existing:
+            # Append a comment to the existing issue
+            result = subprocess.run(
+                [
+                    "gh", "issue", "comment", existing,
+                    "--repo", repo,
+                    "--body", body,
+                ],
+                capture_output=True, text=True, timeout=30,
             )
+            if result.returncode == 0:
+                print(f"Commented on existing alert issue #{existing}")
+            else:
+                print(
+                    f"Warning: failed to comment on issue #{existing} "
+                    f"(rc={result.returncode}): {result.stderr.strip()}"
+                )
+        else:
+            # Create a new issue
+            cmd = [
+                "gh", "issue", "create",
+                "--repo", repo,
+                "--title", ALERT_ISSUE_TITLE,
+                "--body", body,
+                "--label", ALERT_LABEL,
+            ]
+            for user in ALERT_ASSIGNEES:
+                cmd += ["--assignee", user]
+
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                print(f"Created alert issue: {result.stdout.strip()}")
+            else:
+                print(
+                    f"Warning: failed to create alert issue "
+                    f"(rc={result.returncode}): {result.stderr.strip()}"
+                )
     except FileNotFoundError:
         print("Warning: `gh` CLI not found — skipping alert issue creation")
     except Exception as e:
-        print(f"Warning: failed to create alert issue: {e}")
+        print(f"Warning: failed to create/update alert issue: {e}")
 
 
 # ---------------------------------------------------------------------------
