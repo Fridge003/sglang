@@ -596,35 +596,43 @@ ALERT_LABEL = "perf-regression"
 ALERT_ISSUE_TITLE = "[Diffusion CI] Performance regression tracker"
 
 
-def _find_open_alert_issue(repo: str) -> str | None:
-    """Return the issue number of the open perf-regression tracker, or None."""
+def _find_alert_issue(repo: str) -> tuple[str | None, bool]:
+    """Find the perf-regression tracker issue (open OR closed).
+
+    Returns (issue_number, is_open).  Prefers an open issue; if none,
+    returns the most recent closed one so it can be reopened.
+    """
     import subprocess
 
-    result = subprocess.run(
-        [
-            "gh", "issue", "list",
-            "--repo", repo,
-            "--label", ALERT_LABEL,
-            "--state", "open",
-            "--json", "number,title",
-            "--limit", "1",
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    issues = json.loads(result.stdout)
-    if issues:
-        return str(issues[0]["number"])
-    return None
+    for state in ("open", "closed"):
+        result = subprocess.run(
+            [
+                "gh", "issue", "list",
+                "--repo", repo,
+                "--label", ALERT_LABEL,
+                "--state", state,
+                "--json", "number",
+                "--limit", "1",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            continue
+        issues = json.loads(result.stdout)
+        if issues:
+            return str(issues[0]["number"]), state == "open"
+    return None, False
 
 
 def _create_alert_issue(alert_reasons: list[str]) -> None:
-    """Create or update a single GitHub Issue for perf alerts.
+    """Create or update the single perf-regression tracker issue.
 
-    If an open issue with the perf-regression label already exists, append a
-    comment with the new alert.  Otherwise create a new issue.  This ensures
-    at most one open tracking issue exists at any time.
+    Logic:
+    - If an open issue exists  → add a comment with the new alert.
+    - If a closed issue exists → reopen it, then add a comment.
+    - If no issue exists       → create one.
+
+    This guarantees at most one tracker issue ever exists.
 
     Uses `gh` (GitHub CLI) which is available in all GitHub Actions runners.
     Falls back silently outside CI.
@@ -653,10 +661,21 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
     body = "\n".join(body_lines)
 
     try:
-        existing = _find_open_alert_issue(repo)
+        existing, is_open = _find_alert_issue(repo)
 
         if existing:
-            # Append a comment to the existing issue
+            # Reopen if closed
+            if not is_open:
+                subprocess.run(
+                    [
+                        "gh", "issue", "reopen", existing,
+                        "--repo", repo,
+                    ],
+                    capture_output=True, text=True, timeout=30,
+                )
+                print(f"Reopened alert issue #{existing}")
+
+            # Add comment
             result = subprocess.run(
                 [
                     "gh", "issue", "comment", existing,
@@ -666,7 +685,7 @@ def _create_alert_issue(alert_reasons: list[str]) -> None:
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0:
-                print(f"Commented on existing alert issue #{existing}")
+                print(f"Commented on alert issue #{existing}")
             else:
                 print(
                     f"Warning: failed to comment on issue #{existing} "
