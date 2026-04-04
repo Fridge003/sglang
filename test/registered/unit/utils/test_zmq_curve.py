@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 
+import msgspec
 import torch
 import zmq
 
@@ -982,54 +983,44 @@ class TestDisaggregationMetadataRoundTrip(CustomTestCase):
 class TestDPBootstrapPayload(CustomTestCase):
     def test_round_trip_with_curve_public_key(self):
         from sglang.srt.managers.data_parallel_controller import (
-            decode_bootstrap_payload,
-            encode_bootstrap_payload,
+            BootstrapPayload,
+            _bootstrap_decoder,
+            _bootstrap_encoder,
         )
 
         worker_ports = [10000, 10001, 10002]
-        frames = encode_bootstrap_payload(worker_ports, b"A" * 40)
-        decoded_ports, decoded_curve_key = decode_bootstrap_payload(
-            frames, expected_ports=len(worker_ports)
-        )
+        payload = BootstrapPayload(worker_ports=worker_ports, curve_public_key="A" * 40)
+        encoded = _bootstrap_encoder.encode(payload)
+        decoded = _bootstrap_decoder.decode(encoded)
 
-        self.assertEqual(decoded_ports, worker_ports)
-        self.assertEqual(decoded_curve_key, b"A" * 40)
+        self.assertEqual(decoded.worker_ports, worker_ports)
+        self.assertEqual(decoded.curve_public_key, "A" * 40)
 
     def test_round_trip_without_curve_public_key(self):
         from sglang.srt.managers.data_parallel_controller import (
-            decode_bootstrap_payload,
-            encode_bootstrap_payload,
+            BootstrapPayload,
+            _bootstrap_decoder,
+            _bootstrap_encoder,
         )
 
-        frames = encode_bootstrap_payload([4321], None)
-        decoded_ports, decoded_curve_key = decode_bootstrap_payload(
-            frames, expected_ports=1
-        )
+        payload = BootstrapPayload(worker_ports=[4321])
+        encoded = _bootstrap_encoder.encode(payload)
+        decoded = _bootstrap_decoder.decode(encoded)
 
-        self.assertEqual(decoded_ports, [4321])
-        self.assertIsNone(decoded_curve_key)
+        self.assertEqual(decoded.worker_ports, [4321])
+        self.assertIsNone(decoded.curve_public_key)
 
-    def test_invalid_magic_raises(self):
-        from sglang.srt.managers.data_parallel_controller import (
-            decode_bootstrap_payload,
-        )
+    def test_invalid_json_raises(self):
+        from sglang.srt.managers.data_parallel_controller import _bootstrap_decoder
 
-        with self.assertRaises(RuntimeError):
-            decode_bootstrap_payload(
-                [b"bad-magic", b"1", b"9999", b""], expected_ports=1
-            )
+        with self.assertRaises(msgspec.ValidationError):
+            _bootstrap_decoder.decode(b"not-json")
 
-    def test_invalid_curve_key_raises(self):
-        from sglang.srt.managers.data_parallel_controller import (
-            BOOTSTRAP_MAGIC,
-            decode_bootstrap_payload,
-        )
+    def test_missing_field_raises(self):
+        from sglang.srt.managers.data_parallel_controller import _bootstrap_decoder
 
-        with self.assertRaises(RuntimeError):
-            decode_bootstrap_payload(
-                [BOOTSTRAP_MAGIC, b"1", b"9999", b"too-short"],
-                expected_ports=1,
-            )
+        with self.assertRaises(msgspec.ValidationError):
+            _bootstrap_decoder.decode(b'{"curve_public_key": "x"}')
 
 
 @unittest.skipUnless(CURVE_AVAILABLE, "libzmq built without CURVE support")
@@ -1040,10 +1031,11 @@ class TestSinglePhaseBootstrap(CustomTestCase):
     """Integration: bootstrap framing distributes public key only."""
 
     def test_public_key_exchange(self):
-        """Server sends public key in validated frames; client stores it."""
+        """Server sends public key via msgspec JSON; client decodes it."""
         from sglang.srt.managers.data_parallel_controller import (
-            decode_bootstrap_payload,
-            encode_bootstrap_payload,
+            BootstrapPayload,
+            _bootstrap_decoder,
+            _bootstrap_encoder,
         )
 
         server_curve = CurveConfig.generate()
@@ -1060,11 +1052,6 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         config_socket(server_socket, zmq.REP)
         port = server_socket.bind_to_random_port("tcp://127.0.0.1")
 
-        payload = {
-            "worker_ports": worker_ports,
-            "curve_public": server_curve.public_key,
-        }
-
         def client_fn():
             try:
                 cctx = zmq.Context()
@@ -1072,12 +1059,10 @@ class TestSinglePhaseBootstrap(CustomTestCase):
                 config_socket(req, zmq.REQ)
                 req.connect(f"tcp://127.0.0.1:{port}")
                 req.send(b"1")
-                received_ports, received_curve_public = decode_bootstrap_payload(
-                    req.recv_multipart(), expected_ports=len(worker_ports)
-                )
+                msg = _bootstrap_decoder.decode(req.recv())
                 req.close()
-                results["worker_ports"] = received_ports
-                results["curve_public"] = received_curve_public
+                results["worker_ports"] = msg.worker_ports
+                results["curve_public_key"] = msg.curve_public_key
                 cctx.term()
             except Exception as e:
                 error_box[0] = e
@@ -1086,9 +1071,11 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         t.start()
 
         server_socket.recv()
-        server_socket.send_multipart(
-            encode_bootstrap_payload(payload["worker_ports"], payload["curve_public"])
+        payload = BootstrapPayload(
+            worker_ports=worker_ports,
+            curve_public_key=server_curve.public_key.decode("ascii"),
         )
+        server_socket.send(_bootstrap_encoder.encode(payload))
         server_socket.close()
 
         t.join(timeout=10)
@@ -1096,7 +1083,9 @@ class TestSinglePhaseBootstrap(CustomTestCase):
         _restore_curve_state(saved)
 
         self.assertIsNone(error_box[0], f"Client thread failed: {error_box[0]}")
-        self.assertEqual(results["curve_public"], server_curve.public_key)
+        self.assertEqual(
+            results["curve_public_key"], server_curve.public_key.decode("ascii")
+        )
         self.assertEqual(results["worker_ports"], worker_ports)
 
     def test_server_public_key_env_propagation(self):

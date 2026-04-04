@@ -20,8 +20,9 @@ import signal
 import threading
 import time
 from enum import Enum, auto
-from typing import Callable, List, Optional, Tuple, cast
+from typing import Callable, List, Optional, cast
 
+import msgspec
 import psutil
 import setproctitle
 import zmq
@@ -68,78 +69,16 @@ from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
 logger = logging.getLogger(__name__)
 
-BOOTSTRAP_MAGIC = b"SGLANG_DP_BOOTSTRAP_V1"
+
+class BootstrapPayload(msgspec.Struct):
+    """Wire format for the DP-attention multi-node bootstrap handshake."""
+
+    worker_ports: List[int]
+    curve_public_key: Optional[str] = None
 
 
-def _parse_ascii_int(
-    frame: bytes, *, field_name: str, min_value: int = 0, max_value: int = 2**31 - 1
-) -> int:
-    try:
-        value = int(frame.decode("ascii"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise RuntimeError(f"Invalid {field_name}: {frame!r}") from exc
-
-    if not (min_value <= value <= max_value):
-        raise RuntimeError(
-            f"{field_name} out of range [{min_value}, {max_value}]: {value}"
-        )
-    return value
-
-
-def _validate_curve_public_key(curve_public: bytes) -> bytes:
-    if not curve_public:
-        return b""
-    try:
-        curve_public.decode("ascii")
-    except UnicodeDecodeError as exc:
-        raise RuntimeError("Invalid bootstrap CurveZMQ public key encoding") from exc
-    if len(curve_public) != 40:
-        raise RuntimeError(
-            f"Invalid bootstrap CurveZMQ public key length: {len(curve_public)}"
-        )
-    return curve_public
-
-
-def encode_bootstrap_payload(
-    worker_ports: List[int], curve_public: Optional[bytes] = None
-) -> List[bytes]:
-    frames = [
-        BOOTSTRAP_MAGIC,
-        str(len(worker_ports)).encode("ascii"),
-        *[str(port).encode("ascii") for port in worker_ports],
-        curve_public or b"",
-    ]
-    return frames
-
-
-def decode_bootstrap_payload(
-    frames: List[bytes], *, expected_ports: Optional[int] = None
-) -> Tuple[List[int], Optional[bytes]]:
-    if len(frames) < 3:
-        raise RuntimeError("Incomplete bootstrap payload")
-    if frames[0] != BOOTSTRAP_MAGIC:
-        raise RuntimeError(f"Invalid bootstrap magic: {frames[0]!r}")
-
-    port_count = _parse_ascii_int(
-        frames[1], field_name="bootstrap worker port count", max_value=4096
-    )
-    if expected_ports is not None and port_count != expected_ports:
-        raise RuntimeError(
-            f"Bootstrap worker port count mismatch: expected {expected_ports}, "
-            f"received {port_count}"
-        )
-    if len(frames) != port_count + 3:
-        raise RuntimeError(
-            f"Invalid bootstrap frame count: expected {port_count + 3}, "
-            f"received {len(frames)}"
-        )
-
-    worker_ports = [
-        _parse_ascii_int(frame, field_name="bootstrap worker port", max_value=65535)
-        for frame in frames[2 : 2 + port_count]
-    ]
-    curve_public = _validate_curve_public_key(frames[-1])
-    return worker_ports, curve_public or None
+_bootstrap_encoder = msgspec.json.Encoder()
+_bootstrap_decoder = msgspec.json.Decoder(BootstrapPayload)
 
 
 class LoadBalanceMethod(Enum):
@@ -426,17 +365,15 @@ class DataParallelController:
             get_zmq_socket(self.context, zmq.REP, endpoint, True, curve=CURVE_DISABLED),
         )
         try:
+            payload = BootstrapPayload(
+                worker_ports=worker_ports,
+                curve_public_key=curve_public.decode("ascii") if curve_public else None,
+            )
+            encoded = _bootstrap_encoder.encode(payload)
             for _ in range(expected_clients):
-                client_rank = _parse_ascii_int(
-                    socket.recv(),
-                    field_name="bootstrap client rank",
-                    min_value=1,
-                    max_value=max(expected_clients, 1),
-                )
+                client_rank = int(socket.recv())
                 logger.debug("Bootstrap handshake from node %s", client_rank)
-                socket.send_multipart(
-                    encode_bootstrap_payload(worker_ports, curve_public)
-                )
+                socket.send(encoded)
         finally:
             socket.close()
 
@@ -468,9 +405,12 @@ class DataParallelController:
 
         try:
             socket.send(str(node_rank).encode())
-            worker_ports, curve_public = decode_bootstrap_payload(
-                socket.recv_multipart(), expected_ports=self.server_args.dp_size
-            )
+            msg = _bootstrap_decoder.decode(socket.recv())
+            if len(msg.worker_ports) != self.server_args.dp_size:
+                raise RuntimeError(
+                    f"Bootstrap worker port count mismatch: expected "
+                    f"{self.server_args.dp_size}, received {len(msg.worker_ports)}"
+                )
         except zmq.Again:
             logger.error("Timeout waiting for bootstrap handshake from node 0")
             raise RuntimeError(
@@ -479,12 +419,12 @@ class DataParallelController:
         finally:
             socket.close()
 
-        if curve_public is not None:
-            set_server_public_key(curve_public)
+        if msg.curve_public_key is not None:
+            set_server_public_key(msg.curve_public_key.encode("ascii"))
             logger.info("Stored node 0's CurveZMQ public key (per-node keypair model)")
 
-        logger.debug("Received %d worker ports from node 0", len(worker_ports))
-        return worker_ports
+        logger.debug("Received %d worker ports from node 0", len(msg.worker_ports))
+        return msg.worker_ports
 
     def launch_dp_attention_schedulers(
         self, server_args: ServerArgs, port_args: PortArgs
