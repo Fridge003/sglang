@@ -388,6 +388,15 @@ class ServerArgs:
 
     _DEFAULT_MASTER_PORT = 30005
 
+    @staticmethod
+    def _require_port(port: int, name: str) -> None:
+        """Raise if *port* is occupied (used under ``--strict-ports``)."""
+        if not is_port_available(port):
+            raise RuntimeError(
+                f"{name} port {port} is unavailable and --strict-ports is enabled. "
+                f"Either use a different port or disable --strict-ports."
+            )
+
     def _adjust_network_ports(self):
         if self.master_port is None:
             if self.strict_ports:
@@ -396,22 +405,9 @@ class ServerArgs:
                 self.master_port = self._DEFAULT_MASTER_PORT + random.randint(0, 100)
 
         if self.strict_ports:
-            # Strict mode: fail if port is unavailable
-            if not is_port_available(self.port):
-                raise RuntimeError(
-                    f"Port {self.port} is unavailable and --strict-ports is enabled. "
-                    f"Either use a different port or remove --strict-ports to allow auto-selection."
-                )
-            if not is_port_available(self.scheduler_port):
-                raise RuntimeError(
-                    f"Scheduler port {self.scheduler_port} is unavailable and --strict-ports is enabled. "
-                    f"Either use a different port or remove --strict-ports to allow auto-selection."
-                )
-            if not is_port_available(self.master_port):
-                raise RuntimeError(
-                    f"Master port {self.master_port} is unavailable and --strict-ports is enabled. "
-                    f"Either use a different port or remove --strict-ports to allow auto-selection."
-                )
+            self._require_port(self.port, "HTTP")
+            self._require_port(self.scheduler_port, "Scheduler")
+            self._require_port(self.master_port, "Master")
         else:
             self.port = self.settle_port(self.port)
             initial_scheduler_port = self.scheduler_port + (
