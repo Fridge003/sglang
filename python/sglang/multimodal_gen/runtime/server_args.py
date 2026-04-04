@@ -387,6 +387,10 @@ class ServerArgs:
             )
 
     def _adjust_network_ports(self):
+        # Resolve master_port default (shared by both strict and non-strict paths)
+        if self.master_port is None:
+            self.master_port = 30005 + random.randint(0, 100)
+
         if self.strict_ports:
             # Strict mode: fail if port is unavailable
             if not is_port_available(self.port):
@@ -410,12 +414,7 @@ class ServerArgs:
                 random.randint(0, 100) if self.scheduler_port == 5555 else 0
             )
             self.scheduler_port = self.settle_port(initial_scheduler_port)
-            initial_master_port = (
-                self.master_port
-                if self.master_port is not None
-                else (30005 + random.randint(0, 100))
-            )
-            self.master_port = self.settle_port(initial_master_port, 37)
+            self.master_port = self.settle_port(self.master_port, 37)
 
     def _adjust_parallelism(self):
         if self.tp_size is None:
