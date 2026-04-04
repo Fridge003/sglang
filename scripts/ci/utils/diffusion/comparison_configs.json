@@ -119,6 +119,23 @@
             }
         },
         {
+            "id": "ltx2_twostage_t2v",
+            "model": "Lightricks/LTX-2",
+            "task": "text-to-video",
+            "prompt": "A cat and a dog baking a cake together in a kitchen.",
+            "width": 768,
+            "height": 512,
+            "num_frames": 121,
+            "seed": 42,
+            "num_gpus": 2,
+            "frameworks": {
+                "sglang": {
+                    "serve_args": "--warmup --dit-layerwise-offload --pipeline-class-name LTX2TwoStagePipeline",
+                    "extra_env": {}
+                }
+            }
+        },
+        {
             "id": "wan22_i2v_a14b_720p",
             "model": "Wan-AI/Wan2.2-I2V-A14B-Diffusers",
             "task": "image-to-video",
