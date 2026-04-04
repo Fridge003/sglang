@@ -1541,7 +1541,10 @@ class TestKVArgsRegisterInfoFromZmq(CustomTestCase):
             b"128",  # dst_kv_item_len
             b"",  # dst_state_item_lens
             b"",  # dst_state_dim_per_tensor
+            b"0",  # enable_hisparse
             curve_key.encode("ascii"),  # curve_public_key
+            b"",  # staging_base_ptr (none)
+            b"",  # staging_total_size (none)
         ]
         info = KVArgsRegisterInfo.from_zmq(msg)
         self.assertEqual(info.room, "None")
@@ -1910,6 +1913,12 @@ class TestExpertBackupClientPeerKeys(CustomTestCase):
 
         mock_world_group = MagicMock()
 
+        # ExpertBackupClient.__init__ starts _receive_loop on a thread; mocked
+        # recv_pyobj() returns MagicMock and breaks max(int, response.buffer_size).
+        # This test only checks connect_with_curve args, so skip starting threads.
+        def _thread_start_noop(self, *args, **kwargs):
+            return None
+
         with patch(
             "sglang.srt.elastic_ep.expert_backup_client.get_local_ip_auto",
             return_value=local_ip,
@@ -1928,7 +1937,9 @@ class TestExpertBackupClientPeerKeys(CustomTestCase):
             "sglang.srt.elastic_ep.expert_backup_client.connect_with_curve"
         ) as mock_connect, patch(
             "zmq.Context"
-        ) as mock_ctx_cls:
+        ) as mock_ctx_cls, patch.object(
+            threading.Thread, "start", _thread_start_noop
+        ):
             mock_ctx = MagicMock()
             mock_ctx_cls.return_value = mock_ctx
             mock_socket = MagicMock()

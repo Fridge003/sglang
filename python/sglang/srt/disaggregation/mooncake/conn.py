@@ -141,7 +141,7 @@ class KVArgsRegisterInfo:
     # HiSparse: decode host pool stores KV at token granularity
     enable_hisparse: bool = False
     curve_public_key: Optional[str] = None
-    # Staging must remain last (optional multi-field payload).
+    # Staging is last on the wire and in this dataclass (multi-field tail).
     staging: Optional[StagingRegisterInfo] = None
 
     @classmethod
@@ -154,19 +154,10 @@ class KVArgsRegisterInfo:
           [7] dst_tp_rank, [8] dst_attn_tp_size, [9] dst_kv_item_len,
           [10] dst_state_item_lens, [11] dst_state_dim_per_tensor,
 
-        Optional tail (two layouts):
-
-        Current (HiSparse + staging + CurveZMQ):
+        Optional tail (fixed order; staging must be last):
           [12] enable_hisparse (ascii '0' or '1'),
-          [13] staging_base_ptr, [14] staging_total_size,
-          [15] curve_public_key (optional)
-
-        Legacy with staging (no HiSparse flag):
-          [12] staging_base_ptr, [13] staging_total_size,
-          [14] curve_public_key (optional)
-
-        Legacy without staging:
-          [12] curve_public_key (optional)
+          [13] curve_public_key (optional, empty if none),
+          [14] staging_base_ptr, [15] staging_total_size
         """
         dst_state_item_lens = (
             list(struct.unpack(f"{len(msg[10])//4}I", msg[10]))
@@ -185,18 +176,15 @@ class KVArgsRegisterInfo:
 
         if len(msg) > 12:
             m12 = msg[12]
-            if len(m12) == 1 and m12 in (b"0", b"1"):
-                enable_hisparse = m12 == b"1"
-                staging = StagingRegisterInfo.from_zmq_fields(msg, 13)
-                if len(msg) > 15 and msg[15]:
-                    curve_key = msg[15].decode("ascii")
-            else:
-                staging = StagingRegisterInfo.from_zmq_fields(msg, 12)
-                if len(msg) > 14 and msg[14]:
-                    curve_key = msg[14].decode("ascii")
-                elif staging is None and msg[12]:
-                    # Pre-staging payloads: curve directly after dst_state_dim_per_tensor.
-                    curve_key = msg[12].decode("ascii")
+            if len(m12) != 1 or m12 not in (b"0", b"1"):
+                raise RuntimeError(
+                    "Invalid KVArgsRegisterInfo message: index [12] must be "
+                    "ascii '0' or '1' (enable_hisparse)."
+                )
+            enable_hisparse = m12 == b"1"
+            if len(msg) > 13 and msg[13]:
+                curve_key = msg[13].decode("ascii")
+            staging = StagingRegisterInfo.from_zmq_fields(msg, 14)
 
         return cls(
             room=str(msg[0].decode("ascii")),
@@ -1893,9 +1881,9 @@ class MooncakeKVReceiver(CommonKVReceiver):
                         packed_state_item_lens,
                         packed_state_dim_per_tensor,
                         enable_hisparse,
+                        curve_pub,
                         packed_staging_base_ptr,
                         staging_total_size_str,
-                        curve_pub,
                     ]
                 )
 
