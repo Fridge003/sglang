@@ -399,7 +399,7 @@ class ServerArgs:
                     f"Scheduler port {self.scheduler_port} is unavailable and --strict-ports is enabled. "
                     f"Either use a different port or remove --strict-ports to allow auto-selection."
                 )
-            if self.master_port is not None and not is_port_available(self.master_port):
+            if not is_port_available(self.master_port):
                 raise RuntimeError(
                     f"Master port {self.master_port} is unavailable and --strict-ports is enabled. "
                     f"Either use a different port or remove --strict-ports to allow auto-selection."
