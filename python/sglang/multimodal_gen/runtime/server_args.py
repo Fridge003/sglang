@@ -188,8 +188,7 @@ class ServerArgs:
     )
 
     # Master port for distributed inference
-    # TODO: do not hard code
-    master_port: int | None = None
+    master_port: int = 30005
 
     # http server endpoint config
     host: str | None = "127.0.0.1"
@@ -386,8 +385,6 @@ class ServerArgs:
                 "Warmup enabled, the launch time is expected to be longer than usual"
             )
 
-    _DEFAULT_MASTER_PORT = 30005
-
     @staticmethod
     def _require_port(port: int, name: str) -> None:
         """Raise if *port* is occupied (used under ``--strict-ports``)."""
@@ -398,12 +395,6 @@ class ServerArgs:
             )
 
     def _adjust_network_ports(self):
-        if self.master_port is None:
-            if self.strict_ports:
-                self.master_port = self._DEFAULT_MASTER_PORT
-            else:
-                self.master_port = self._DEFAULT_MASTER_PORT + random.randint(0, 100)
-
         if self.strict_ports:
             self._require_port(self.port, "HTTP")
             self._require_port(self.scheduler_port, "Scheduler")
