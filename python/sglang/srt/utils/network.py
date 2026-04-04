@@ -11,7 +11,6 @@ from typing import Optional, Tuple, Union
 
 import psutil
 import zmq
-import zmq.auth
 
 from sglang.srt.environ import envs
 
@@ -38,6 +37,8 @@ class CurveConfig:
 
     @classmethod
     def from_keys_dir(cls, keys_dir: str) -> CurveConfig:
+        import zmq.auth
+
         secret_file = os.path.join(keys_dir, "cluster.key_secret")
         public_key, secret_key = zmq.auth.load_certificate(secret_file)
         return cls(public_key=public_key, secret_key=secret_key)
