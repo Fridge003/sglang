@@ -2201,6 +2201,8 @@ class Scheduler(
                 else:
                     self.running_batch.merge_batch(new_batch)
                 self.running_batch.hisparse_coordinator = self.hisparse_coordinator
+            # Reset batch_is_full so the scheduler can schedule more prefills.
+            self.running_batch.batch_is_full = False
 
         if (
             not self.enable_hisparse
