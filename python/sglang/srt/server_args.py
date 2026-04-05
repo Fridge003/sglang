@@ -3242,6 +3242,11 @@ class ServerArgs:
     def _handle_pd_disaggregation(self):
         if self.disaggregation_mode == "decode":
             if self.disaggregation_decode_enable_radix_cache:
+                if self.enable_hisparse:
+                    raise ValueError(
+                        "--disaggregation-decode-enable-radix-cache is incompatible "
+                        "with --enable-hisparse"
+                    )
                 if self.disaggregation_transfer_backend != "nixl":
                     raise ValueError(
                         "--disaggregation-decode-enable-radix-cache currently "
@@ -5785,7 +5790,7 @@ class ServerArgs:
         parser.add_argument(
             "--disaggregation-decode-enable-radix-cache",
             action="store_true",
-            help="Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Currently requires --disaggregation-transfer-backend nixl.",
+            help="Enable radix cache on decode server (PD mode). Caches KV prefixes to avoid redundant transfers. Requires --disaggregation-transfer-backend nixl and is incompatible with --enable-hisparse.",
         )
         parser.add_argument(
             "--disaggregation-decode-enable-offload-kvcache",
