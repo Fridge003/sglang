@@ -52,7 +52,6 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import BasePrefixCache
@@ -1299,84 +1298,7 @@ class SchedulerDisaggregationDecodeMixin:
 
         # construct fake completed prefill
         new_batch.prepare_for_prebuilt()
-
-        # Assign the buffered last input id to schedule batch (inlined from process_prebuilt)
-        new_batch.output_ids = []
-        for req in new_batch.reqs:
-            new_batch.output_ids.append(req.output_ids[-1])
-            new_batch.tree_cache.cache_unfinished_req(req)
-            if req.grammar is not None:
-                # FIXME: this try-except block is for handling unexpected xgrammar issue.
-                try:
-                    # if it is not None, then the grammar is from a retracted request, and we should not
-                    # accept the token as it's already accepted
-                    if req.grammar.current_token is None:
-                        req.grammar.accept_token(req.output_ids[-1])
-                except ValueError as e:
-                    # Grammar accept_token can raise ValueError if the token is not in the grammar.
-                    # This can happen if the grammar is not set correctly or the token is invalid.
-                    # Use to_finish (not finished_reason) so that process_batch_result_prebuilt
-                    # handles the release via check_finished -> release_kv_cache in one place.
-                    error_message = f"Grammar accept_token failed for req {req.rid} with token {req.output_ids[-1]}: {e}"
-                    req.to_finish = FINISH_ABORT(
-                        error_message, HTTPStatus.INTERNAL_SERVER_ERROR
-                    )
-                req.grammar.finished = req.finished()
-        new_batch.output_ids = torch.tensor(
-            new_batch.output_ids, device=new_batch.device
-        )
-
-        # Simulate the eagle run.
-        if new_batch.spec_algorithm.is_eagle():
-            num_states = self.server_args.speculative_eagle_topk
-            if self.server_args.enable_multi_layer_eagle:
-                num_states *= self.server_args.speculative_num_steps
-            topk_p = torch.stack(
-                [
-                    torch.as_tensor(
-                        req.output_topk_p[:num_states],
-                        device=new_batch.device,
-                        dtype=torch.float32,
-                    )
-                    for req in new_batch.reqs
-                ],
-                dim=0,
-            )
-            topk_index = torch.stack(
-                [
-                    torch.as_tensor(
-                        req.output_topk_index[:num_states],
-                        device=new_batch.device,
-                        dtype=torch.int64,
-                    )
-                    for req in new_batch.reqs
-                ],
-                dim=0,
-            )
-
-            hidden_states_list = [req.hidden_states_tensor for req in new_batch.reqs]
-            hidden_states = torch.stack(hidden_states_list, dim=0).to(new_batch.device)
-
-            # local import to avoid circular import
-            from sglang.srt.speculative.eagle_info import EagleDraftInput
-
-            spec_info = EagleDraftInput(
-                topk_p=topk_p,
-                topk_index=topk_index,
-                hidden_states=hidden_states,
-                verified_id=new_batch.output_ids,
-                new_seq_lens=new_batch.seq_lens,
-            )
-            spec_info.prepare_for_extend(new_batch)
-            spec_info.capture_hidden_mode = CaptureHiddenMode.LAST
-            if new_batch.enable_overlap:
-                spec_info.future_indices = self.future_map.alloc_future_indices(
-                    len(new_batch.seq_lens)
-                )
-                self.future_map.store_to_map_for_new_batch(
-                    spec_info.future_indices, spec_info
-                )
-            new_batch.spec_info = spec_info
+        new_batch.process_prebuilt(self.server_args, self.future_map)
 
         return new_batch
 
