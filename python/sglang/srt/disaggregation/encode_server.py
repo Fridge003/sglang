@@ -892,10 +892,16 @@ class MMEncoder:
             images = await self._flatten_and_load_images(mm_items)
             image_config = self.vision_config.get("image", {})
             if self.model_type == "kimi_k25":
-                # Kimi K2.5 HF processor expects images wrapped as medias
+                # Kimi K2.5 HF processor (AutoProcessor) expects images wrapped
+                # as medias dicts and requires text + return_tensors to produce
+                # the correct output (pixel_values + grid_thws).
                 medias = [{"type": "image", "image": img} for img in images]
                 processor_input = self.image_processor(
-                    medias=medias, **image_config
+                    text=[""],
+                    medias=medias,
+                    padding=True,
+                    return_tensors="pt",
+                    **image_config,
                 )
             else:
                 processor_input = self.image_processor(
