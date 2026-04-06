@@ -755,6 +755,9 @@ class ServerArgs:
         # Validate SSL arguments early (before dummy-model short-circuit).
         self._handle_ssl_validation()
 
+        # Validate PD disaggregation flags early (before dummy-model short-circuit).
+        self._handle_pd_disaggregation()
+
         if self.model_path.lower() in ["none", "dummy"]:
             # Skip for dummy models
             return
@@ -822,9 +825,6 @@ class ServerArgs:
 
         # Handle model loading format.
         self._handle_load_format()
-
-        # Handle PD disaggregation.
-        self._handle_pd_disaggregation()
 
         # Handle Encoder disaggregation.
         self._handle_encoder_disaggregation()
