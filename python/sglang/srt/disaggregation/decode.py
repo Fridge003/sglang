@@ -981,7 +981,18 @@ class DecodePreallocQueue:
             num_to_evict = (
                 required_alloc_tokens - self.token_to_kv_pool_allocator.available_size()
             )
-            self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+            result = self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+            if self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens:
+                logger.warning(
+                    f"Eviction insufficient: needed {required_alloc_tokens} tokens, "
+                    f"available {self.token_to_kv_pool_allocator.available_size()} "
+                    f"after evicting {result.num_tokens_evicted}/{num_to_evict} tokens. "
+                    f"evictable_size={self.tree_cache.evictable_size()}, "
+                    f"protected_size={self.tree_cache.protected_size()}, "
+                    f"fill_len={fill_len}, prefix_len={prefix_len}, delta_len={delta_len}, "
+                    f"page_size={self.token_to_kv_pool_allocator.page_size}, "
+                    f"req={req.rid}"
+                )
 
         if self.scheduler.enable_hisparse:
             # Direct-to-host path: only allocate logical indices (no hisparse
@@ -1034,9 +1045,16 @@ class DecodePreallocQueue:
                 extend_num_tokens=delta_len,
             )
 
-        assert (
-            kv_loc is not None
-        ), "KV cache is full! There is a bug in memory estimation."
+        assert kv_loc is not None, (
+            f"KV cache is full! Bug in memory estimation. "
+            f"available={self.token_to_kv_pool_allocator.available_size()}, "
+            f"evictable={self.tree_cache.evictable_size()}, "
+            f"protected={self.tree_cache.protected_size()}, "
+            f"required_alloc={required_alloc_tokens}, delta={delta_len}, "
+            f"fill={fill_len}, prefix={prefix_len}, "
+            f"page_size={self.token_to_kv_pool_allocator.page_size}, "
+            f"req={req.rid}"
+        )
 
         self.req_to_token_pool.write(
             (req.req_pool_idx, slice(prefix_len, prefix_len + len(kv_loc))), kv_loc
