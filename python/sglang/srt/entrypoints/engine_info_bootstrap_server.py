@@ -14,7 +14,7 @@
 
 import logging
 import threading
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
@@ -31,7 +31,9 @@ class EngineInfoBootstrapServer:
     accesses the collected info directly in-process; external consumers can
     query via HTTP GET.
 
-    Currently supports transfer engine memory registration info.
+    Supports:
+    - Transfer engine memory registration info (for remote instance weight loading).
+    - Encoder URL registration (for dynamic encoder discovery in EPD mode).
     """
 
     def __init__(self, host: str, port: int):
@@ -40,6 +42,8 @@ class EngineInfoBootstrapServer:
 
         # Storage: {tp_rank: (session_id, weights_info_dict)}
         self.transfer_engine_info: Dict[int, Tuple] = {}
+        # Storage: ordered list of registered encoder URLs
+        self.encoder_urls: List[str] = []
         self.lock = threading.Lock()
 
         app = FastAPI()
@@ -87,6 +91,45 @@ class EngineInfoBootstrapServer:
 
             return {"rank": rank, "remote_instance_transfer_engine_info": list(info)}
 
+        @app.post("/register_encoder_url")
+        def register_encoder_url(data: dict):
+            try:
+                url = data["url"]
+                if not url:
+                    raise ValueError("url must be a non-empty string")
+
+                with self.lock:
+                    if url not in self.encoder_urls:
+                        self.encoder_urls.append(url)
+                        logger.info(f"Registered encoder URL: {url}")
+                    else:
+                        logger.debug(f"Encoder URL already registered: {url}")
+
+                return PlainTextResponse("OK")
+            except Exception as e:
+                logger.error(f"Failed to register encoder URL: {e}")
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @app.delete("/unregister_encoder_url")
+        def unregister_encoder_url(data: dict):
+            try:
+                url = data["url"]
+                with self.lock:
+                    if url in self.encoder_urls:
+                        self.encoder_urls.remove(url)
+                        logger.info(f"Unregistered encoder URL: {url}")
+
+                return PlainTextResponse("OK")
+            except Exception as e:
+                logger.error(f"Failed to unregister encoder URL: {e}")
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @app.get("/list_encoder_urls")
+        def list_encoder_urls():
+            with self.lock:
+                urls = list(self.encoder_urls)
+            return {"encoder_urls": urls}
+
         config = uvicorn.Config(app, host=host, port=port, log_level="warning")
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(
@@ -103,3 +146,8 @@ class EngineInfoBootstrapServer:
     def get_transfer_engine_info(self, rank: int) -> Optional[Tuple]:
         """Direct in-process access for co-located HTTP server (no HTTP round-trip)."""
         return self.transfer_engine_info.get(rank)
+
+    def get_encoder_urls(self) -> List[str]:
+        """Direct in-process access to the registered encoder URLs."""
+        with self.lock:
+            return list(self.encoder_urls)

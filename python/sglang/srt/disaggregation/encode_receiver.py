@@ -607,7 +607,8 @@ class MMReceiverBase(ABC):
     ):
         self.context = zmq.asyncio.Context(20)
         self.encoder_transfer_backend = server_args.encoder_transfer_backend
-        self.encode_urls = server_args.encoder_urls
+        self.encode_urls = list(server_args.encoder_urls)
+        self.encoder_bootstrap_url = server_args.encoder_bootstrap_url
         self.host = get_local_ip_auto(server_args.host)
         if self.encoder_transfer_backend == "mooncake":
             self.dtype = dtype
@@ -684,11 +685,42 @@ class MMReceiverBase(ABC):
     def process_waiting_requests(self, recv_reqs):
         pass
 
+    def _refresh_encoder_urls_from_bootstrap(self):
+        """Fetch encoder URLs from the bootstrap server and update the local list.
+
+        Called when no static encoder URLs are configured but a bootstrap URL is
+        provided. This allows encoders to register themselves dynamically.
+        """
+        import requests as http_requests
+
+        try:
+            resp = http_requests.get(
+                f"{self.encoder_bootstrap_url}/list_encoder_urls", timeout=5
+            )
+            if resp.status_code == 200:
+                urls = resp.json().get("encoder_urls", [])
+                if urls:
+                    self.encode_urls = urls
+                    logger.info(
+                        f"Fetched {len(urls)} encoder URLs from bootstrap: {urls}"
+                    )
+                else:
+                    logger.debug("Bootstrap server has no encoder URLs registered yet")
+            else:
+                logger.warning(
+                    f"Failed to fetch encoder URLs from bootstrap: {resp.status_code}"
+                )
+        except Exception as e:
+            logger.warning(f"Failed to fetch encoder URLs from bootstrap: {e}")
+
     async def recv_mm_data(
         self, request_obj, mm_processor, prompt, need_wait_for_mm_inputs=True
     ):
         req_id = None
         try:
+            # Refresh encoder URLs from bootstrap if using dynamic discovery.
+            if not self.encode_urls and self.encoder_bootstrap_url:
+                self._refresh_encoder_urls_from_bootstrap()
             if len(self.encode_urls) == 0 or not need_wait_for_mm_inputs:
                 return None
             req_id = uuid.uuid4().hex
