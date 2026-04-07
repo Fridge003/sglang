@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams
@@ -545,10 +546,21 @@ class DecodePreallocQueue:
     def _update_handshake_waiters(
         self, rids_to_check: Optional[List[str]] = None
     ) -> None:
-        if not self.queue:
-            return
+        need_poll = len(self.queue) > 0 and not all(
+            decode_req.waiting_for_input for decode_req in self.queue
+        )
+        # All TPs must agree on whether to poll and on queue size, otherwise
+        # poll_and_all_reduce (which sizes its tensor by queue length) hangs.
+        if dist.get_world_size(self.gloo_group) > 1:
+            n = len(self.queue)
+            local = torch.tensor(
+                [int(need_poll), n, -n], dtype=torch.int64, device="cpu"
+            )
+            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
+            if local[0].item() == 0 or local[1].item() != -local[2].item():
+                return
 
-        if all(decode_req.waiting_for_input for decode_req in self.queue):
+        if not need_poll:
             return
 
         polls = poll_and_all_reduce(
@@ -981,7 +993,18 @@ class DecodePreallocQueue:
             num_to_evict = (
                 required_alloc_tokens - self.token_to_kv_pool_allocator.available_size()
             )
-            self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+            result = self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+            if self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens:
+                logger.warning(
+                    f"Eviction insufficient: needed {required_alloc_tokens} tokens, "
+                    f"available {self.token_to_kv_pool_allocator.available_size()} "
+                    f"after evicting {result.num_tokens_evicted}/{num_to_evict} tokens. "
+                    f"evictable_size={self.tree_cache.evictable_size()}, "
+                    f"protected_size={self.tree_cache.protected_size()}, "
+                    f"fill_len={fill_len}, prefix_len={prefix_len}, delta_len={delta_len}, "
+                    f"page_size={self.token_to_kv_pool_allocator.page_size}, "
+                    f"req={req.rid}"
+                )
 
         if self.scheduler.enable_hisparse:
             # Direct-to-host path: only allocate logical indices (no hisparse
@@ -1034,9 +1057,16 @@ class DecodePreallocQueue:
                 extend_num_tokens=delta_len,
             )
 
-        assert (
-            kv_loc is not None
-        ), "KV cache is full! There is a bug in memory estimation."
+        assert kv_loc is not None, (
+            f"KV cache is full! Bug in memory estimation. "
+            f"available={self.token_to_kv_pool_allocator.available_size()}, "
+            f"evictable={self.tree_cache.evictable_size()}, "
+            f"protected={self.tree_cache.protected_size()}, "
+            f"required_alloc={required_alloc_tokens}, delta={delta_len}, "
+            f"fill={fill_len}, prefix={prefix_len}, "
+            f"page_size={self.token_to_kv_pool_allocator.page_size}, "
+            f"req={req.rid}"
+        )
 
         self.req_to_token_pool.write(
             (req.req_pool_idx, slice(prefix_len, prefix_len + len(kv_loc))), kv_loc
@@ -1194,7 +1224,18 @@ class DecodeTransferQueue:
         kv_manager._staging_handler = self.staging_handler
 
     def pop_transferred(self, rids_to_check: Optional[List[str]] = None) -> List[Req]:
-        if not self.queue:
+        # All TPs must agree on queue size before poll_and_all_reduce.
+        # _resolve_pending_reqs does independent HTTP calls per TP, so queue
+        # sizes can transiently diverge; a mismatched all_reduce corrupts gloo.
+        if dist.get_world_size(self.gloo_group) > 1:
+            n = len(self.queue)
+            local = torch.tensor([n, -n], dtype=torch.int64, device="cpu")
+            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
+            if local[0].item() != -local[1].item():
+                return []
+            if local[0].item() == 0:
+                return []
+        elif not self.queue:
             return []
 
         if self.enable_staging:
