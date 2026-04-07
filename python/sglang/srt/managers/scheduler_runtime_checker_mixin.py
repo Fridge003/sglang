@@ -368,6 +368,8 @@ class SchedulerRuntimeCheckerMixin:
             if len(self.disagg_prefill_inflight_queue) > 0:
                 return
         elif self.disaggregation_mode == DisaggregationMode.DECODE:
+            if len(self.running_batch.reqs) > 0:
+                return
             queue_size = (
                 len(self.waiting_queue)
                 + len(self.disagg_decode_transfer_queue.queue)
