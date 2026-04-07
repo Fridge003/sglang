@@ -915,6 +915,13 @@ class MMReceiverBase(ABC):
                 isinstance(recv_req, TokenizedGenerateReqInput)
                 and recv_req.need_wait_for_mm_inputs is True
             ):
+                # The scheduler subprocess has its own MMReceiverHTTP instance whose
+                # encode_urls may still be empty even after the tokenizer-manager's
+                # instance fetched them from the bootstrap server (they run in separate
+                # processes and do not share memory). Refresh here so that the
+                # WaitingImageRequest gets the correct encoder URLs.
+                if not self.encode_urls and self.encoder_bootstrap_url:
+                    self._refresh_encoder_urls_from_bootstrap()
                 waiting_req = waiting_cls(
                     rid=recv_req.rid,
                     recv_req=recv_req,
