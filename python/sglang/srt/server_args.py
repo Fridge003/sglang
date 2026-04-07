@@ -709,6 +709,7 @@ class ServerArgs:
     language_only: bool = False
     encoder_transfer_backend: str = ENCODER_TRANSFER_BACKEND_CHOICES[0]
     encoder_urls: List[str] = dataclasses.field(default_factory=list)
+    encoder_bootstrap_port: Optional[int] = None
     encoder_bootstrap_url: Optional[str] = None
     encoder_register_url: Optional[str] = None
     enable_adaptive_dispatch_to_encoder: bool = False
@@ -3309,10 +3310,12 @@ class ServerArgs:
             self.language_only
             and len(self.encoder_urls) == 0
             and not self.encoder_bootstrap_url
+            and not self.encoder_bootstrap_port
         ):
             raise ValueError(
                 "requires at least one encoder urls to be set via --encoder-urls, "
-                "or a bootstrap URL via --encoder-bootstrap-url"
+                "or a bootstrap URL via --encoder-bootstrap-url, "
+                "or start a local bootstrap server via --encoder-bootstrap-port"
             )
 
         # Validate IB devices when mooncake backend is used
@@ -5864,17 +5867,25 @@ class ServerArgs:
             help="List of encoder server urls.",
         )
         parser.add_argument(
+            "--encoder-bootstrap-port",
+            type=int,
+            default=ServerArgs.encoder_bootstrap_port,
+            help="Port to start the encoder bootstrap server on (language-only/prefill side). "
+            "When set, a dedicated EncoderBootstrapServer is started to allow encoders to "
+            "register dynamically. Encoders use --encoder-register-url to register with it.",
+        )
+        parser.add_argument(
             "--encoder-bootstrap-url",
             type=str,
             default=ServerArgs.encoder_bootstrap_url,
-            help="URL of the bootstrap server to discover encoder URLs dynamically. "
+            help="URL of the encoder bootstrap server to discover encoder URLs dynamically. "
             "When set, --encoder-urls is optional for --language-only mode.",
         )
         parser.add_argument(
             "--encoder-register-url",
             type=str,
             default=ServerArgs.encoder_register_url,
-            help="Bootstrap server URL to register this encoder's URL with, "
+            help="Encoder bootstrap server URL to register this encoder's URL with, "
             "for dynamic encoder discovery. Used with --encoder-only servers.",
         )
         parser.add_argument(

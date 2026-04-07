@@ -2071,6 +2071,31 @@ def _setup_and_run_http_server(
 
     Called by launch_server after subprocesses have been launched.
     """
+    # Start the encoder bootstrap server if configured (language-only/prefill side).
+    if server_args.language_only and server_args.encoder_bootstrap_port:
+        from sglang.srt.disaggregation.encoder_bootstrap_server import (
+            EncoderBootstrapServer,
+        )
+        from sglang.srt.utils.network import is_port_available
+
+        bootstrap_port = server_args.encoder_bootstrap_port
+        if not is_port_available(bootstrap_port):
+            raise RuntimeError(
+                f"encoder_bootstrap_port {bootstrap_port} is already in use. "
+                f"Choose a different --encoder-bootstrap-port."
+            )
+        _global_encoder_bootstrap_server = EncoderBootstrapServer(
+            host=server_args.host, port=bootstrap_port
+        )
+        # If no explicit encoder_bootstrap_url is set, point to the local server.
+        if not server_args.encoder_bootstrap_url:
+            server_args.encoder_bootstrap_url = server_args.url(
+                port=bootstrap_port
+            )
+        logger.info(
+            f"EncoderBootstrapServer started; reachable at {server_args.encoder_bootstrap_url}"
+        )
+
     # Set global states
     set_global_state(
         _GlobalState(
