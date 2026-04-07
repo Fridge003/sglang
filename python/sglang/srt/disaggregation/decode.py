@@ -965,6 +965,9 @@ class DecodePreallocQueue:
                 (req.req_pool_idx, slice(0, prefix_len)), prefix_indices
             )
 
+        # TODO(retraction): when retraction is implemented with radix cache
+        # awareness, a retracted request should re-match the tree here
+        # instead of re-allocating from scratch. See resume_retracted_reqs.
         delta_len = fill_len - prefix_len
         required_alloc_tokens = self._required_alloc_tokens(
             fill_len=fill_len, prefix_len=prefix_len
