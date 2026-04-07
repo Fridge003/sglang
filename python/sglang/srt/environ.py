@@ -406,6 +406,9 @@ class Envs:
     # sgl-kernel
     SGLANG_SKIP_SGL_KERNEL_VERSION_CHECK = EnvBool(False)
 
+    # Flash Attention
+    SGLANG_USE_SGL_FA3_KERNEL = EnvBool(True)
+
     # vLLM dependencies (TODO: they have been deprecated, we can remove them safely)
     USE_VLLM_CUTLASS_W8A8_FP8_KERNEL = EnvBool(False)
 
@@ -489,6 +492,9 @@ class Envs:
     # HTTP Server
     SGLANG_TIMEOUT_KEEP_ALIVE = EnvInt(5)
 
+    # HTTP/2 Server
+    SGLANG_GRANIAN_PARENT_PID = EnvInt(None)
+
     # Health Check
     SGLANG_ENABLE_HEALTH_ENDPOINT_GENERATION = EnvBool(True)
 
@@ -537,6 +543,9 @@ class Envs:
     SGLANG_ZMQ_CURVE_SECRET_KEY = EnvStr("")
     SGLANG_NO_ZMQ_CURVE = EnvBool(False)
     SGLANG_ZMQ_SERVER_PUBLIC_KEY = EnvStr("")
+
+    # Sglang Cache Dir
+    SGLANG_CACHE_DIR = EnvStr(os.path.expanduser("~/.cache/sglang"))
 
 
 envs = Envs()
