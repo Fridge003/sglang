@@ -110,7 +110,7 @@ find_latest_image() {
   esac
 
   # First, check local cache
-  for days_back in {0..6}; do
+  for days_back in {0..9}; do
     image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
     local local_image="rocm/sgl-dev:${image_tag}"
     image_id=$(docker images -q "${local_image}")
@@ -122,7 +122,7 @@ find_latest_image() {
   done
 
   # If not found locally, fall back to pulling from public registry
-  for days_back in {0..6}; do
+  for days_back in {0..9}; do
     image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
     echo "Checking for image: rocm/sgl-dev:${image_tag}" >&2
     if docker manifest inspect "rocm/sgl-dev:${image_tag}" >/dev/null 2>&1; then
@@ -134,7 +134,7 @@ find_latest_image() {
 
   # If still not found, try finding any image matching ROCm+arch+suffix from remote registry
   echo "Exact version not found. Searching remote registry for any ${ROCM_VERSION}-${gpu_arch}-${IMAGE_SUFFIX} image…" >&2
-  for days_back in {0..6}; do
+  for days_back in {0..9}; do
     local target_date=$(date -d "${days_back} days ago" +%Y%m%d)
     local remote_tags=$(curl -s "https://registry.hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&name=${ROCM_VERSION}-${gpu_arch}-${IMAGE_SUFFIX}-${target_date}" 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | head -n 1)
     if [[ -n "$remote_tags" ]]; then
@@ -153,7 +153,7 @@ find_latest_image() {
       return 0
   fi
 
-  echo "Error: no ${gpu_arch} image found in the last 7 days for base ${base_tag}" >&2
+  echo "Error: no ${gpu_arch} image found in the last 10 days for base ${base_tag}" >&2
   echo "Using hard-coded fallback for ${ROCM_VERSION}…" >&2
   case "${ROCM_VERSION}" in
     rocm720)
