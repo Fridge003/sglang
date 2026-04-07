@@ -861,6 +861,9 @@ class MMReceiverBase(ABC):
         mm_data = self._extract_url_data(obj)
         if obj.rid is None:
             obj.rid = uuid.uuid4().hex
+        # Try to fetch encoder URLs from bootstrap if none are available yet.
+        if mm_data and not self.encode_urls and self.encoder_bootstrap_url:
+            self._refresh_encoder_urls_from_bootstrap()
         if mm_data and self.encode_urls:
             logger.info(f"Processing {len(mm_data)} mm items for request {obj.rid}")
             obj.need_wait_for_mm_inputs = True
@@ -881,6 +884,11 @@ class MMReceiverBase(ABC):
                 daemon=True,
             )
             encode_thread.start()
+        else:
+            # No encoder URLs available (bootstrap may not have any registered yet);
+            # reset the flag so the scheduler does not wait for embeddings that will
+            # never arrive.
+            obj.need_wait_for_mm_inputs = False
 
     # For zmq_to_scheduler
     def _process_waiting_requests(self, recv_reqs, waiting_cls):
