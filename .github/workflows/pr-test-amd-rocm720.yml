@@ -100,6 +100,11 @@ on:
         required: false
         type: boolean
         default: true
+      target_stage:
+        description: 'Comma-separated stage/job names to run (empty = all)'
+        required: false
+        type: string
+        default: ''
 
 env:
   AITER_COMMIT_OVERRIDE: ${{ inputs.aiter_ref }}
