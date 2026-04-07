@@ -3252,6 +3252,12 @@ class ServerArgs:
                         "--disaggregation-decode-enable-radix-cache currently "
                         "requires --disaggregation-transfer-backend nixl"
                     )
+                if self.speculative_algorithm is not None:
+                    raise ValueError(
+                        "--disaggregation-decode-enable-radix-cache is incompatible "
+                        "with speculative decoding "
+                        f"(--speculative-algorithm {self.speculative_algorithm})"
+                    )
                 if self.enable_dp_attention:
                     logger.warning(
                         "EXPERIMENTAL: Decode radix cache with DP attention. "
