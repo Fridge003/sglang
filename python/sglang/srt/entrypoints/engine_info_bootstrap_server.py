@@ -94,9 +94,9 @@ class EngineInfoBootstrapServer:
         @app.post("/register_encoder_url")
         def register_encoder_url(data: dict):
             try:
-                url = data["url"]
+                url = data.get("url")
                 if not url:
-                    raise ValueError("url must be a non-empty string")
+                    raise ValueError("Missing or empty 'url' field in request body")
 
                 with self.lock:
                     if url not in self.encoder_urls:

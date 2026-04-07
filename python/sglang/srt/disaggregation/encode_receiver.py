@@ -609,6 +609,9 @@ class MMReceiverBase(ABC):
         self.encoder_transfer_backend = server_args.encoder_transfer_backend
         self.encode_urls = list(server_args.encoder_urls)
         self.encoder_bootstrap_url = server_args.encoder_bootstrap_url
+        # Timestamp of last bootstrap refresh; used to rate-limit requests.
+        self._last_bootstrap_refresh: float = 0.0
+        self._bootstrap_refresh_interval: float = 5.0
         self.host = get_local_ip_auto(server_args.host)
         if self.encoder_transfer_backend == "mooncake":
             self.dtype = dtype
@@ -690,8 +693,17 @@ class MMReceiverBase(ABC):
 
         Called when no static encoder URLs are configured but a bootstrap URL is
         provided. This allows encoders to register themselves dynamically.
+        Rate-limited to avoid repeatedly hitting the bootstrap server when no
+        encoders are registered yet.
         """
+        import time
+
         import requests as http_requests
+
+        now = time.monotonic()
+        if now - self._last_bootstrap_refresh < self._bootstrap_refresh_interval:
+            return
+        self._last_bootstrap_refresh = now
 
         try:
             resp = http_requests.get(

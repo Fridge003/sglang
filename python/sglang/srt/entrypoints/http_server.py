@@ -1108,13 +1108,26 @@ async def list_encoder_urls():
         )
         if resp.status_code == 200:
             return resp.json()
+        logger.warning(
+            f"Bootstrap server returned non-200 status {resp.status_code} "
+            f"when listing encoder URLs"
+        )
+        return ORJSONResponse(
+            {
+                "error": {
+                    "message": f"Bootstrap server returned status {resp.status_code}"
+                }
+            },
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
     except (requests.exceptions.RequestException, ValueError) as e:
-        logger.warning(f"Failed to list encoder URLs from bootstrap: {e}")
-
-    return ORJSONResponse(
-        {"error": {"message": "Failed to list encoder URLs from bootstrap"}},
-        status_code=HTTPStatus.BAD_REQUEST,
-    )
+        logger.warning(
+            f"Failed to connect to bootstrap server to list encoder URLs: {e}"
+        )
+        return ORJSONResponse(
+            {"error": {"message": f"Failed to connect to bootstrap server: {e}"}},
+            status_code=HTTPStatus.BAD_REQUEST,
+        )
 
 
 @app.post("/init_weights_update_group")
