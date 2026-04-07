@@ -691,10 +691,10 @@ class MMReceiverBase(ABC):
     def _refresh_encoder_urls_from_bootstrap(self):
         """Fetch encoder URLs from the bootstrap server and update the local list.
 
-        Called when no static encoder URLs are configured but a bootstrap URL is
-        provided. This allows encoders to register themselves dynamically.
-        Rate-limited to avoid repeatedly hitting the bootstrap server when no
-        encoders are registered yet.
+        Called on every request when a bootstrap URL is configured, so that
+        dynamically registered or deregistered encoders are reflected immediately.
+        Rate-limited to at most one HTTP call per ``_bootstrap_refresh_interval``
+        seconds to avoid hammering the bootstrap server.
         """
         import time
 
@@ -711,8 +711,10 @@ class MMReceiverBase(ABC):
             )
             if resp.status_code == 200:
                 urls = resp.json().get("encoder_urls", [])
+                # Always overwrite the cached list so that newly registered
+                # encoders are picked up and departed encoders are evicted.
+                self.encode_urls = urls
                 if urls:
-                    self.encode_urls = urls
                     logger.info(
                         f"Fetched {len(urls)} encoder URLs from bootstrap: {urls}"
                     )
@@ -734,7 +736,7 @@ class MMReceiverBase(ABC):
         req_id = None
         try:
             # Refresh encoder URLs from bootstrap if using dynamic discovery.
-            if not self.encode_urls and self.encoder_bootstrap_url:
+            if self.encoder_bootstrap_url:
                 self._refresh_encoder_urls_from_bootstrap()
             if len(self.encode_urls) == 0 or not need_wait_for_mm_inputs:
                 return None
@@ -864,12 +866,15 @@ class MMReceiverBase(ABC):
         mm_data = self._extract_url_data(obj)
         if obj.rid is None:
             obj.rid = uuid.uuid4().hex
-        # Try to fetch encoder URLs from bootstrap if none are available yet.
-        if mm_data and not self.encode_urls and self.encoder_bootstrap_url:
-            logger.info(
-                f"No encoder URLs available; querying bootstrap at "
-                f"{self.encoder_bootstrap_url} for request {obj.rid}"
-            )
+        # Refresh encoder URLs from bootstrap on every request when dynamic
+        # discovery is configured, so newly registered or departed encoders
+        # are reflected without a server restart.
+        if mm_data and self.encoder_bootstrap_url:
+            if not self.encode_urls:
+                logger.info(
+                    f"No encoder URLs available; querying bootstrap at "
+                    f"{self.encoder_bootstrap_url} for request {obj.rid}"
+                )
             self._refresh_encoder_urls_from_bootstrap()
         if mm_data and self.encode_urls:
             logger.info(
@@ -915,12 +920,11 @@ class MMReceiverBase(ABC):
                 isinstance(recv_req, TokenizedGenerateReqInput)
                 and recv_req.need_wait_for_mm_inputs is True
             ):
-                # The scheduler subprocess has its own MMReceiverHTTP instance whose
-                # encode_urls may still be empty even after the tokenizer-manager's
-                # instance fetched them from the bootstrap server (they run in separate
-                # processes and do not share memory). Refresh here so that the
-                # WaitingImageRequest gets the correct encoder URLs.
-                if not self.encode_urls and self.encoder_bootstrap_url:
+                # The scheduler subprocess has its own MMReceiverHTTP instance.
+                # Always refresh from the bootstrap server (subject to rate
+                # limiting) so that newly registered or departed encoders are
+                # reflected without a server restart.
+                if self.encoder_bootstrap_url:
                     self._refresh_encoder_urls_from_bootstrap()
                 waiting_req = waiting_cls(
                     rid=recv_req.rid,
