@@ -3318,6 +3318,16 @@ class ServerArgs:
                 "or start a local bootstrap server via --encoder-bootstrap-port"
             )
 
+        # Eagerly compute encoder_bootstrap_url from encoder_bootstrap_port so that
+        # sub-processes (e.g. the scheduler) inherit the correct URL in their copy
+        # of server_args.  This must happen before any subprocess is spawned.
+        if (
+            self.language_only
+            and self.encoder_bootstrap_port
+            and not self.encoder_bootstrap_url
+        ):
+            self.encoder_bootstrap_url = self.url(port=self.encoder_bootstrap_port)
+
         # Validate IB devices when mooncake backend is used
         if (
             self.disaggregation_transfer_backend == "mooncake"

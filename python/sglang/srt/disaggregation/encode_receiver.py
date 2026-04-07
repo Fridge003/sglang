@@ -717,7 +717,10 @@ class MMReceiverBase(ABC):
                         f"Fetched {len(urls)} encoder URLs from bootstrap: {urls}"
                     )
                 else:
-                    logger.debug("Bootstrap server has no encoder URLs registered yet")
+                    logger.info(
+                        "Bootstrap server returned no encoder URLs yet; "
+                        "will retry on next request"
+                    )
             else:
                 logger.warning(
                     f"Failed to fetch encoder URLs from bootstrap: {resp.status_code}"
@@ -863,9 +866,16 @@ class MMReceiverBase(ABC):
             obj.rid = uuid.uuid4().hex
         # Try to fetch encoder URLs from bootstrap if none are available yet.
         if mm_data and not self.encode_urls and self.encoder_bootstrap_url:
+            logger.info(
+                f"No encoder URLs available; querying bootstrap at "
+                f"{self.encoder_bootstrap_url} for request {obj.rid}"
+            )
             self._refresh_encoder_urls_from_bootstrap()
         if mm_data and self.encode_urls:
-            logger.info(f"Processing {len(mm_data)} mm items for request {obj.rid}")
+            logger.info(
+                f"Dispatching {len(mm_data)} mm items to {len(self.encode_urls)} "
+                f"encoder(s) {self.encode_urls} for request {obj.rid}"
+            )
             obj.need_wait_for_mm_inputs = True
 
             num_items_assigned = self._assign_items_by_modality(
@@ -887,7 +897,14 @@ class MMReceiverBase(ABC):
         else:
             # No encoder URLs available (bootstrap may not have any registered yet);
             # reset the flag so the scheduler does not wait for embeddings that will
-            # never arrive.
+            # never arrive.  A warning is emitted so the user can diagnose why
+            # disaggregation is not happening for this request.
+            if mm_data:
+                logger.warning(
+                    f"No encoder URLs available for request {obj.rid} "
+                    f"(bootstrap_url={self.encoder_bootstrap_url}); "
+                    "processing without encoder disaggregation."
+                )
             obj.need_wait_for_mm_inputs = False
 
     # For zmq_to_scheduler
