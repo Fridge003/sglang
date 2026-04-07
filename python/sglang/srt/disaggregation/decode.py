@@ -715,18 +715,17 @@ class DecodePreallocQueue:
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
                 break
 
-            # Match prefix against decode's radix cache
-            if not self.scheduler.server_args.disable_radix_cache:
-                prefix_indices, prefix_len = self._match_prefix_and_lock(decode_req.req)
-                # Align prefix_len down to page boundary so both prefill and
-                # decode agree on the page-aligned split point for KV transfer.
-                page_size = self.token_to_kv_pool_allocator.page_size
-                if page_size > 1 and prefix_len % page_size != 0:
-                    aligned_len = (prefix_len // page_size) * page_size
-                    prefix_indices = prefix_indices[:aligned_len]
-                    prefix_len = aligned_len
-            else:
-                prefix_indices, prefix_len = None, 0
+            # Match prefix against decode's radix cache.
+            # When radix cache is disabled (ChunkCache), this returns
+            # prefix_len=0 and lock/unlock are no-ops.
+            prefix_indices, prefix_len = self._match_prefix_and_lock(decode_req.req)
+            # Align prefix_len down to page boundary so both prefill and
+            # decode agree on the page-aligned split point for KV transfer.
+            page_size = self.token_to_kv_pool_allocator.page_size
+            if page_size > 1 and prefix_len % page_size != 0:
+                aligned_len = (prefix_len // page_size) * page_size
+                prefix_indices = prefix_indices[:aligned_len]
+                prefix_len = aligned_len
 
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
