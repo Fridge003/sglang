@@ -16,7 +16,7 @@
 
 import logging
 import threading
-from typing import List, Optional
+from typing import List
 
 import uvicorn
 from fastapi import FastAPI, HTTPException

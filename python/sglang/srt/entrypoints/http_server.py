@@ -2089,9 +2089,7 @@ def _setup_and_run_http_server(
         )
         # If no explicit encoder_bootstrap_url is set, point to the local server.
         if not server_args.encoder_bootstrap_url:
-            server_args.encoder_bootstrap_url = server_args.url(
-                port=bootstrap_port
-            )
+            server_args.encoder_bootstrap_url = server_args.url(port=bootstrap_port)
         logger.info(
             f"EncoderBootstrapServer started; reachable at {server_args.encoder_bootstrap_url}"
         )
