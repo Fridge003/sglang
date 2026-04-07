@@ -431,18 +431,28 @@ def _make_state(buffer_text: bool = False) -> ReqState:
 class TestReqStateTextBuffering(unittest.TestCase):
     """Test ReqState.append_text / get_text in both buffering modes."""
 
-    def test_streaming_mode_concatenates_directly(self):
+    def test_streaming_mode_collects_chunks_lazily(self):
         state = _make_state(buffer_text=False)
         state.append_text("hello ")
         state.append_text("world")
+        self.assertEqual(state.text, "")
+        self.assertEqual(state.text_chunks, ["hello ", "world"])
         self.assertEqual(state.get_text(), "hello world")
         self.assertEqual(state.text_chunks, [])
+
+    def test_get_text_preserves_materialized_prefix(self):
+        state = _make_state(buffer_text=False)
+        state.append_text("hello ")
+        self.assertEqual(state.get_text(), "hello ")
+        state.append_text("world")
+        self.assertEqual(state.get_text(), "hello world")
 
     def test_buffer_mode_collects_chunks(self):
         state = _make_state(buffer_text=True)
         state.append_text("hello ")
         state.append_text("world")
         self.assertEqual(state.text, "")
+        self.assertEqual(state.text_chunks, ["hello ", "world"])
         self.assertEqual(state.get_text(), "hello world")
 
 

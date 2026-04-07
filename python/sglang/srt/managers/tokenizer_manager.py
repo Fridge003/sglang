@@ -147,22 +147,21 @@ class ReqState:
 
     # For streaming output
     last_output_offset: int = 0
-    last_text_offset: int = 0
 
-    # Buffer non-streaming text until the final response.
+    # Accumulate text lazily so incremental streaming can emit the incoming
+    # delta directly without rebuilding the full output prefix.
     buffer_text: bool = False
     text: str = ""
     text_chunks: List[str] = dataclasses.field(default_factory=list)
 
     def append_text(self, chunk: str):
-        if self.buffer_text:
+        if chunk:
             self.text_chunks.append(chunk)
-        else:
-            self.text += chunk
 
     def get_text(self) -> str:
-        if self.buffer_text:
-            return "".join(self.text_chunks)
+        if self.text_chunks:
+            self.text += "".join(self.text_chunks)
+            self.text_chunks.clear()
         return self.text
 
     def get_crash_dump_output(self) -> Dict[Any, Any]:
@@ -1717,18 +1716,18 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 incremental = (
                     self.server_args.incremental_streaming_output and is_stream
                 )
+                delta_text = recv_obj.output_strs[i]
+                delta_output_ids = recv_obj.output_ids[i]
                 output_offset = state.last_output_offset
-                state.append_text(recv_obj.output_strs[i])
-                state.output_ids.extend(recv_obj.output_ids[i])
+                state.append_text(delta_text)
+                state.output_ids.extend(delta_output_ids)
 
                 if is_stream:
                     if incremental:
-                        output_token_ids = state.output_ids[output_offset:]
+                        output_token_ids = delta_output_ids
                         _slice_streaming_output_meta_info(meta_info, output_offset)
                         state.last_output_offset = len(state.output_ids)
-                        text = state.get_text()
-                        output_text = text[state.last_text_offset :]
-                        state.last_text_offset = len(text)
+                        output_text = delta_text
                     else:
                         output_token_ids = state.output_ids.copy()
                         output_text = state.get_text()
@@ -1750,12 +1749,13 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
                 incremental = (
                     self.server_args.incremental_streaming_output and is_stream
                 )
+                delta_output_ids = recv_obj.output_ids[i]
                 output_offset = state.last_output_offset
-                state.output_ids.extend(recv_obj.output_ids[i])
+                state.output_ids.extend(delta_output_ids)
 
                 if is_stream:
                     if incremental:
-                        output_token_ids = state.output_ids[output_offset:]
+                        output_token_ids = delta_output_ids
                         _slice_streaming_output_meta_info(meta_info, output_offset)
                         state.last_output_offset = len(state.output_ids)
                     else:
