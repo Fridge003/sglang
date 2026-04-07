@@ -786,7 +786,6 @@ class SchedulerDisaggregationPrefillMixin:
             .cpu()
             .numpy()
         )
-        req.start_send_idx = end_idx
         state_indices = None
         if last_chunk:
             self.disagg_metadata_buffers.set_buf(req)
@@ -843,3 +842,4 @@ class SchedulerDisaggregationPrefillMixin:
             if self.transfer_backend != TransferBackend.NIXL:
                 return
         req.disagg_kv_sender.send(page_indices, state_indices)
+        req.start_send_idx = end_idx
