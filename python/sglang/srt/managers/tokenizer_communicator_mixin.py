@@ -721,9 +721,7 @@ class TokenizerCommunicatorMixin:
                 is_paused = self.is_pause
 
             lock_context = (
-                self.model_update_lock.writer_lock
-                if not is_paused
-                else nullcontext()
+                self.model_update_lock.writer_lock if not is_paused else nullcontext()
             )
             async with lock_context:
                 result = (await self.update_weights_from_ipc_communicator(obj))[0]
