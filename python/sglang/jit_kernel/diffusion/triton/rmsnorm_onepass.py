@@ -2,6 +2,8 @@ import torch
 import triton  # type: ignore
 import triton.language as tl  # type: ignore
 
+from sglang.kernel_api_logging import debug_kernel_api
+from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.srt.utils.custom_op import register_custom_op
 
 
@@ -67,9 +69,9 @@ def triton_one_pass_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
     return _triton_one_pass_rms_norm_cuda(x, w, eps)
 
 
-from sglang.multimodal_gen.runtime.platforms import current_platform
-
 if current_platform.is_mps():
     from .mps_fallback import triton_one_pass_rms_norm_native
 
-    triton_one_pass_rms_norm = triton_one_pass_rms_norm_native
+    @debug_kernel_api
+    def triton_one_pass_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6):
+        return triton_one_pass_rms_norm_native(x, w, eps)

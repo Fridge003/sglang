@@ -20,6 +20,7 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
 )
 from sglang.multimodal_gen.runtime.layers.attention.backends.attention_backend import (
     AttentionImpl,
+    wrap_attention_impl_forward,
 )
 from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.usp import (
@@ -73,6 +74,7 @@ class UlyssesAttention(nn.Module):
             prefix=f"{prefix}.impl",
             **extra_impl_args,
         )
+        wrap_attention_impl_forward(self.attn_impl)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -252,6 +254,7 @@ class LocalAttention(nn.Module):
             causal=causal,
             **extra_impl_args,
         )
+        wrap_attention_impl_forward(self.attn_impl)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
@@ -263,6 +266,7 @@ class LocalAttention(nn.Module):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        attn_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Apply local attention between query, key and value tensors.
@@ -280,6 +284,35 @@ class LocalAttention(nn.Module):
 
         forward_context: ForwardContext = get_forward_context()
         ctx_attn_metadata = forward_context.attn_metadata
+
+        if attn_mask is not None:
+            q_ = q.transpose(1, 2)
+            k_ = k.transpose(1, 2)
+            v_ = v.transpose(1, 2)
+
+            if torch.is_floating_point(attn_mask):
+                mask = attn_mask.to(dtype=q_.dtype, device=q_.device)
+                if mask.dim() == 2:
+                    mask = mask[:, None, None, :]
+                elif mask.dim() == 3:
+                    mask = mask[:, None, :, :]
+            else:
+                mask = attn_mask.to(dtype=q_.dtype, device=q_.device)
+                if mask.dim() == 2:
+                    mask = mask[:, None, None, :]
+                elif mask.dim() == 3:
+                    mask = mask[:, None, :, :]
+                mask = (mask - 1.0) * torch.finfo(q_.dtype).max
+
+            return torch.nn.functional.scaled_dot_product_attention(
+                q_,
+                k_,
+                v_,
+                attn_mask=mask,
+                dropout_p=0.0,
+                is_causal=False,
+                scale=self.softmax_scale,
+            ).transpose(1, 2)
 
         output = self.attn_impl.forward(q, k, v, attn_metadata=ctx_attn_metadata)
         return output
@@ -328,6 +361,17 @@ class USPAttention(nn.Module):
         attn_backend = get_attn_backend(
             head_size, dtype, supported_attention_backends=supported_attention_backends
         )
+        if get_ring_parallel_world_size() > 1:
+            backend_enum = attn_backend.get_enum()
+            if backend_enum not in (
+                AttentionBackendEnum.FA,
+                AttentionBackendEnum.SAGE_ATTN,
+            ):
+                raise RuntimeError(
+                    f"Ring Attention is only supported for FlashAttention or SageAttention backends, "
+                    f"but got {backend_enum.name}. "
+                    f"Please ensure your platform supports these backends."
+                )
         impl_cls: Type["AttentionImpl"] = attn_backend.get_impl_cls()
         self.attn_impl = impl_cls(
             num_heads=num_heads,
@@ -338,6 +382,7 @@ class USPAttention(nn.Module):
             prefix=f"{prefix}.impl",
             **extra_impl_args,
         )
+        wrap_attention_impl_forward(self.attn_impl)
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
