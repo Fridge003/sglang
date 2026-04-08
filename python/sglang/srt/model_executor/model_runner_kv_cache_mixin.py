@@ -868,51 +868,6 @@ class ModelRunnerKVCacheMixin:
 
         self._init_pools()
 
-    def _apply_ck_int32_cap(
-        self: ModelRunner,
-        token_capacity: int,
-        full_tokens: Optional[int],
-        swa_tokens: Optional[int],
-    ) -> tuple:
-        """Cap KV pool sizes so CK batch prefill int32 offsets don't overflow.
-
-        The CK kernel always receives a 3D KV tensor [tokens, heads, dim],
-        inferring page_block_size=1 regardless of ServerArgs.page_size.
-        With kPageBlockSize=1 < kN0(128), int32 offsets are used, limiting
-        per-layer KV cache to ~4 GB.
-        """
-        kv_heads = self.model_config.get_num_kv_heads(get_attention_tp_size())
-        max_dim = max(self.model_config.head_dim, self.model_config.v_head_dim)
-        stride = kv_heads * max_dim
-        if stride <= 0:
-            return token_capacity, full_tokens, swa_tokens
-
-        cap = (2**31 - 1) // stride
-
-        if token_capacity > cap:
-            logging.warning(
-                f"Capping max_total_tokens from {token_capacity} to {cap} "
-                f"to avoid CK batch prefill int32 overflow "
-                f"(stride={stride}, limit=INT32_MAX)."
-            )
-            token_capacity = cap
-
-        if full_tokens is not None and full_tokens > cap:
-            logging.warning(
-                f"Capping full_max_total_tokens from {full_tokens} to {cap} "
-                f"to avoid CK batch prefill int32 overflow."
-            )
-            full_tokens = cap
-
-        if swa_tokens is not None and swa_tokens > cap:
-            logging.warning(
-                f"Capping swa_max_total_tokens from {swa_tokens} to {cap} "
-                f"to avoid CK batch prefill int32 overflow."
-            )
-            swa_tokens = cap
-
-        return token_capacity, full_tokens, swa_tokens
-
     def _resolve_memory_pool_config(
         self: ModelRunner, pre_model_load_memory: int
     ) -> MemoryPoolConfig:
@@ -925,11 +880,6 @@ class ModelRunnerKVCacheMixin:
         if self.is_hybrid_swa:
             token_capacity, full_tokens, swa_tokens = self._resolve_hybrid_swa_tokens(
                 token_capacity
-            )
-
-        if self.server_args.attention_backend == "aiter":
-            token_capacity, full_tokens, swa_tokens = self._apply_ck_int32_cap(
-                token_capacity, full_tokens, swa_tokens
             )
 
         return MemoryPoolConfig(
