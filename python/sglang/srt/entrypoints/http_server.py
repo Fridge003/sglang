@@ -355,6 +355,9 @@ async def lifespan(fast_api_app: FastAPI):
             _global_state.tokenizer_manager,
         )
         logger.info("Warmup ended")
+        # Flush garbage KV inserted by fake-bootstrap warmup requests.
+        if server_args.disaggregation_mode != "null":
+            await _global_state.tokenizer_manager.flush_cache()
 
     # Execute the general warmup
     warmup_thread = threading.Thread(
@@ -1890,6 +1893,24 @@ def _execute_server_warmup(server_args: ServerArgs):
                 logger.info(
                     f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
                 )
+                # Warmup with fake bootstrap produces garbage KV that must
+                # not persist in the radix cache.  Flush before serving real
+                # traffic so no future request matches stale/corrupted data.
+                try:
+                    flush_res = requests.post(
+                        url + "/flush_cache",
+                        headers=headers,
+                        timeout=30,
+                        verify=ssl_verify,
+                    )
+                    if flush_res.status_code == 200:
+                        logger.info("Flushed cache after disagg warmup")
+                    else:
+                        logger.warning(
+                            f"Post-warmup cache flush failed: {flush_res.status_code}"
+                        )
+                except Exception as e:
+                    logger.warning(f"Post-warmup cache flush request failed: {e}")
                 _global_state.tokenizer_manager.server_status = ServerStatus.Up
             else:
                 logger.info(
