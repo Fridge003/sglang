@@ -11,7 +11,6 @@ import dataclasses
 import json
 import logging
 import threading
-import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -29,9 +28,7 @@ class MockRequest:
         self.headers = headers or {}
         self.url = type("URL", (), {"path": "/grpc"})()
         self.state = type("State", (), {})()
-        self.app = type(
-            "App", (), {"state": type("AppState", (), {})()}
-        )()
+        self.app = type("App", (), {"state": type("AppState", (), {})()})()
 
     async def is_disconnected(self) -> bool:
         return False
@@ -100,9 +97,7 @@ class RuntimeHandle:
         from sglang.srt.entrypoints.openai.serving_score import OpenAIServingScore
 
         self._openai_serving_classes = {
-            "chat": OpenAIServingChat(
-                self.tokenizer_manager, self.template_manager
-            ),
+            "chat": OpenAIServingChat(self.tokenizer_manager, self.template_manager),
             "completion": OpenAIServingCompletion(
                 self.tokenizer_manager, self.template_manager
             ),
@@ -120,59 +115,45 @@ class RuntimeHandle:
         return self._openai_serving_classes
 
     # ------------------------------------------------------------------
-    # Generation (text or tokenized)
+    # Consolidated request submission (generate / embed / classify)
     # ------------------------------------------------------------------
 
-    def submit_generate(
-        self,
-        *,
-        rid: str,
-        chunk_callback,
-        text: Optional[str] = None,
-        input_ids=None,
-        sampling_params_json: str = "{}",
-        stream: bool = False,
-        return_logprob: bool = False,
-        top_logprobs_num: int = 0,
-        logprob_start_len: int = -1,
-        return_text_in_logprobs: bool = False,
-        lora_path: Optional[str] = None,
-        routing_key: Optional[str] = None,
-        routed_dp_rank: Optional[int] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
-    ):
-        """Submit a generate request (text or tokenized) to TokenizerManager."""
-        from sglang.srt.managers.io_struct import GenerateReqInput
+    def submit_request(self, *, req_type: str, req_dict: dict, chunk_callback):
+        """Submit a generate or embed request from a pre-built dict.
 
-        sampling_params = json.loads(sampling_params_json) if sampling_params_json else {}
+        The Rust gRPC server builds ``req_dict`` directly from proto fields,
+        mapping them to GenerateReqInput / EmbeddingReqInput field names.
+        Python just does ``**dict`` unpacking — no JSON parsing needed.
 
-        obj = GenerateReqInput(
-            text=text,
-            input_ids=input_ids,
-            rid=rid,
-            sampling_params=sampling_params,
-            stream=stream,
-            return_logprob=return_logprob,
-            top_logprobs_num=top_logprobs_num,
-            logprob_start_len=logprob_start_len,
-            return_text_in_logprobs=return_text_in_logprobs,
-            lora_path=lora_path,
-            routing_key=routing_key,
-            routed_dp_rank=routed_dp_rank,
-            external_trace_header=trace_headers,
-            received_time=time.time(),
-        )
+        Args:
+            req_type: "generate" or "embed" (classify uses "embed").
+            req_dict: Dict matching the dataclass constructor kwargs.
+            chunk_callback: Rust-side PyO3 callback object.
+        """
+        if req_type == "generate":
+            from sglang.srt.managers.io_struct import GenerateReqInput
 
-        asyncio.run_coroutine_threadsafe(
-            self._run_generate(obj, chunk_callback, stream), self._tm_loop
-        )
+            obj = GenerateReqInput(**req_dict)
+            stream = req_dict.get("stream", False)
+            asyncio.run_coroutine_threadsafe(
+                self._run_generate(obj, chunk_callback, stream), self._tm_loop
+            )
+        else:
+            from sglang.srt.managers.io_struct import EmbeddingReqInput
+
+            obj = EmbeddingReqInput(**req_dict)
+            asyncio.run_coroutine_threadsafe(
+                self._run_embed(obj, chunk_callback), self._tm_loop
+            )
 
     async def _run_generate(self, obj, chunk_callback, stream: bool):
         try:
             gen = self.tokenizer_manager.generate_request(obj, request=None)
             if stream:
                 async for chunk in gen:
-                    finished = chunk.get("meta_info", {}).get("finish_reason") is not None
+                    finished = (
+                        chunk.get("meta_info", {}).get("finish_reason") is not None
+                    )
                     chunk_callback(chunk, finished=finished)
                     if finished:
                         return
@@ -185,36 +166,6 @@ class RuntimeHandle:
             logger.error("gRPC generate error for rid=%s: %s", obj.rid, e)
             chunk_callback({}, finished=True, error=str(e))
 
-    # ------------------------------------------------------------------
-    # Embedding (text or tokenized)
-    # ------------------------------------------------------------------
-
-    def submit_embed(
-        self,
-        *,
-        rid: str,
-        chunk_callback,
-        text: Optional[str] = None,
-        input_ids=None,
-        routing_key: Optional[str] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
-    ):
-        """Submit an embed request (text or tokenized) to TokenizerManager."""
-        from sglang.srt.managers.io_struct import EmbeddingReqInput
-
-        obj = EmbeddingReqInput(
-            text=text,
-            input_ids=input_ids,
-            rid=rid,
-            routing_key=routing_key,
-            external_trace_header=trace_headers,
-            received_time=time.time(),
-        )
-
-        asyncio.run_coroutine_threadsafe(
-            self._run_embed(obj, chunk_callback), self._tm_loop
-        )
-
     async def _run_embed(self, obj, chunk_callback):
         try:
             gen = self.tokenizer_manager.generate_request(obj, request=None)
@@ -225,36 +176,6 @@ class RuntimeHandle:
         except Exception as e:
             logger.error("gRPC embed error for rid=%s: %s", obj.rid, e)
             chunk_callback({}, finished=True, error=str(e))
-
-    # ------------------------------------------------------------------
-    # Classify (same internal path as embed)
-    # ------------------------------------------------------------------
-
-    def submit_classify(
-        self,
-        *,
-        rid: str,
-        chunk_callback,
-        text: Optional[str] = None,
-        input_ids=None,
-        routing_key: Optional[str] = None,
-        trace_headers: Optional[Dict[str, str]] = None,
-    ):
-        """Submit a classify request to TokenizerManager (same path as embed)."""
-        from sglang.srt.managers.io_struct import EmbeddingReqInput
-
-        obj = EmbeddingReqInput(
-            text=text,
-            input_ids=input_ids,
-            rid=rid,
-            routing_key=routing_key,
-            external_trace_header=trace_headers,
-            received_time=time.time(),
-        )
-
-        asyncio.run_coroutine_threadsafe(
-            self._run_embed(obj, chunk_callback), self._tm_loop
-        )
 
     # ------------------------------------------------------------------
     # Abort
@@ -501,9 +422,7 @@ class RuntimeHandle:
                 load_format=load_format,
             )
             success, message, num_paused = (
-                await self.tokenizer_manager.update_weights_from_disk(
-                    obj, request=None
-                )
+                await self.tokenizer_manager.update_weights_from_disk(obj, request=None)
             )
             result = json.dumps(
                 {
@@ -620,12 +539,13 @@ class RuntimeHandle:
                 async for raw_chunk in result.body_iterator:
                     if isinstance(raw_chunk, bytes):
                         raw_chunk = raw_chunk.decode("utf-8", errors="replace")
-                    if raw_chunk.startswith("data: ") and raw_chunk.strip() != "data: [DONE]":
-                        json_chunk = raw_chunk[len("data: "):].strip()
+                    if (
+                        raw_chunk.startswith("data: ")
+                        and raw_chunk.strip() != "data: [DONE]"
+                    ):
+                        json_chunk = raw_chunk[len("data: ") :].strip()
                         if json_chunk:
-                            chunk_callback(
-                                json_chunk.encode("utf-8"), finished=False
-                            )
+                            chunk_callback(json_chunk.encode("utf-8"), finished=False)
                 chunk_callback(b"", finished=True)
             else:
                 if hasattr(result, "model_dump"):

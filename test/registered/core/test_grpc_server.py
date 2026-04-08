@@ -12,7 +12,6 @@ Usage:
 
 import json
 import struct
-import time
 import unittest
 from typing import Optional
 
@@ -478,15 +477,20 @@ class TestGrpcServer(CustomTestCase):
 
     def test_grpc_chat_complete(self):
         """gRPC ChatComplete (non-streaming) returns valid OpenAI response JSON."""
-        request_json = json.dumps({
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": "What is 2+2? Answer with just the number."},
-            ],
-            "max_tokens": 8,
-            "temperature": 0,
-            "stream": False,
-        }).encode("utf-8")
+        request_json = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "What is 2+2? Answer with just the number.",
+                    },
+                ],
+                "max_tokens": 8,
+                "temperature": 0,
+                "stream": False,
+            }
+        ).encode("utf-8")
 
         request = _encode_bytes_field(1, request_json)
         responses = list(self._make_server_stream_call("ChatComplete", request))
@@ -502,19 +506,23 @@ class TestGrpcServer(CustomTestCase):
 
     def test_grpc_chat_complete_streaming(self):
         """gRPC ChatComplete (streaming) returns multiple SSE chunks."""
-        request_json = json.dumps({
-            "model": self.model,
-            "messages": [
-                {"role": "user", "content": "Count from 1 to 5."},
-            ],
-            "max_tokens": 32,
-            "temperature": 0,
-            "stream": True,
-        }).encode("utf-8")
+        request_json = json.dumps(
+            {
+                "model": self.model,
+                "messages": [
+                    {"role": "user", "content": "Count from 1 to 5."},
+                ],
+                "max_tokens": 32,
+                "temperature": 0,
+                "stream": True,
+            }
+        ).encode("utf-8")
 
         request = _encode_bytes_field(1, request_json)
         responses = list(self._make_server_stream_call("ChatComplete", request))
-        self.assertGreater(len(responses), 1, "Streaming should produce multiple chunks")
+        self.assertGreater(
+            len(responses), 1, "Streaming should produce multiple chunks"
+        )
 
     # ------------------------------------------------------------------
     # New Part 2: OpenAI Complete (JSON pass-through)
@@ -522,13 +530,15 @@ class TestGrpcServer(CustomTestCase):
 
     def test_grpc_complete(self):
         """gRPC Complete (non-streaming) returns valid OpenAI completion."""
-        request_json = json.dumps({
-            "model": self.model,
-            "prompt": "The capital of France is",
-            "max_tokens": 8,
-            "temperature": 0,
-            "stream": False,
-        }).encode("utf-8")
+        request_json = json.dumps(
+            {
+                "model": self.model,
+                "prompt": "The capital of France is",
+                "max_tokens": 8,
+                "temperature": 0,
+                "stream": False,
+            }
+        ).encode("utf-8")
 
         request = _encode_bytes_field(1, request_json)
         responses = list(self._make_server_stream_call("Complete", request))
@@ -540,6 +550,108 @@ class TestGrpcServer(CustomTestCase):
         if json_chunk:
             data = json.loads(json_chunk)
             self.assertIn("choices", data)
+
+    # ------------------------------------------------------------------
+    # Tokenizer equivalence: gRPC (Rust) vs HTTP (Python)
+    # ------------------------------------------------------------------
+
+    def test_grpc_tokenize_matches_http(self):
+        """Rust tokenizer output matches Python tokenizer output."""
+        test_texts = [
+            "Hello, world!",
+            "The capital of France is Paris.",
+            "",  # empty string
+            "🎉 emoji test 🚀",
+            "def foo():\n    return 42",
+            "a " * 100,  # longer text
+        ]
+        for text in test_texts:
+            # gRPC tokenize
+            request = _encode_string_field(1, text)
+            grpc_response = self._make_unary_call("Tokenize", request)
+            grpc_count = _decode_int32_field(grpc_response, field_number=2)
+
+            # HTTP tokenize
+            http_response = requests.post(
+                self.base_url + "/tokenize",
+                json={"text": text},
+            )
+            self.assertEqual(
+                http_response.status_code, 200, f"HTTP tokenize failed for: {text!r}"
+            )
+            http_data = http_response.json()
+            http_count = http_data.get("count", len(http_data.get("tokens", [])))
+
+            self.assertEqual(
+                grpc_count,
+                http_count,
+                f"Token count mismatch for {text!r}: gRPC={grpc_count}, HTTP={http_count}",
+            )
+
+    def test_grpc_tokenize_no_special_tokens(self):
+        """Tokenize with add_special_tokens=False."""
+        text = "Hello"
+        # With special tokens
+        req_with = _encode_string_field(1, text)
+        resp_with = self._make_unary_call("Tokenize", req_with)
+        count_with = _decode_int32_field(resp_with, field_number=2)
+
+        # Without special tokens
+        req_without = _encode_string_field(1, text) + _encode_bool_field(2, False)
+        resp_without = self._make_unary_call("Tokenize", req_without)
+        count_without = _decode_int32_field(resp_without, field_number=2)
+
+        # Both should return valid counts; with special tokens >= without
+        self.assertIsNotNone(count_with)
+        self.assertIsNotNone(count_without)
+        self.assertGreaterEqual(count_with, count_without)
+
+    def test_grpc_detokenize_roundtrip(self):
+        """Tokenize then detokenize should approximately recover original text."""
+        text = "The quick brown fox jumps over the lazy dog"
+
+        # Tokenize via HTTP to get reliable token IDs
+        http_response = requests.post(
+            self.base_url + "/tokenize",
+            json={"text": text},
+        )
+        self.assertEqual(http_response.status_code, 200)
+        token_ids = http_response.json()["tokens"]
+
+        # Detokenize via gRPC
+        detok_request = b""
+        for tid in token_ids:
+            detok_request += _encode_int32_field(1, tid)
+        response_bytes = self._make_unary_call("Detokenize", detok_request)
+        decoded_text = _decode_string_field(response_bytes, field_number=1)
+
+        self.assertIsNotNone(decoded_text)
+        # Detokenized text should contain the original words
+        self.assertIn("quick", decoded_text)
+        self.assertIn("fox", decoded_text)
+        self.assertIn("dog", decoded_text)
+
+    # ------------------------------------------------------------------
+    # Sampling params dict path
+    # ------------------------------------------------------------------
+
+    def test_grpc_text_generate_with_sampling_params(self):
+        """TextGenerate with various sampling params via proto SamplingParams."""
+        # Build request with explicit sampling params
+        result = _encode_string_field(1, "Count: 1, 2, 3,")
+        sampling = b""
+        sampling += _encode_float_field(1, 0.0)  # temperature
+        sampling += _encode_int32_field(8, 4)  # max_new_tokens
+        sampling += _encode_float_field(2, 0.95)  # top_p
+        result += _encode_submessage_field(2, sampling)
+        result += _encode_bool_field(3, False)  # stream
+
+        responses = list(self._make_server_stream_call("TextGenerate", result))
+        self.assertGreater(len(responses), 0)
+        last = responses[-1]
+        text = _decode_string_field(last, field_number=1)
+        self.assertIsNotNone(text)
+        self.assertGreater(len(text), 0)
 
 
 class TestGrpcHttpCoexist(CustomTestCase):

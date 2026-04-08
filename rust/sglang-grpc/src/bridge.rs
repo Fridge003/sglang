@@ -1,8 +1,10 @@
 use crossbeam_channel::{bounded, Receiver, Sender};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+use crate::tokenizer::RustTokenizer;
 
 #[derive(Debug, Clone)]
 pub enum ResponseChunk {
@@ -36,14 +38,32 @@ impl RequestChannel {
 pub struct PyBridge {
     runtime_handle: PyObject,
     channels: Arc<Mutex<HashMap<String, Sender<ResponseChunk>>>>,
+    rust_tokenizer: Option<RustTokenizer>,
+    context_len: i32,
 }
 
 impl PyBridge {
-    pub fn new(runtime_handle: PyObject) -> Self {
+    pub fn new(
+        runtime_handle: PyObject,
+        rust_tokenizer: Option<RustTokenizer>,
+        context_len: i32,
+    ) -> Self {
         Self {
             runtime_handle,
             channels: Arc::new(Mutex::new(HashMap::new())),
+            rust_tokenizer,
+            context_len,
         }
+    }
+
+    /// Access the Rust tokenizer (if available).
+    pub fn rust_tokenizer(&self) -> Option<&RustTokenizer> {
+        self.rust_tokenizer.as_ref()
+    }
+
+    /// Return the model's context length.
+    pub fn context_len(&self) -> i32 {
+        self.context_len
     }
 
     // ------------------------------------------------------------------
@@ -83,219 +103,39 @@ impl PyBridge {
         Ok(py_callback.into_any().into())
     }
 
-    fn set_trace_headers(
-        &self,
-        py: Python<'_>,
-        kwargs: &Bound<'_, PyDict>,
-        trace_headers: &Option<HashMap<String, String>>,
-    ) -> PyResult<()> {
-        if let Some(ref headers) = trace_headers {
-            let py_headers = PyDict::new(py);
-            for (k, v) in headers {
-                py_headers.set_item(k, v)?;
-            }
-            kwargs.set_item("trace_headers", py_headers)?;
-        }
-        Ok(())
-    }
-
     // ------------------------------------------------------------------
-    // Generate (text or tokenized)
+    // Consolidated request submission (generate / embed / classify)
     // ------------------------------------------------------------------
 
-    pub fn submit_text_generate(
+    /// Submit a generate or embed request by passing a pre-built dict to Python.
+    ///
+    /// `req_type` is "generate", "embed", or "classify".
+    /// `req_dict` contains fields matching GenerateReqInput or EmbeddingReqInput.
+    pub fn submit_request(
         &self,
         rid: &str,
-        text: &str,
-        sampling_params_json: &str,
-        stream: bool,
-        return_logprob: bool,
-        top_logprobs_num: i32,
-        logprob_start_len: i32,
-        return_text_in_logprobs: bool,
-        lora_path: Option<&str>,
-        routing_key: Option<&str>,
-        routed_dp_rank: Option<i32>,
-        trace_headers: Option<HashMap<String, String>>,
+        req_type: &str,
+        req_dict: HashMap<String, serde_json::Value>,
     ) -> PyResult<Receiver<ResponseChunk>> {
         let receiver = self.create_channel(rid);
         let channels_ref = self.channels.clone();
         let rid_owned = rid.to_string();
 
         Python::with_gil(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("rid", rid)?;
-            kwargs.set_item("text", text)?;
-            kwargs.set_item("sampling_params_json", sampling_params_json)?;
-            kwargs.set_item("stream", stream)?;
-            kwargs.set_item("return_logprob", return_logprob)?;
-            kwargs.set_item("top_logprobs_num", top_logprobs_num)?;
-            kwargs.set_item("logprob_start_len", logprob_start_len)?;
-            kwargs.set_item("return_text_in_logprobs", return_text_in_logprobs)?;
-            if let Some(lp) = lora_path {
-                kwargs.set_item("lora_path", lp)?;
-            }
-            if let Some(rk) = routing_key {
-                kwargs.set_item("routing_key", rk)?;
-            }
-            if let Some(rank) = routed_dp_rank {
-                kwargs.set_item("routed_dp_rank", rank)?;
-            }
-            self.set_trace_headers(py, &kwargs, &trace_headers)?;
-
+            let py_req_dict = json_map_to_pydict(py, &req_dict)?;
             let callback = self.make_chunk_callback(py, rid_owned, channels_ref)?;
+
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("req_type", req_type)?;
+            kwargs.set_item("req_dict", py_req_dict)?;
             kwargs.set_item("chunk_callback", callback)?;
 
-            self.runtime_handle
-                .call_method(py, "submit_generate", (), Some(&kwargs))?;
-            Ok(receiver)
-        })
-    }
-
-    pub fn submit_generate(
-        &self,
-        rid: &str,
-        input_ids: Vec<i32>,
-        sampling_params_json: &str,
-        stream: bool,
-        return_logprob: bool,
-        top_logprobs_num: i32,
-        logprob_start_len: i32,
-        lora_path: Option<&str>,
-        routing_key: Option<&str>,
-        routed_dp_rank: Option<i32>,
-        trace_headers: Option<HashMap<String, String>>,
-    ) -> PyResult<Receiver<ResponseChunk>> {
-        let receiver = self.create_channel(rid);
-        let channels_ref = self.channels.clone();
-        let rid_owned = rid.to_string();
-
-        Python::with_gil(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("rid", rid)?;
-            kwargs.set_item("input_ids", &input_ids)?;
-            kwargs.set_item("sampling_params_json", sampling_params_json)?;
-            kwargs.set_item("stream", stream)?;
-            kwargs.set_item("return_logprob", return_logprob)?;
-            kwargs.set_item("top_logprobs_num", top_logprobs_num)?;
-            kwargs.set_item("logprob_start_len", logprob_start_len)?;
-            if let Some(lp) = lora_path {
-                kwargs.set_item("lora_path", lp)?;
-            }
-            if let Some(rk) = routing_key {
-                kwargs.set_item("routing_key", rk)?;
-            }
-            if let Some(rank) = routed_dp_rank {
-                kwargs.set_item("routed_dp_rank", rank)?;
-            }
-            self.set_trace_headers(py, &kwargs, &trace_headers)?;
-
-            let callback = self.make_chunk_callback(py, rid_owned, channels_ref)?;
-            kwargs.set_item("chunk_callback", callback)?;
-
-            self.runtime_handle
-                .call_method(py, "submit_generate", (), Some(&kwargs))?;
-            Ok(receiver)
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // Embed (text or tokenized)
-    // ------------------------------------------------------------------
-
-    pub fn submit_text_embed(
-        &self,
-        rid: &str,
-        text: &str,
-        routing_key: Option<&str>,
-        trace_headers: Option<HashMap<String, String>>,
-    ) -> PyResult<Receiver<ResponseChunk>> {
-        let receiver = self.create_channel(rid);
-        let channels_ref = self.channels.clone();
-        let rid_owned = rid.to_string();
-
-        Python::with_gil(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("rid", rid)?;
-            kwargs.set_item("text", text)?;
-            if let Some(rk) = routing_key {
-                kwargs.set_item("routing_key", rk)?;
-            }
-            self.set_trace_headers(py, &kwargs, &trace_headers)?;
-
-            let callback = self.make_chunk_callback(py, rid_owned, channels_ref)?;
-            kwargs.set_item("chunk_callback", callback)?;
-
-            self.runtime_handle
-                .call_method(py, "submit_embed", (), Some(&kwargs))?;
-            Ok(receiver)
-        })
-    }
-
-    pub fn submit_embed(
-        &self,
-        rid: &str,
-        input_ids: Vec<i32>,
-        routing_key: Option<&str>,
-        trace_headers: Option<HashMap<String, String>>,
-    ) -> PyResult<Receiver<ResponseChunk>> {
-        let receiver = self.create_channel(rid);
-        let channels_ref = self.channels.clone();
-        let rid_owned = rid.to_string();
-
-        Python::with_gil(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("rid", rid)?;
-            kwargs.set_item("input_ids", &input_ids)?;
-            if let Some(rk) = routing_key {
-                kwargs.set_item("routing_key", rk)?;
-            }
-            self.set_trace_headers(py, &kwargs, &trace_headers)?;
-
-            let callback = self.make_chunk_callback(py, rid_owned, channels_ref)?;
-            kwargs.set_item("chunk_callback", callback)?;
-
-            self.runtime_handle
-                .call_method(py, "submit_embed", (), Some(&kwargs))?;
-            Ok(receiver)
-        })
-    }
-
-    // ------------------------------------------------------------------
-    // Classify (same path as embed)
-    // ------------------------------------------------------------------
-
-    pub fn submit_classify(
-        &self,
-        rid: &str,
-        text: Option<&str>,
-        input_ids: Option<Vec<i32>>,
-        routing_key: Option<&str>,
-        trace_headers: Option<HashMap<String, String>>,
-    ) -> PyResult<Receiver<ResponseChunk>> {
-        let receiver = self.create_channel(rid);
-        let channels_ref = self.channels.clone();
-        let rid_owned = rid.to_string();
-
-        Python::with_gil(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("rid", rid)?;
-            if let Some(t) = text {
-                kwargs.set_item("text", t)?;
-            }
-            if let Some(ref ids) = input_ids {
-                kwargs.set_item("input_ids", ids)?;
-            }
-            if let Some(rk) = routing_key {
-                kwargs.set_item("routing_key", rk)?;
-            }
-            self.set_trace_headers(py, &kwargs, &trace_headers)?;
-
-            let callback = self.make_chunk_callback(py, rid_owned, channels_ref)?;
-            kwargs.set_item("chunk_callback", callback)?;
-
-            self.runtime_handle
-                .call_method(py, "submit_classify", (), Some(&kwargs))?;
+            self.runtime_handle.call_method(
+                py,
+                "submit_request",
+                (),
+                Some(&kwargs),
+            )?;
             Ok(receiver)
         })
     }
@@ -340,7 +180,8 @@ impl PyBridge {
         })
     }
 
-    pub fn tokenize(&self, text: &str, add_special_tokens: bool) -> PyResult<String> {
+    /// Tokenize via Python (fallback when Rust tokenizer unavailable).
+    pub fn tokenize_py(&self, text: &str, add_special_tokens: bool) -> PyResult<String> {
         Python::with_gil(|py| {
             let result = self
                 .runtime_handle
@@ -349,7 +190,8 @@ impl PyBridge {
         })
     }
 
-    pub fn detokenize(&self, tokens: Vec<i32>) -> PyResult<String> {
+    /// Detokenize via Python (fallback when Rust tokenizer unavailable).
+    pub fn detokenize_py(&self, tokens: Vec<i32>) -> PyResult<String> {
         Python::with_gil(|py| {
             let result = self
                 .runtime_handle
@@ -507,6 +349,53 @@ impl PyBridge {
         let mut channels = self.channels.lock().unwrap();
         channels.remove(rid);
     }
+}
+
+// ======================================================================
+// Convert serde_json::Value map to PyDict
+// ======================================================================
+
+fn json_value_to_py<'py>(py: Python<'py>, v: &serde_json::Value) -> PyResult<PyObject> {
+    match v {
+        serde_json::Value::Null => Ok(py.None()),
+        serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.into_any().unbind()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.into_pyobject(py)?.into_any().unbind())
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.into_pyobject(py)?.into_any().unbind())
+            } else {
+                Ok(py.None())
+            }
+        }
+        serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        serde_json::Value::Array(arr) => {
+            let items: Vec<PyObject> = arr
+                .iter()
+                .map(|item| json_value_to_py(py, item))
+                .collect::<PyResult<_>>()?;
+            let py_list = PyList::new(py, &items)?;
+            Ok(py_list.into_any().unbind())
+        }
+        serde_json::Value::Object(map) => {
+            let py_dict = PyDict::new(py);
+            for (k, val) in map {
+                py_dict.set_item(k, json_value_to_py(py, val)?)?;
+            }
+            Ok(py_dict.into_any().unbind())
+        }
+    }
+}
+
+fn json_map_to_pydict<'py>(
+    py: Python<'py>,
+    map: &HashMap<String, serde_json::Value>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let py_dict = PyDict::new(py);
+    for (k, v) in map {
+        py_dict.set_item(k, json_value_to_py(py, v)?)?;
+    }
+    Ok(py_dict)
 }
 
 // ======================================================================

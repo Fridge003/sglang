@@ -1,5 +1,6 @@
 pub mod bridge;
 pub mod server;
+pub mod tokenizer;
 
 pub mod proto {
     tonic::include_proto!("sglang.runtime.v1");
@@ -11,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 
 use bridge::PyBridge;
+use tokenizer::RustTokenizer;
 
 /// Handle returned to Python that controls the running gRPC server.
 #[pyclass]
@@ -37,6 +39,30 @@ impl GrpcServerHandle {
     }
 }
 
+/// Extract tokenizer path and context_len from the Python RuntimeHandle (one-time GIL).
+fn extract_tokenizer_info(runtime_handle: &PyObject) -> (Option<String>, i32) {
+    Python::with_gil(|py| {
+        let tm = match runtime_handle.getattr(py, "tokenizer_manager") {
+            Ok(tm) => tm,
+            Err(_) => return (None, 0),
+        };
+
+        let model_path: Option<String> = tm
+            .getattr(py, "model_path")
+            .ok()
+            .and_then(|v| v.extract(py).ok());
+
+        let context_len: i32 = tm
+            .getattr(py, "model_config")
+            .ok()
+            .and_then(|mc| mc.getattr(py, "context_len").ok())
+            .and_then(|v| v.extract(py).ok())
+            .unwrap_or(0);
+
+        (model_path, context_len)
+    })
+}
+
 /// Start the gRPC server in a background thread with its own Tokio runtime.
 ///
 /// Args:
@@ -57,7 +83,15 @@ fn start_server(
         .parse()
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e)))?;
 
-    let bridge = Arc::new(PyBridge::new(runtime_handle));
+    // Extract tokenizer info from Python (one-time GIL acquisition)
+    let (model_path, context_len) = extract_tokenizer_info(&runtime_handle);
+
+    // Attempt to load the Rust tokenizer
+    let rust_tokenizer = model_path
+        .as_deref()
+        .and_then(|p| RustTokenizer::from_model_path(p, context_len));
+
+    let bridge = Arc::new(PyBridge::new(runtime_handle, rust_tokenizer, context_len));
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = shutdown.clone();
 

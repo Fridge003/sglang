@@ -14,7 +14,8 @@ pub struct SglangServiceImpl {
     pub shutdown: Arc<Notify>,
 }
 
-fn sampling_params_to_json(params: &Option<proto::SamplingParams>) -> String {
+/// Convert proto SamplingParams to a serde_json map (used as Python dict via PyO3).
+fn sampling_params_to_map(params: &Option<proto::SamplingParams>) -> serde_json::Value {
     match params {
         Some(p) => {
             let mut map = serde_json::Map::new();
@@ -63,28 +64,147 @@ fn sampling_params_to_json(params: &Option<proto::SamplingParams>) -> String {
             if let Some(ref v) = p.regex {
                 map.insert("regex".into(), serde_json::json!(v));
             }
-            serde_json::Value::Object(map).to_string()
+            serde_json::Value::Object(map)
         }
-        None => "{}".to_string(),
+        None => serde_json::Value::Object(serde_json::Map::new()),
     }
 }
 
-fn grpc_metadata_to_trace_headers(
+fn trace_headers_to_json(
     headers: &HashMap<String, String>,
-) -> Option<HashMap<String, String>> {
+) -> Option<serde_json::Value> {
     if headers.is_empty() {
         None
     } else {
-        Some(headers.clone())
+        Some(serde_json::json!(headers))
     }
 }
 
 type StreamResult<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
 
-/// Helper: parse a JSON string returned by Python into a serde_json::Value.
-fn parse_json_result(json_str: &str) -> Result<serde_json::Value, Status> {
-    serde_json::from_str(json_str)
-        .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))
+/// Build a request dict for GenerateReqInput from proto TextGenerateRequest fields.
+fn build_text_generate_dict(
+    rid: &str,
+    req: &proto::TextGenerateRequest,
+) -> HashMap<String, serde_json::Value> {
+    let mut d = HashMap::new();
+    d.insert("rid".into(), serde_json::json!(rid));
+    d.insert("text".into(), serde_json::json!(req.text));
+    d.insert("sampling_params".into(), sampling_params_to_map(&req.sampling_params));
+    d.insert("stream".into(), serde_json::json!(req.stream.unwrap_or(false)));
+    d.insert("return_logprob".into(), serde_json::json!(req.return_logprob.unwrap_or(false)));
+    d.insert("top_logprobs_num".into(), serde_json::json!(req.top_logprobs_num.unwrap_or(0)));
+    d.insert("logprob_start_len".into(), serde_json::json!(req.logprob_start_len.unwrap_or(-1)));
+    d.insert("return_text_in_logprobs".into(), serde_json::json!(req.return_text_in_logprobs.unwrap_or(false)));
+    if let Some(ref lp) = req.lora_path {
+        d.insert("lora_path".into(), serde_json::json!(lp));
+    }
+    if let Some(ref rk) = req.routing_key {
+        d.insert("routing_key".into(), serde_json::json!(rk));
+    }
+    if let Some(rank) = req.routed_dp_rank {
+        d.insert("routed_dp_rank".into(), serde_json::json!(rank));
+    }
+    if let Some(trace) = trace_headers_to_json(&req.trace_headers) {
+        d.insert("external_trace_header".into(), trace);
+    }
+    d.insert("received_time".into(), serde_json::json!(now_timestamp()));
+    d
+}
+
+/// Build a request dict for GenerateReqInput from proto GenerateRequest (tokenized).
+fn build_generate_dict(
+    rid: &str,
+    req: &proto::GenerateRequest,
+) -> HashMap<String, serde_json::Value> {
+    let mut d = HashMap::new();
+    d.insert("rid".into(), serde_json::json!(rid));
+    d.insert("input_ids".into(), serde_json::json!(req.input_ids));
+    d.insert("sampling_params".into(), sampling_params_to_map(&req.sampling_params));
+    d.insert("stream".into(), serde_json::json!(req.stream.unwrap_or(false)));
+    d.insert("return_logprob".into(), serde_json::json!(req.return_logprob.unwrap_or(false)));
+    d.insert("top_logprobs_num".into(), serde_json::json!(req.top_logprobs_num.unwrap_or(0)));
+    d.insert("logprob_start_len".into(), serde_json::json!(req.logprob_start_len.unwrap_or(-1)));
+    if let Some(ref lp) = req.lora_path {
+        d.insert("lora_path".into(), serde_json::json!(lp));
+    }
+    if let Some(ref rk) = req.routing_key {
+        d.insert("routing_key".into(), serde_json::json!(rk));
+    }
+    if let Some(rank) = req.routed_dp_rank {
+        d.insert("routed_dp_rank".into(), serde_json::json!(rank));
+    }
+    if let Some(trace) = trace_headers_to_json(&req.trace_headers) {
+        d.insert("external_trace_header".into(), trace);
+    }
+    d.insert("received_time".into(), serde_json::json!(now_timestamp()));
+    d
+}
+
+/// Build a request dict for EmbeddingReqInput from proto TextEmbedRequest.
+fn build_text_embed_dict(
+    rid: &str,
+    req: &proto::TextEmbedRequest,
+) -> HashMap<String, serde_json::Value> {
+    let mut d = HashMap::new();
+    d.insert("rid".into(), serde_json::json!(rid));
+    d.insert("text".into(), serde_json::json!(req.text));
+    if let Some(ref rk) = req.routing_key {
+        d.insert("routing_key".into(), serde_json::json!(rk));
+    }
+    if let Some(trace) = trace_headers_to_json(&req.trace_headers) {
+        d.insert("external_trace_header".into(), trace);
+    }
+    d.insert("received_time".into(), serde_json::json!(now_timestamp()));
+    d
+}
+
+/// Build a request dict for EmbeddingReqInput from proto EmbedRequest (tokenized).
+fn build_embed_dict(
+    rid: &str,
+    req: &proto::EmbedRequest,
+) -> HashMap<String, serde_json::Value> {
+    let mut d = HashMap::new();
+    d.insert("rid".into(), serde_json::json!(rid));
+    d.insert("input_ids".into(), serde_json::json!(req.input_ids));
+    if let Some(ref rk) = req.routing_key {
+        d.insert("routing_key".into(), serde_json::json!(rk));
+    }
+    if let Some(trace) = trace_headers_to_json(&req.trace_headers) {
+        d.insert("external_trace_header".into(), trace);
+    }
+    d.insert("received_time".into(), serde_json::json!(now_timestamp()));
+    d
+}
+
+/// Build a request dict for EmbeddingReqInput from proto ClassifyRequest.
+fn build_classify_dict(
+    rid: &str,
+    req: &proto::ClassifyRequest,
+) -> HashMap<String, serde_json::Value> {
+    let mut d = HashMap::new();
+    d.insert("rid".into(), serde_json::json!(rid));
+    if !req.text.is_empty() {
+        d.insert("text".into(), serde_json::json!(req.text));
+    }
+    if !req.input_ids.is_empty() {
+        d.insert("input_ids".into(), serde_json::json!(req.input_ids));
+    }
+    if let Some(ref rk) = req.routing_key {
+        d.insert("routing_key".into(), serde_json::json!(rk));
+    }
+    if let Some(trace) = trace_headers_to_json(&req.trace_headers) {
+        d.insert("external_trace_header".into(), trace);
+    }
+    d.insert("received_time".into(), serde_json::json!(now_timestamp()));
+    d
+}
+
+fn now_timestamp() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs_f64()
 }
 
 #[tonic::async_trait]
@@ -100,31 +220,12 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::TextGenerateRequest>,
     ) -> Result<Response<Self::TextGenerateStream>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let stream_flag = req.stream.unwrap_or(false);
-        let return_logprob = req.return_logprob.unwrap_or(false);
-        let top_logprobs_num = req.top_logprobs_num.unwrap_or(0);
-        let logprob_start_len = req.logprob_start_len.unwrap_or(-1);
-        let return_text_in_logprobs = req.return_text_in_logprobs.unwrap_or(false);
-        let sampling_json = sampling_params_to_json(&req.sampling_params);
-        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
+        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let req_dict = build_text_generate_dict(&rid, &req);
 
         let receiver = self
             .bridge
-            .submit_text_generate(
-                &rid,
-                &req.text,
-                &sampling_json,
-                stream_flag,
-                return_logprob,
-                top_logprobs_num,
-                logprob_start_len,
-                return_text_in_logprobs,
-                req.lora_path.as_deref(),
-                req.routing_key.as_deref(),
-                req.routed_dp_rank,
-                trace,
-            )
+            .submit_request(&rid, "generate", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let bridge = self.bridge.clone();
@@ -177,29 +278,12 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let stream_flag = req.stream.unwrap_or(false);
-        let return_logprob = req.return_logprob.unwrap_or(false);
-        let top_logprobs_num = req.top_logprobs_num.unwrap_or(0);
-        let logprob_start_len = req.logprob_start_len.unwrap_or(-1);
-        let sampling_json = sampling_params_to_json(&req.sampling_params);
-        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
+        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let req_dict = build_generate_dict(&rid, &req);
 
         let receiver = self
             .bridge
-            .submit_generate(
-                &rid,
-                req.input_ids,
-                &sampling_json,
-                stream_flag,
-                return_logprob,
-                top_logprobs_num,
-                logprob_start_len,
-                req.lora_path.as_deref(),
-                req.routing_key.as_deref(),
-                req.routed_dp_rank,
-                trace,
-            )
+            .submit_request(&rid, "generate", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let bridge = self.bridge.clone();
@@ -254,12 +338,12 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::TextEmbedRequest>,
     ) -> Result<Response<proto::TextEmbedResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
+        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let req_dict = build_text_embed_dict(&rid, &req);
 
         let receiver = self
             .bridge
-            .submit_text_embed(&rid, &req.text, req.routing_key.as_deref(), trace)
+            .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let chunk = tokio::task::spawn_blocking(move || receiver.recv())
@@ -283,12 +367,12 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::EmbedRequest>,
     ) -> Result<Response<proto::EmbedResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
+        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let req_dict = build_embed_dict(&rid, &req);
 
         let receiver = self
             .bridge
-            .submit_embed(&rid, req.input_ids, req.routing_key.as_deref(), trace)
+            .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let chunk = tokio::task::spawn_blocking(move || receiver.recv())
@@ -316,15 +400,12 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::ClassifyRequest>,
     ) -> Result<Response<proto::ClassifyResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let trace = grpc_metadata_to_trace_headers(&req.trace_headers);
-
-        let text = if req.text.is_empty() { None } else { Some(req.text.as_str()) };
-        let input_ids = if req.input_ids.is_empty() { None } else { Some(req.input_ids) };
+        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let req_dict = build_classify_dict(&rid, &req);
 
         let receiver = self
             .bridge
-            .submit_classify(&rid, text, input_ids, req.routing_key.as_deref(), trace)
+            .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let chunk = tokio::task::spawn_blocking(move || receiver.recv())
@@ -344,7 +425,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
     }
 
     // ==================================================================
-    // SGLang-native RPCs: Tokenize / Detokenize
+    // SGLang-native RPCs: Tokenize / Detokenize (Rust-native with fallback)
     // ==================================================================
 
     async fn tokenize(
@@ -354,16 +435,32 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         let req = request.into_inner();
         let add_special = req.add_special_tokens.unwrap_or(true);
 
+        // Try Rust-native tokenizer first (no GIL)
+        if let Some(tok) = self.bridge.rust_tokenizer() {
+            let tokens = tok
+                .encode(&req.text, add_special)
+                .map_err(|e| Status::internal(e))?;
+            let count = tokens.len() as i32;
+            return Ok(Response::new(proto::TokenizeResponse {
+                tokens: tokens.iter().map(|&t| t as i32).collect(),
+                count,
+                max_model_len: self.bridge.context_len(),
+                input_text: req.text,
+            }));
+        }
+
+        // Fallback to Python
         let json_str = tokio::task::spawn_blocking({
             let bridge = self.bridge.clone();
             let text = req.text.clone();
-            move || bridge.tokenize(&text, add_special)
+            move || bridge.tokenize_py(&text, add_special)
         })
         .await
         .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
         .map_err(|e| Status::internal(format!("Tokenize failed: {}", e)))?;
 
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::TokenizeResponse {
             tokens: v["tokens"]
                 .as_array()
@@ -381,16 +478,27 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
     ) -> Result<Response<proto::DetokenizeResponse>, Status> {
         let req = request.into_inner();
 
+        // Try Rust-native tokenizer first (no GIL)
+        if let Some(tok) = self.bridge.rust_tokenizer() {
+            let ids: Vec<u32> = req.tokens.iter().map(|&t| t as u32).collect();
+            let text = tok
+                .decode(&ids, true)
+                .map_err(|e| Status::internal(e))?;
+            return Ok(Response::new(proto::DetokenizeResponse { text }));
+        }
+
+        // Fallback to Python
         let json_str = tokio::task::spawn_blocking({
             let bridge = self.bridge.clone();
             let tokens = req.tokens;
-            move || bridge.detokenize(tokens)
+            move || bridge.detokenize_py(tokens)
         })
         .await
         .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
         .map_err(|e| Status::internal(format!("Detokenize failed: {}", e)))?;
 
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::DetokenizeResponse {
             text: v["text"].as_str().unwrap_or("").to_string(),
         }))
@@ -507,7 +615,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to flush cache: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::FlushCacheResponse {
             success: v["success"].as_bool().unwrap_or(false),
             message: v["message"].as_str().unwrap_or("").to_string(),
@@ -526,7 +635,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to pause generation: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::PauseGenerationResponse {
             message: v["message"].as_str().unwrap_or("").to_string(),
         }))
@@ -543,7 +653,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to continue generation: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::ContinueGenerationResponse {
             message: v["message"].as_str().unwrap_or("").to_string(),
         }))
@@ -617,7 +728,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to start profile: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::StartProfileResponse {
             message: v["message"].as_str().unwrap_or("").to_string(),
         }))
@@ -634,7 +746,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to stop profile: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::StopProfileResponse {
             message: v["message"].as_str().unwrap_or("").to_string(),
         }))
@@ -652,7 +765,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to update weights: {}", e)))?;
 
         let json_str = recv_json_response(receiver).await?;
-        let v = parse_json_result(&json_str)?;
+        let v: serde_json::Value = serde_json::from_str(&json_str)
+            .map_err(|e| Status::internal(format!("Failed to parse JSON response: {}", e)))?;
         Ok(Response::new(proto::UpdateWeightsResponse {
             success: v["success"].as_bool().unwrap_or(false),
             message: v["message"].as_str().unwrap_or("").to_string(),
