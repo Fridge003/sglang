@@ -451,6 +451,11 @@ def kv_to_page_num(num_kv_indices: int, page_size: int):
     return (num_kv_indices + page_size - 1) // page_size
 
 
+def page_align_floor(length: int, page_size: int) -> int:
+    """Round length down to the nearest page boundary."""
+    return (length // page_size) * page_size
+
+
 def page_indices_to_cp_rank_page_indices(
     page_indices: np.ndarray,
     total_pages: int,

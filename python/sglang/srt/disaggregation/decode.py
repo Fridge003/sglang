@@ -46,6 +46,7 @@ from sglang.srt.disaggregation.utils import (
     get_kv_class,
     is_mla_backend,
     kv_to_page_indices,
+    page_align_floor,
     poll_and_all_reduce,
     poll_and_all_reduce_with_staging,
     prepare_abort,
@@ -735,9 +736,8 @@ class DecodePreallocQueue:
             # decode agree on the page-aligned split point for KV transfer.
             page_size = self.token_to_kv_pool_allocator.page_size
             if page_size > 1 and prefix_len % page_size != 0:
-                aligned_len = (prefix_len // page_size) * page_size
-                prefix_indices = prefix_indices[:aligned_len]
-                prefix_len = aligned_len
+                prefix_len = page_align_floor(prefix_len, page_size)
+                prefix_indices = prefix_indices[:prefix_len]
 
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
@@ -822,7 +822,7 @@ class DecodePreallocQueue:
                 window_size = self.scheduler.sliding_window_size
 
                 window_start = max(0, seq_len - window_size)
-                window_start = (window_start // page_size) * page_size
+                window_start = page_align_floor(window_start, page_size)
                 window_kv_indices_full = self.req_to_token_pool.req_to_token[
                     decode_req.req.req_pool_idx, window_start:seq_len
                 ]
