@@ -512,15 +512,10 @@ class RadixCache(BasePrefixCache):
         if self.disable:
             return
 
-        # Only committed KV can be inserted into the radix tree. In the
-        # decode/prebuilt path, fill_ids can be ahead of kv_committed_len while
-        # the trailing req_to_token slots still point at the reserved dummy
-        # region.
-        token_ids = req.fill_ids[: req.kv_committed_len]
-        kv_indices_orig = self.req_to_token_pool.req_to_token[
-            req.req_pool_idx, : len(req.fill_ids)
+        token_ids = req.fill_ids
+        kv_indices = self.req_to_token_pool.req_to_token[
+            req.req_pool_idx, : len(token_ids)
         ]
-        kv_indices = kv_indices_orig[: req.kv_committed_len]
 
         # Maybe convert to bigram keys for EAGLE
         keys = convert_to_bigram_key(token_ids) if self.is_eagle else token_ids
@@ -568,9 +563,9 @@ class RadixCache(BasePrefixCache):
         # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
         # - page_size != 1: there is a partial page at the end, keep the full kv_indices
         # - eagle case: bigram keys will only cache len - 1 kv indices
-        if len(new_indices) < len(kv_indices_orig):
+        if len(new_indices) < len(kv_indices):
             req.prefix_indices = torch.cat(
-                [new_indices, kv_indices_orig[len(new_indices) :]]
+                [new_indices, kv_indices[len(new_indices) :]]
             )
         else:
             req.prefix_indices = new_indices

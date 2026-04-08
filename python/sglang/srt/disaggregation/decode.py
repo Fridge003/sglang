@@ -1072,7 +1072,10 @@ class DecodePreallocQueue:
             (req.req_pool_idx, slice(prefix_len, prefix_len + len(kv_loc))), kv_loc
         )
 
-        req.fill_ids = req.origin_input_ids + req.output_ids
+        # Truncate fill_ids to kv_committed_len so cache_unfinished_req only
+        # inserts committed KV into the radix tree. The last output token
+        # hasn't had KV committed yet (fill_ids is 1 ahead).
+        req.fill_ids = (req.origin_input_ids + req.output_ids)[: req.kv_committed_len]
         # Set prefix_indices so downstream consumers (init_next_round_input,
         # prepare_for_extend) see the correct prefix length. In the agg path
         # this is done inside init_next_round_input, but decode-disagg needs
@@ -1468,6 +1471,10 @@ class SchedulerDisaggregationDecodeMixin:
                     else self.tree_cache
                 )
                 req.init_next_round_input(tree_cache)
+                # Truncate fill_ids to kv_committed_len so cache_unfinished_req
+                # only sees committed KV (fill_ids includes one uncommitted token).
+                if req.kv_committed_len is not None:
+                    req.fill_ids = req.fill_ids[: req.kv_committed_len]
             else:
                 waiting_queue.append(req)
 
