@@ -214,7 +214,7 @@ class Scheduler:
                         data_type=task_type.data_type(),
                         width=width,
                         height=height,
-                        prompt="",
+                        prompt=" ",
                         negative_prompt="",
                         image_path=[warmup_input_path],
                     )
