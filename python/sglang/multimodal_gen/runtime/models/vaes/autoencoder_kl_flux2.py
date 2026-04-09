@@ -52,26 +52,18 @@ class AutoencoderKLFlux2(ParallelTiledVAE):
         layers_per_block: int = arch_config.layers_per_block
         act_fn: str = arch_config.act_fn
         latent_channels: int = arch_config.latent_channels
-        norm_num_groups: int = arch_config.norm_num_groups
         sample_size: int = arch_config.sample_size
-        force_upcast: bool = arch_config.force_upcast
         use_quant_conv: bool = arch_config.use_quant_conv
         use_post_quant_conv: bool = arch_config.use_post_quant_conv
-        mid_block_add_attention: bool = arch_config.mid_block_add_attention
         batch_norm_eps: float = arch_config.batch_norm_eps
         batch_norm_momentum: float = arch_config.batch_norm_momentum
         patch_size: Tuple[int, int] = arch_config.patch_size
         # pass init params to Encoder
         self.encoder = Encoder(
-            in_channels=in_channels,
-            out_channels=latent_channels,
-            down_block_types=down_block_types,
-            block_out_channels=block_out_channels,
-            layers_per_block=layers_per_block,
-            act_fn=act_fn,
-            norm_num_groups=norm_num_groups,
-            double_z=True,
-            mid_block_add_attention=mid_block_add_attention,
+            **arch_config.build_kwargs(
+                Encoder,
+                overrides={"out_channels": latent_channels, "double_z": True},
+            )
         )
 
         # pass init params to Decoder

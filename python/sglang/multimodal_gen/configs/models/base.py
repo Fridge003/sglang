@@ -1,6 +1,7 @@
 # Copied and adapted from: https://github.com/hao-ai-lab/FastVideo
 
 # SPDX-License-Identifier: Apache-2.0
+import inspect
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict
 
@@ -38,6 +39,29 @@ class ArchConfig:
                 extras = {}
                 d["extra_attrs"] = extras
             extras[key] = value
+
+    def build_kwargs(
+        self, target: Any, overrides: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        target_fn = target.__init__ if inspect.isclass(target) else target
+        signature = inspect.signature(target_fn)
+
+        values = {
+            key: value
+            for key, value in self.__dict__.items()
+            if key not in ("stacked_params_mapping", "extra_attrs")
+        }
+        values.update(self.extra_attrs)
+        if overrides is not None:
+            values.update(overrides)
+
+        kwargs = {}
+        for name in signature.parameters:
+            if name == "self":
+                continue
+            if name in values:
+                kwargs[name] = values[name]
+        return kwargs
 
 
 @dataclass

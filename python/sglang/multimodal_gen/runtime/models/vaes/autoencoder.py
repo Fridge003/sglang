@@ -70,43 +70,25 @@ class AutoencoderKL(nn.Module):
         self.config = config
         arch_config = config.arch_config
 
-        in_channels = arch_config.in_channels
-        out_channels = arch_config.out_channels
-        down_block_types = arch_config.down_block_types
-        up_block_types = arch_config.up_block_types
-        block_out_channels = arch_config.block_out_channels
-        layers_per_block = arch_config.layers_per_block
-        act_fn = arch_config.act_fn
         latent_channels = arch_config.latent_channels
-        norm_num_groups = arch_config.norm_num_groups
         sample_size = arch_config.sample_size
         use_quant_conv = arch_config.use_quant_conv
         use_post_quant_conv = arch_config.use_post_quant_conv
-        mid_block_add_attention = arch_config.mid_block_add_attention
 
         # pass init params to Encoder
         self.encoder = Encoder(
-            in_channels=in_channels,
-            out_channels=latent_channels,
-            down_block_types=down_block_types,
-            block_out_channels=block_out_channels,
-            layers_per_block=layers_per_block,
-            act_fn=act_fn,
-            norm_num_groups=norm_num_groups,
-            double_z=True,
-            mid_block_add_attention=mid_block_add_attention,
+            **arch_config.build_kwargs(
+                Encoder,
+                overrides={"out_channels": latent_channels, "double_z": True},
+            )
         )
 
         # pass init params to Decoder
         self.decoder = Decoder(
-            in_channels=latent_channels,
-            out_channels=out_channels,
-            up_block_types=up_block_types,
-            block_out_channels=block_out_channels,
-            layers_per_block=layers_per_block,
-            norm_num_groups=norm_num_groups,
-            act_fn=act_fn,
-            mid_block_add_attention=mid_block_add_attention,
+            **arch_config.build_kwargs(
+                Decoder,
+                overrides={"in_channels": latent_channels},
+            )
         )
 
         self.quant_conv = (
