@@ -400,9 +400,9 @@ def cutlass_w4a8_moe_deepep_normal(
     )
     BLOCK_SIZE = 1024
     hidden_size = c2.shape[1]
-    if _has_gluon and topk == 2:
+    if _has_gluon:
         # Gluon variant: predicated where-mask eliminates warp divergence
-        # in the topk inner loop — 1.12-1.28x faster at small token counts.
+        # in the topk inner loop via gl.where over all experts.
         from triton.experimental.gluon import language as gl
         from sglang.srt.layers.moe.ep_moe.kernels import (
             deepep_post_reorder_gluon_kernel,
@@ -414,7 +414,7 @@ def cutlass_w4a8_moe_deepep_normal(
         deepep_post_reorder_gluon_kernel[(num_tokens,)](
             c2, output, src2dst, topk_ids_, topk_weights,
             topk, hidden_size,
-            BLOCK_SIZE=BLOCK_SIZE, layout=layout, num_warps=num_warps,
+            BLOCK_SIZE=BLOCK_SIZE, TOPK=topk, layout=layout, num_warps=num_warps,
         )
     else:
         deepep_post_reorder_triton_kernel[(num_tokens,)](

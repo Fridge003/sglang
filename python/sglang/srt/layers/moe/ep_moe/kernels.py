@@ -154,11 +154,12 @@ if _has_gluon:
         topk,
         hidden_size,
         BLOCK_SIZE: gl.constexpr,
+        TOPK: gl.constexpr,
         layout: gl.constexpr,
     ):
         """Gluon variant: uses where-mask instead of branch for topk loop.
-        Eliminates warp divergence — benchmarked 1.12-1.28x faster at
-        small-to-medium token counts on H200 (topk=2).
+        Eliminates warp divergence by replacing scalar if-branches with
+        predicated gl.where across all topk experts.
         """
         InDtype = down_output_ptr.dtype.element_ty
 
@@ -172,31 +173,19 @@ if _has_gluon:
             offset = start_offset + idx
             mask = offset < hidden_size
 
-            # Expert 0
-            dst_0 = gl.load(s2d)
-            w_0 = gl.load(tw).to(InDtype)
-            d_0 = gl.load(
-                down_output_ptr + dst_0 * hidden_size + offset,
-                mask=mask & (dst_0 >= 0),
-            )
-            acc = gl.where(
-                dst_0 >= 0,
-                d_0 * w_0,
-                gl.zeros([BLOCK_SIZE], dtype=InDtype),
-            )
-
-            # Expert 1
-            dst_1 = gl.load(s2d + 1)
-            w_1 = gl.load(tw + 1).to(InDtype)
-            d_1 = gl.load(
-                down_output_ptr + dst_1 * hidden_size + offset,
-                mask=mask & (dst_1 >= 0),
-            )
-            acc = acc + gl.where(
-                dst_1 >= 0,
-                d_1 * w_1,
-                gl.zeros([BLOCK_SIZE], dtype=InDtype),
-            )
+            acc = gl.zeros([BLOCK_SIZE], dtype=InDtype, layout=layout)
+            for k in range(TOPK):
+                dst_k = gl.load(s2d + k)
+                w_k = gl.load(tw + k).to(InDtype)
+                d_k = gl.load(
+                    down_output_ptr + dst_k * hidden_size + offset,
+                    mask=mask & (dst_k >= 0),
+                )
+                acc = acc + gl.where(
+                    dst_k >= 0,
+                    d_k * w_k,
+                    gl.zeros([BLOCK_SIZE], dtype=InDtype, layout=layout),
+                )
 
             gl.store(store_ptr + offset, acc, mask=mask)
 
