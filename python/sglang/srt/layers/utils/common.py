@@ -1,5 +1,6 @@
 import logging
 import re
+from typing import Sequence
 
 import torch
 from torch.nn.parameter import Parameter
@@ -13,6 +14,97 @@ def get_layer_id(weight_name):
     if match:
         return int(match.group(1))
     return None
+
+
+# ---------------------------------------------------------------------------
+# WeightTensor: unified wrapper for torch.Tensor and PySafeSlice
+# ---------------------------------------------------------------------------
+
+
+class WeightTensor:
+    """Unified wrapper for :class:`torch.Tensor` and ``PySafeSlice``.
+
+    ``PySafeSlice`` objects are returned by
+    ``safetensors.safe_open.get_slice`` and support lazy, partial reads from
+    disk.  This class provides a single API so that downstream weight-loader
+    code never needs ``isinstance`` checks.
+
+    Key methods
+    -----------
+    * ``shape`` / ``dtype`` – metadata without materializing.
+    * ``get_tensor()``          – full materialization → ``torch.Tensor``.
+    * ``get_narrowed_tensor(dim, start, size)`` – read only the requested
+      shard from disk (for ``PySafeSlice``) or call ``.narrow()`` (for
+      ``torch.Tensor``).  Always returns a ``torch.Tensor``.
+    """
+
+    __slots__ = ("_data", "_is_lazy")
+
+    def __init__(self, data) -> None:
+        self._data = data
+        self._is_lazy = not isinstance(data, torch.Tensor)
+
+    # -- metadata (no I/O) -------------------------------------------------
+
+    @property
+    def is_lazy(self) -> bool:
+        """``True`` if the underlying data has not yet been materialized."""
+        return self._is_lazy
+
+    @property
+    def shape(self) -> Sequence[int]:
+        """Return shape without materializing."""
+        if self._is_lazy:
+            return self._data.get_shape()
+        return self._data.shape
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """Return dtype without materializing."""
+        return self._data.dtype
+
+    # -- materialization ----------------------------------------------------
+
+    def get_tensor(self) -> torch.Tensor:
+        """Return the full weight as a :class:`torch.Tensor`.
+
+        No-op if already materialized.
+        """
+        if self._is_lazy:
+            return self._data[:]
+        return self._data
+
+    def get_narrowed_tensor(
+        self, dim: int, start: int, size: int
+    ) -> torch.Tensor:
+        """Narrow along *dim* and return a :class:`torch.Tensor`.
+
+        For ``PySafeSlice`` the I/O reads only the requested byte range.
+        For ``torch.Tensor`` this calls ``.narrow()`` directly.
+        """
+        if self._is_lazy:
+            ndim = len(self._data.get_shape())
+            idx = tuple(
+                slice(start, start + size) if i == dim else slice(None)
+                for i in range(ndim)
+            )
+            return self._data[idx]
+        return self._data.narrow(dim, start, size)
+
+    # -- fallback for non-migrated code ------------------------------------
+
+    def __getattr__(self, name):
+        """Auto-materialize and delegate for tensor attributes not on WeightTensor.
+
+        This ensures backward compatibility with code that calls tensor methods
+        (e.g. ``.view()``, ``.t()``, ``.to()``) directly on a weight without
+        first calling ``.get_tensor()``.
+        """
+        return getattr(self.get_tensor(), name)
+
+    def __getitem__(self, idx):
+        """Support indexing — materializes lazy weights."""
+        return self.get_tensor()[idx]
 
 
 def pad_or_narrow_weight(

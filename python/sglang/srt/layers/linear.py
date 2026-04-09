@@ -36,7 +36,7 @@ from sglang.srt.layers.parameter import (
     RowvLLMParameter,
     _ColumnvLLMParameter,
 )
-from sglang.srt.layers.utils import pad_or_narrow_weight
+from sglang.srt.layers.utils import WeightTensor, pad_or_narrow_weight
 from sglang.srt.utils import get_bool_env_var, is_cpu, is_hip, is_npu, set_weight_attrs
 
 if TYPE_CHECKING:
@@ -247,7 +247,10 @@ class ReplicatedLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: WeightTensor):
+        # Materialize PySafeSlice (from safetensors get_slice) before any
+        # tensor-specific operations.
+        loaded_weight = loaded_weight.get_tensor()
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
         if len(loaded_weight.shape) == 0:
@@ -376,7 +379,7 @@ class ColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: WeightTensor):
         output_dim = getattr(param, "output_dim", None)
         param_data = param.data
 
@@ -402,6 +405,8 @@ class ColumnParallelLinear(LinearBase):
                     narrow_padded_param_and_loaded_weight,
                 )
 
+                # narrow_padded_param_and_loaded_weight expects a real tensor.
+                loaded_weight = loaded_weight.get_tensor()
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
                     param_data,
                     loaded_weight,
@@ -413,9 +418,11 @@ class ColumnParallelLinear(LinearBase):
                 )
             else:
                 if not self.use_presharded_weights:
-                    loaded_weight = loaded_weight.narrow(
-                        output_dim, start_idx, shard_size
-                    )
+                    loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
+
+        # Materialize PySafeSlice when no slicing was performed
+        # (output_dim is None, bitsandbytes_4bit, or use_presharded_weights).
+        loaded_weight = loaded_weight.get_tensor()
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -425,12 +432,12 @@ class ColumnParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
+    def weight_loader_v2(self, param: Parameter, loaded_weight: WeightTensor):
+        # Special case for scales off disk with no shape (e.g. AutoFP8).
+        # Materialize only for scalar weights; N-dim weights are sliced lazily
+        # inside the parameter helper via get_narrowed_tensor.
         if len(loaded_weight.shape) == 0:
-            assert loaded_weight.numel() == 1
-            loaded_weight = loaded_weight.reshape(1)
+            loaded_weight = loaded_weight.get_tensor().reshape(1)
 
         if isinstance(param, _ColumnvLLMParameter):
             param.load_column_parallel_weight(
@@ -538,7 +545,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     def weight_loader(
         self,
         param: Parameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: WeightTensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         if isinstance(loaded_shard_id, tuple):
@@ -563,7 +570,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
 
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
 
             param.shard_id.append(loaded_shard_id)
             param.shard_id_map[loaded_shard_id] = len(param.data_container)
@@ -580,6 +587,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                loaded_weight = loaded_weight.get_tensor()
                 if needs_scalar_to_array:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0
@@ -602,6 +610,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             if _is_cpu:
+                loaded_weight = loaded_weight.get_tensor()
                 shard_offsets = adjust_shard_offsets(
                     shard_offsets, loaded_weight, output_dim
                 )
@@ -629,9 +638,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         param, orig_offsets, str(shard_id)
                     )
 
-                loaded_weight_shard = loaded_weight.narrow(
-                    output_dim, shard_offset, shard_size
-                )
+                loaded_weight_shard = loaded_weight.get_narrowed_tensor(output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -653,6 +660,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
             if use_bitsandbytes_4bit:
+                loaded_weight = loaded_weight.get_tensor()
                 shard_size = loaded_weight.shape[output_dim]
                 shard_offset = loaded_weight.shape[output_dim] * loaded_shard_id
 
@@ -664,6 +672,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     narrow_padded_param_and_loaded_weight,
                 )
 
+                loaded_weight = loaded_weight.get_tensor()
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
                     param_data,
                     loaded_weight,
@@ -679,24 +688,25 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 if not use_bitsandbytes_4bit and not self.use_presharded_weights:
                     # Padding for special case like qwen2_5_VL's mlp which is not 8-aligned
                     end_idx = start_idx + shard_size
-                    if end_idx > loaded_weight.shape[output_dim]:
+                    loaded_weight_dim_size = loaded_weight.shape[output_dim]
+                    if end_idx > loaded_weight_dim_size:
+                        loaded_weight = loaded_weight.get_tensor()
                         loaded_weight = pad_or_narrow_weight(
                             loaded_weight, output_dim, start_idx, shard_size
                         )
                     else:
-                        loaded_weight = loaded_weight.narrow(
-                            output_dim, start_idx, shard_size
-                        )
+                        loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
 
         # Special case for AQLM codebooks.
         elif is_metadata:
-            # metadata indicates fixed size concatenated along dim 0
+            loaded_weight = loaded_weight.get_tensor()
             shard_size = loaded_weight.shape[0]
             shard_offset = loaded_shard_id * shard_size
             param_data = param_data.narrow(0, shard_offset, shard_size)
 
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
+            loaded_weight = loaded_weight.get_tensor()
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id
             )
@@ -710,13 +720,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     "the same for all partitions."
                 )
 
+        loaded_weight = loaded_weight.get_tensor()
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
     def _load_fused_module_from_checkpoint(
         self,
         param: BasevLLMParameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: WeightTensor,
         output_sizes: list[int] | None = None,
     ):
         """
@@ -748,13 +759,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size=shard_size, shard_offset=shard_offset
                 )
 
-            loaded_weight_shard = loaded_weight.narrow(
-                param.output_dim, shard_offset, shard_size
-            )
+            loaded_weight_shard = loaded_weight.get_narrowed_tensor(param.output_dim, shard_offset, shard_size)
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def _load_merged_block_scale(
-        self, param: BasevLLMParameter, loaded_weight: torch.Tensor
+        self, param: BasevLLMParameter, loaded_weight: WeightTensor
     ):
         """
         Handle block-wise scale loading for MergedColumnParallelLinear.
@@ -779,9 +788,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             zip(shard_block_offsets, shard_block_sizes)
         ):
             # Extract the shard from loaded_weight
-            loaded_weight_shard = loaded_weight.narrow(
-                param.output_dim, shard_block_offset, shard_block_size
-            )
+            loaded_weight_shard = loaded_weight.get_narrowed_tensor(param.output_dim, shard_block_offset, shard_block_size)
 
             # Calculate per-rank offset and size (considering TP)
             rank_shard_offset = shard_block_offset // self.tp_size
@@ -801,7 +808,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
     def weight_loader_v2(
         self,
         param: BasevLLMParameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: WeightTensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
@@ -977,7 +984,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         return shard_size_mapping.get(loaded_shard_id)
 
     def _load_fused_module_from_checkpoint(
-        self, param: BasevLLMParameter, loaded_weight: torch.Tensor
+        self, param: BasevLLMParameter, loaded_weight: WeightTensor
     ):
         """
         Handle special case for models where QKV layers are already
@@ -1016,13 +1023,11 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
 
             if not self.use_presharded_weights:
-                loaded_weight_shard = loaded_weight.narrow(
-                    param.output_dim, shard_offset, shard_size
-                )
+                loaded_weight_shard = loaded_weight.get_narrowed_tensor(param.output_dim, shard_offset, shard_size)
             self.weight_loader_v2(param, loaded_weight_shard, shard_id)
 
     def _load_qkv_block_scale(
-        self, param: BasevLLMParameter, loaded_weight: torch.Tensor
+        self, param: BasevLLMParameter, loaded_weight: WeightTensor
     ):
         block_n, _ = self.quant_method.quant_config.weight_block_size
         q_size = self.total_num_heads * self.head_size // block_n
@@ -1035,9 +1040,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             ("v", q_size + k_size, v_size),
         ]
         for shard_id, shard_offset, shard_size in shard_offsets:
-            loaded_weight_shard = loaded_weight.narrow(
-                param.output_dim, shard_offset, shard_size
-            )
+            loaded_weight_shard = loaded_weight.get_narrowed_tensor(param.output_dim, shard_offset, shard_size)
             rank_shard_offset = self._get_shard_offset_mapping(shard_id) // block_n
             rank_shard_size = self._get_shard_size_mapping(shard_id) // block_n
             param.load_qkv_weight(
@@ -1053,7 +1056,7 @@ class QKVParallelLinear(ColumnParallelLinear):
     def weight_loader_v2(
         self,
         param: BasevLLMParameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: WeightTensor,
         loaded_shard_id: Optional[str] = None,
     ):
         if loaded_shard_id is None:  # special case for certain models
@@ -1095,7 +1098,7 @@ class QKVParallelLinear(ColumnParallelLinear):
     def weight_loader(
         self,
         param: Parameter,
-        loaded_weight: torch.Tensor,
+        loaded_weight: WeightTensor,
         loaded_shard_id: Optional[str] = None,
     ):
 
@@ -1114,7 +1117,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
 
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
 
             param.shard_id.append(loaded_shard_id)
             param.shard_id_map[loaded_shard_id] = len(param.data_container)
@@ -1132,6 +1135,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             # Loaded weight is already fused on disk (qkv/mlp).
             if output_dim is None:
+                loaded_weight = loaded_weight.get_tensor()
                 if needs_scalar_to_array:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
                         param_data, loaded_weight, 0
@@ -1158,6 +1162,7 @@ class QKVParallelLinear(ColumnParallelLinear):
 
             packed_dim = getattr(param, "packed_dim", None)
             if _is_cpu:
+                loaded_weight = loaded_weight.get_tensor()
                 shard_offsets = adjust_shard_offsets(
                     shard_offsets, loaded_weight, output_dim
                 )
@@ -1200,9 +1205,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     )
 
                 if not self.use_presharded_weights:
-                    loaded_weight_shard = loaded_weight.narrow(
-                        output_dim, shard_offset, shard_size
-                    )
+                    loaded_weight_shard = loaded_weight.get_narrowed_tensor(output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
             return
 
@@ -1266,6 +1269,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     narrow_padded_param_and_loaded_weight,
                 )
 
+                loaded_weight = loaded_weight.get_tensor()
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
                     param_data,
                     loaded_weight,
@@ -1279,18 +1283,18 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # bitsandbytes loads the weights of the specific portion
                 # no need to narrow here
                 if not use_bitsandbytes_4bit and not self.use_presharded_weights:
-                    loaded_weight = loaded_weight.narrow(
-                        output_dim, start_idx, shard_size
-                    )
+                    loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
 
         # Special case for AQLM codebooks.
         elif is_metadata:
+            loaded_weight = loaded_weight.get_tensor()
             # metadata indicates fixed size concatenated along dim 0
             shard_size = loaded_weight.shape[0]
             shard_index = ["q", "k", "v"].index(loaded_shard_id)
             param_data = param_data.narrow(0, shard_index * shard_size, shard_size)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
+            loaded_weight = loaded_weight.get_tensor()
             param_data, loaded_weight = adjust_scalar_to_fused_array(
                 param_data, loaded_weight, loaded_shard_id
             )
@@ -1303,6 +1307,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                     "for all partitions."
                 )
 
+        loaded_weight = loaded_weight.get_tensor()
         assert (
             param_data.shape == loaded_weight.shape
         ), f"{param_data.shape=} {loaded_weight.shape=}"
@@ -1396,7 +1401,7 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: WeightTensor):
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
 
@@ -1429,6 +1434,7 @@ class RowParallelLinear(LinearBase):
                     narrow_padded_param_and_loaded_weight,
                 )
 
+                loaded_weight = loaded_weight.get_tensor()
                 param_data, loaded_weight = narrow_padded_param_and_loaded_weight(
                     param_data,
                     loaded_weight,
@@ -1440,14 +1446,18 @@ class RowParallelLinear(LinearBase):
             else:
                 # Padding for special case like qwen2_5_VL's mlp which is not 8-aligned
                 end_idx = start_idx + shard_size
-                if end_idx > loaded_weight.shape[input_dim]:
+                loaded_weight_dim_size = loaded_weight.shape[input_dim]
+                if end_idx > loaded_weight_dim_size:
+                    loaded_weight = loaded_weight.get_tensor()
                     loaded_weight = pad_or_narrow_weight(
                         loaded_weight, input_dim, start_idx, shard_size
                     )
                 else:
-                    loaded_weight = loaded_weight.narrow(
-                        input_dim, start_idx, shard_size
-                    )
+                    loaded_weight = loaded_weight.get_narrowed_tensor(input_dim, start_idx, shard_size)
+
+        # Materialize PySafeSlice when no slicing was performed
+        # (input_dim is None, bitsandbytes_4bit, or use_presharded_weights).
+        loaded_weight = loaded_weight.get_tensor()
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -1459,13 +1469,10 @@ class RowParallelLinear(LinearBase):
         ), f"{param_data.shape=} {loaded_weight.shape=}"
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
-
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
+    def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: WeightTensor):
+        # Special case for scales off disk with no shape (e.g. AutoFP8).
         if len(loaded_weight.shape) == 0:
-            assert loaded_weight.numel() == 1
-            loaded_weight = loaded_weight.reshape(1)
+            loaded_weight = loaded_weight.get_tensor().reshape(1)
 
         if isinstance(param, RowvLLMParameter):
             # This `BasevLLMParameter` is defined in sglang/srt/layers/parameter.py,
@@ -1585,7 +1592,7 @@ class MergedColumnParallelRepeatedLinear(LinearBase):
         return self.quant_method.apply(self, input_)
 
     def weight_loader(
-        self, param: Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int
+        self, param: Parameter, loaded_weight: WeightTensor, loaded_shard_id: int
     ) -> torch.Tensor:
         output_dim = param.output_dim
         shard_offset = sum(self.output_partition_sizes[:loaded_shard_id])
@@ -1594,7 +1601,7 @@ class MergedColumnParallelRepeatedLinear(LinearBase):
 
         if loaded_shard_id < self.num_column_parallel:
             start_idx = self.tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
 
         param_data.copy_(loaded_weight)
 
@@ -1626,9 +1633,9 @@ class ColumnParallelBatchedLinear(nn.Module):
         return torch.bmm(input, self.weight.transpose(-1, -2))
 
     def weight_loader(
-        self, param: Parameter, loaded_weight: torch.Tensor, loaded_shard_id: int
+        self, param: Parameter, loaded_weight: WeightTensor, loaded_shard_id: int
     ) -> torch.Tensor:
         shard_size = self.weight.shape[-2]
         start_idx = self.tp_rank * shard_size
-        loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
+        loaded_weight = loaded_weight.get_narrowed_tensor(0, start_idx, shard_size)
         param.data[loaded_shard_id].copy_(loaded_weight)

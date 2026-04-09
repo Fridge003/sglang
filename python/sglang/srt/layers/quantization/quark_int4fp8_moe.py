@@ -12,6 +12,7 @@ from sglang.srt.layers.int4fp8_utils import (
     quantize_int4_scale_columnwise,
 )
 from sglang.srt.layers.moe import MoeRunnerConfig
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -150,7 +151,7 @@ class QuarkInt4Fp8MoEMethod(FusedMoEMethodBase):
     def get_weight_loader(self, layer, original_weight_loader):
         def online_int4_fp8_weight_loader(
             param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor,
+            loaded_weight: WeightTensor,
             weight_name: str,
             shard_id: str,
             expert_id: int,
@@ -171,14 +172,15 @@ class QuarkInt4Fp8MoEMethod(FusedMoEMethodBase):
 
                 if shard_id in ["w1", "w3"]:
                     shard_dim = 0
-                    loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * self.tp_rank, shard_size
-                    )
                 else:
                     shard_dim = 1
-                    loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * self.tp_rank, shard_size
-                    )
+                loaded_weight = loaded_weight.get_narrowed_tensor(
+                    shard_dim, shard_size * self.tp_rank, shard_size
+                )
+
+            # get_narrowed_tensor returns a tensor; materialize any remaining PySafeSlice
+            # (presharded path where narrowing was skipped).
+            loaded_weight = loaded_weight.get_tensor()
 
             # We want to run online quantization on-device for speed purposes.
             loaded_weight = loaded_weight.to(param.device)

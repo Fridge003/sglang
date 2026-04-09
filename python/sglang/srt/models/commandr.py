@@ -55,6 +55,7 @@ from sglang.srt.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
@@ -92,14 +93,14 @@ class LayerNorm(nn.Module):
         )
         return hidden_states, residuals
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: WeightTensor):
         tp_rank = get_tensor_model_parallel_rank()
         shard_dim = 0 if param.dim() != 1 else None
         param_data = param.data
         if shard_dim is not None:
             shard_size = param_data.shape[shard_dim]
             start_idx = tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(shard_dim, start_idx, shard_size)
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

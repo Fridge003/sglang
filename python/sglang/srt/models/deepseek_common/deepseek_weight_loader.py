@@ -38,7 +38,7 @@ from sglang.srt.layers.quantization.fp8_utils import (
 from sglang.srt.layers.quantization.int8_utils import (
     block_dequant as int8_block_dequant,
 )
-from sglang.srt.layers.utils import get_layer_id
+from sglang.srt.layers.utils import WeightTensor, get_layer_id
 from sglang.srt.model_loader.utils import (
     maybe_executor_submit,
     should_async_load,
@@ -299,9 +299,9 @@ class DeepseekV2WeightLoaderMixin:
                                     ):
                                         cat_dim = 1
 
-                                    fused_weight = torch.cat(
-                                        [q_a_proj_weight, kv_a_proj_weight], dim=cat_dim
-                                    )
+                                    fused_weight = WeightTensor(torch.cat(
+                                        [q_a_proj_weight.get_tensor(), kv_a_proj_weight.get_tensor()], dim=cat_dim
+                                    ))
 
                                 param_name = (
                                     name.replace(
@@ -684,11 +684,14 @@ class DeepseekV2WeightLoaderMixin:
 
         for partial_name in tqdm.tqdm(partial_names, desc="quant weights to fp8 ue8m0"):
             original_weight = weights_dict[f"{partial_name}.weight"]
+            # Materialize WeightTensor before quantization
+            if isinstance(original_weight, WeightTensor):
+                original_weight = original_weight.get_tensor()
             out_w, out_s = quant_weight_ue8m0(
                 original_weight, weight_block_size=weight_block_size
             )
-            weights_dict[f"{partial_name}.weight"] = out_w
-            weights_dict[f"{partial_name}.weight_scale_inv"] = out_s
+            weights_dict[f"{partial_name}.weight"] = WeightTensor(out_w)
+            weights_dict[f"{partial_name}.weight_scale_inv"] = WeightTensor(out_s)
 
         if isinstance(
             nextn_conf, NextNEnabledConfig

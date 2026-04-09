@@ -26,6 +26,7 @@ from sglang.srt.layers.dp_attention import (
     is_allocation_symmetric,
 )
 from sglang.srt.layers.parameter import BasevLLMParameter
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -417,12 +418,13 @@ class VocabParallelEmbedding(torch.nn.Module):
         assert len(ret) == self.num_embeddings_padded
         return ret
 
-    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader(self, param: Parameter, loaded_weight: WeightTensor):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
         # If the parameter is a gguf weight, then load it directly.
         if getattr(param, "is_gguf_weight_type", None):
+            loaded_weight = loaded_weight.get_tensor()
             param.data.copy_(loaded_weight)
             param.weight_type = loaded_weight.item()
             return
@@ -430,11 +432,13 @@ class VocabParallelEmbedding(torch.nn.Module):
             shape = list(loaded_weight.shape)
             if output_dim is not None:
                 shape[output_dim] = shape[output_dim] // self.tp_size
+            loaded_weight = loaded_weight.get_tensor()
             param.materialize(tuple(shape), dtype=loaded_weight.dtype)
 
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
+            loaded_weight = loaded_weight.get_tensor()
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
@@ -464,7 +468,9 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Copy the data.
         if not self.use_presharded_weights:
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(output_dim, start_idx, shard_size)
+        else:
+            loaded_weight = loaded_weight.get_tensor()
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 

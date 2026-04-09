@@ -268,14 +268,26 @@ def should_deepgemm_weight_requant_ue8m0(weight_block_size):
     )
 
 
-def should_async_load(weight: torch.Tensor) -> bool:
+def should_async_load(weight) -> bool:
     """Return True if we should load the given weight asynchronously.
 
-    For host (CPU) tensors, using a threadpool can overlap H2D copies
-    and improve throughput. For device tensors, threading often adds overhead
-    (e.g., GIL contention) without benefit, so we do it synchronously.
+    For host (CPU) tensors and PySafeSlice objects (lazy disk reads), using a
+    threadpool can overlap I/O and H2D copies to improve throughput.
+    For device tensors, threading often adds overhead (e.g., GIL contention)
+    without benefit, so we do it synchronously.
     """
-    device = getattr(weight, "device", None)
+    from sglang.srt.layers.utils import WeightTensor
+
+    if isinstance(weight, WeightTensor):
+        if weight.is_lazy:
+            return True
+        tensor = weight.get_tensor()
+    elif not isinstance(weight, torch.Tensor):
+        # Raw PySafeSlice or other lazy loaders – treat like a CPU tensor
+        return True
+    else:
+        tensor = weight
+    device = getattr(tensor, "device", None)
     if device is None:
         return False
     return device.type == "cpu"

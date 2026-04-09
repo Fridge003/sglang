@@ -41,6 +41,7 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.dp_attention import get_attention_tp_rank
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.quantization import QuantizationConfig, get_quantization_config
 from sglang.srt.layers.quantization.fp8 import Fp8Config
 from sglang.srt.layers.quantization.modelopt_quant import (
@@ -697,7 +698,7 @@ def np_cache_weights_iterator(
         param_path = os.path.join(np_folder, name)
         with open(param_path, "rb") as f:
             param = np.load(f)
-        yield name, torch.from_numpy(param)
+        yield name, WeightTensor(torch.from_numpy(param))
 
 
 def safetensors_weights_iterator(
@@ -719,11 +720,11 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 result = safetensors.torch.load(f.read())
                 for name in sorted(result.keys()):
-                    yield name, result[name]
+                    yield name, WeightTensor(result[name])
         else:
             with safetensors.safe_open(st_file, framework="pt", device="cpu") as f:
                 for name in f.keys():
-                    yield name, f.get_tensor(name)
+                    yield name, WeightTensor(f.get_tensor(name))
 
 
 def fastsafetensors_weights_iterator(
@@ -774,7 +775,7 @@ def fastsafetensors_weights_iterator(
                 keys = list(fb.key_to_rank_lidx.keys())
                 for k in keys:
                     t = fb.get_tensor(k)
-                    yield k, t
+                    yield k, WeightTensor(t)
             finally:
                 pass
         finally:
@@ -814,7 +815,7 @@ def multi_thread_safetensors_weights_iterator(
         for future in futures_iter:
             state_dict = future.result()
             for name, param in state_dict.items():
-                yield name, param
+                yield name, WeightTensor(param)
 
 
 def buffered_multi_thread_safetensors_weights_iterator(
@@ -835,11 +836,11 @@ def buffered_multi_thread_safetensors_weights_iterator(
     def _load_file(st_file: str):
         if disable_mmap:
             with open(st_file, "rb") as f:
-                result = safetensors.torch.load(f.read())
+                return safetensors.torch.load(f.read())
         else:
-            with safetensors.safe_open(st_file, framework="pt", device="cpu") as f:
-                result = {k: f.get_tensor(k) for k in f.keys()}
-        return result
+            # Open without closing; the main loop keeps the file alive while
+            # yielding PySafeSlice objects and closes it when done.
+            return safetensors.safe_open(st_file, framework="pt", device="cpu")
 
     # Sliding window: max_workers loading + 1 prefetched.
     buffer_size = max_workers + 1
@@ -861,7 +862,7 @@ def buffered_multi_thread_safetensors_weights_iterator(
         ) as pbar:
             while pending:
                 future = pending.popleft()
-                state_dict = future.result()
+                file_obj = future.result()
                 del future  # let GC reclaim the Future's internal result
 
                 # Replenish: submit the next file to keep the buffer full.
@@ -869,9 +870,21 @@ def buffered_multi_thread_safetensors_weights_iterator(
                 if next_file is not None:
                     pending.append(executor.submit(_load_file, next_file))
 
-                for name in sorted(state_dict.keys()):
-                    yield name, state_dict[name]
-                del state_dict
+                if isinstance(file_obj, dict):
+                    # disable_mmap: dict of pre-loaded tensors
+                    for name in sorted(file_obj.keys()):
+                        yield name, WeightTensor(file_obj[name])
+                    del file_obj
+                else:
+                    # mmap: SafeOpen object - yield PySafeSlice objects so that
+                    # weight loaders can read only the needed shard from disk.
+                    # The file stays open until all slices for this shard are
+                    # consumed, then is closed in the finally block.
+                    try:
+                        for name in sorted(file_obj.keys()):
+                            yield name, WeightTensor(file_obj.get_slice(name))
+                    finally:
+                        file_obj.__exit__(None, None, None)
                 pbar.update(1)
 
 
@@ -910,7 +923,8 @@ def pt_weights_iterator(
         position=tqdm._get_free_pos(),
     ):
         state = _load_pt_file(bin_file)
-        yield from state.items()
+        for name, param in state.items():
+            yield name, WeightTensor(param)
         del state
 
 
@@ -976,7 +990,7 @@ def gguf_quant_weights_iterator(
             if weight_type.name != "F32":
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
-                yield weight_type_name, weight_type
+                yield weight_type_name, WeightTensor(weight_type)
 
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
@@ -987,27 +1001,13 @@ def gguf_quant_weights_iterator(
             if weight_type.name != "F32":
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
-            yield name, param
+            yield name, WeightTensor(param)
 
 
-def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
-    """convert PySafeSlice object from safetensors to torch.Tensor
-
-    PySafeSlice object supports indexing, which is done before loading the
-    actual tensor and can reduce the amount of memory being read into the
-    memory. However, it does not support more advanced functionalities
-    like `.view()` or `.t()`. Therefore, if we need to modify the loaded
-    tensor with these more complicated operators, we need to convert to
-    tensor first.
-    """
-    if not isinstance(x, torch.Tensor):
-        x = x[:]
-    return x
-
-
-def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+def default_weight_loader(param: torch.Tensor, loaded_weight) -> None:
     """Default weight loader."""
     try:
+        loaded_weight = loaded_weight.get_tensor() if isinstance(loaded_weight, WeightTensor) else loaded_weight
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
@@ -1027,7 +1027,7 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
 
 
 def row_parallel_weight_loader(
-    param: torch.Tensor, loaded_weight: torch.Tensor
+    param: torch.Tensor, loaded_weight: WeightTensor
 ) -> None:
     """Load weights that are row-parallelized."""
     tp_rank = get_tensor_model_parallel_rank()
@@ -1036,7 +1036,7 @@ def row_parallel_weight_loader(
     if shard_dim is not None:
         shard_size = param.data.shape[shard_dim]
         start_idx = tp_rank * shard_size
-        loaded_weight = loaded_weight.narrow(shard_dim, start_idx, shard_size)
+        loaded_weight = loaded_weight.get_narrowed_tensor(shard_dim, start_idx, shard_size)
 
     return default_weight_loader(param, loaded_weight)
 
@@ -1047,7 +1047,7 @@ LoaderFunction = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
     """Create a weight loader that shards the weights along the given axis"""
 
-    def loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    def loader(param: torch.Tensor, loaded_weight: WeightTensor) -> None:
         tp_rank = get_attention_tp_rank()
 
         shard_size = param.data.shape[shard_axis]
@@ -1069,7 +1069,7 @@ def sharded_weight_loader(shard_axis: int) -> LoaderFunction:
             )
             return default_weight_loader(param_data, loaded_weight)
         else:
-            loaded_weight = loaded_weight.narrow(shard_axis, start_idx, shard_size)
+            loaded_weight = loaded_weight.get_narrowed_tensor(shard_axis, start_idx, shard_size)
             return default_weight_loader(param, loaded_weight)
 
     return loader
@@ -1080,7 +1080,7 @@ def composed_weight_loader(
 ) -> LoaderFunction:
     """Create a weight loader that post-processes the weights after loading"""
 
-    def composed_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    def composed_loader(param: torch.Tensor, loaded_weight: WeightTensor) -> None:
         loader(param, loaded_weight)
         param.data.copy_(fn(param))
         return
@@ -1120,7 +1120,8 @@ def runai_safetensors_weights_iterator(
             mininterval=2,
         )
 
-        yield from tensor_iter
+        for name, tensor in tensor_iter:
+            yield name, WeightTensor(tensor)
 
 
 def set_runai_streamer_env(load_config: LoadConfig):

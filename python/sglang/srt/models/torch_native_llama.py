@@ -53,6 +53,7 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.activation import SiluAndMul
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.layernorm import RMSNorm
 from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorOutput
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -73,7 +74,7 @@ tp_rank: Optional[int] = None
 def gate_up_proj_weight_loader(
     self,
     param: Parameter,
-    loaded_weight: torch.Tensor,
+    loaded_weight: WeightTensor,
     loaded_shard_id: int,
 ):
     # shard_id: (shard_offset, shard_size)
@@ -94,7 +95,7 @@ def gate_up_proj_weight_loader(
     param_data = param.data
     shard_offset, shard_size = gate_up_offsets[loaded_shard_id]
     param_data = param_data.narrow(0, shard_offset, shard_size)
-    loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
+    loaded_weight = loaded_weight.get_narrowed_tensor(0, tp_rank * shard_size, shard_size)
     assert param_data.shape == loaded_weight.shape
     param_data.copy_(loaded_weight)
 
@@ -142,7 +143,7 @@ class LlamaMLP(nn.Module):
 def qkv_proj_weight_loader(
     self,
     param: Parameter,
-    loaded_weight: torch.Tensor,
+    loaded_weight: WeightTensor,
     loaded_shard_id: str,
 ):
     num_heads = self.num_heads // tp_size
@@ -166,7 +167,7 @@ def qkv_proj_weight_loader(
     shard_offset, shard_size = qkv_offsets[loaded_shard_id]
     param_data = param.data
     param_data = param_data.narrow(0, shard_offset, shard_size)
-    loaded_weight = loaded_weight.narrow(0, tp_rank * shard_size, shard_size)
+    loaded_weight = loaded_weight.get_narrowed_tensor(0, tp_rank * shard_size, shard_size)
     assert param_data.shape == loaded_weight.shape
     param_data.copy_(loaded_weight)
 

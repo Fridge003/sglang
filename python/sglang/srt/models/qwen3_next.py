@@ -25,6 +25,7 @@ from sglang.srt.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+from sglang.srt.layers.utils import WeightTensor
 from sglang.srt.layers.logits_processor import LogitsProcessor
 from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
@@ -245,7 +246,7 @@ class Qwen3GatedDeltaNet(nn.Module):
                 if output_dim is not None and module.tp_size > 1:
                     shard_size = param.data.shape[output_dim]
                     start_idx = module.tp_rank * shard_size
-                    loaded_weight = loaded_weight.narrow(
+                    loaded_weight = loaded_weight.get_narrowed_tensor(
                         output_dim, start_idx, shard_size
                     )
                 assert param.data.shape == loaded_weight.shape, (

@@ -67,7 +67,7 @@ from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.radix_linear_attention import RadixLinearAttention
 from sglang.srt.layers.rotary_embedding import get_rope
-from sglang.srt.layers.utils import PPMissingLayer, get_layer_id
+from sglang.srt.layers.utils import PPMissingLayer, WeightTensor, get_layer_id
 from sglang.srt.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
@@ -304,6 +304,7 @@ class Qwen3_5GatedDeltaNet(nn.Module):
             # Only intercept split-checkpoint tuple shards.
             # int shard_id and None should preserve original behavior.
             if isinstance(loaded_shard_id, tuple):
+                loaded_weight = loaded_weight.get_tensor()
                 split_sizes = cls._get_split_sizes_for_param(
                     module, param, loaded_shard_id
                 )

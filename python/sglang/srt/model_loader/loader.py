@@ -1118,6 +1118,7 @@ class QuantizedRLModelLoader(DefaultModelLoader):
             from sglang.srt.layers.quantization.fp8_kernel import (
                 per_token_group_quant_fp8,
             )
+            from sglang.srt.layers.utils import WeightTensor
 
             for name, weight in weights_iter:
                 if any(
@@ -1127,12 +1128,13 @@ class QuantizedRLModelLoader(DefaultModelLoader):
                     logger.info(f"[QuantizedRL] Skip: {name} ({weight.dtype})")
                     yield (name, weight)
                 elif weight.dtype in [torch.bfloat16, torch.float32, torch.float16]:
-                    qweight, scale = per_token_group_quant_fp8(weight, weight.shape[-1])
+                    tensor = weight.get_tensor() if isinstance(weight, WeightTensor) else weight
+                    qweight, scale = per_token_group_quant_fp8(tensor, tensor.shape[-1])
                     logger.info(f"[QuantizedRL] Quantize: {name} {weight.dtype}→FP8")
                     QuantizedRLModelLoader._store_quantized_scale(
                         quantized_scales, name, scale
                     )
-                    yield (name, qweight)
+                    yield (name, WeightTensor(qweight))
                 else:
                     logger.info(f"[QuantizedRL] Keep: {name} ({weight.dtype})")
                     yield (name, weight)
@@ -1702,8 +1704,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if not weight_name.lower().endswith(".scb"):
                 continue
 
+            from sglang.srt.layers.utils import WeightTensor
+
             weight_key = weight_name.lower().replace(".scb", ".weight")
-            quant_state_dict[weight_key] = weight_tensor
+            quant_state_dict[weight_key] = weight_tensor.get_tensor() if isinstance(weight_tensor, WeightTensor) else weight_tensor
 
         for weight_name, weight_tensor in self._hf_weight_iter(
             hf_weights_files, use_safetensors
@@ -1712,8 +1716,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 continue
 
             if weight_name in quant_state_dict:
-                set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield weight_name, weight_tensor
+                # Materialize so set_weight_attrs can setattr on the tensor
+                from sglang.srt.layers.utils import WeightTensor
+
+                raw_tensor = weight_tensor.get_tensor() if isinstance(weight_tensor, WeightTensor) else weight_tensor
+                set_weight_attrs(raw_tensor, {"load_in_8bit": True})
+                yield weight_name, WeightTensor(raw_tensor)
             else:
                 yield weight_name, weight_tensor
 
@@ -1730,10 +1738,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
+            from sglang.srt.layers.utils import WeightTensor
+
+            raw_tensor = weight_tensor.get_tensor() if isinstance(weight_tensor, WeightTensor) else weight_tensor
             if "quant_state.bitsandbytes" in weight_name:
-                temp_state_dict[weight_name] = weight_tensor.cpu().data
+                temp_state_dict[weight_name] = raw_tensor.cpu().data
             else:
-                temp_state_dict[weight_name] = weight_tensor
+                temp_state_dict[weight_name] = raw_tensor
 
         # Closure to parse quant_state for each prequant weight
         def _parse_quant_state(param_name: str, temp_state_dict: Dict) -> QuantState:
@@ -1767,12 +1778,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     ) -> Generator:
         from bitsandbytes.functional import quantize_4bit
 
+        from sglang.srt.layers.utils import WeightTensor
+
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
 
         for weight_name, weight_tensor in self._hf_weight_iter(
             hf_weights_files, use_safetensors
         ):
+            # Materialize for tensor operations below
+            raw_tensor = weight_tensor.get_tensor() if isinstance(weight_tensor, WeightTensor) else weight_tensor
 
             if any(
                 target_module in weight_name for target_module in self.target_modules
@@ -1784,16 +1799,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     for module in self.column_parallel_weights_modules
                 ):
 
-                    total_size = weight_tensor.size(-1)
+                    total_size = raw_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
-                    weight_sub_tensor = weight_tensor[..., start_index:end_index]
+                    weight_sub_tensor = raw_tensor[..., start_index:end_index]
 
                 else:
-                    total_size = weight_tensor.size(0)
+                    total_size = raw_tensor.size(0)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
-                    weight_sub_tensor = weight_tensor[start_index:end_index, ...]
+                    weight_sub_tensor = raw_tensor[start_index:end_index, ...]
 
                 # bitsandbytes requires data in GPU
                 if weight_sub_tensor.is_cuda:
@@ -1813,9 +1828,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
                 quant_state_dict[weight_name] = quant_state
             else:
-                processed_weight = weight_tensor
+                processed_weight = raw_tensor
 
-            yield weight_name, processed_weight
+            yield weight_name, WeightTensor(processed_weight)
 
     def _load_weights(self, model_config: ModelConfig, model: nn.Module) -> None:
         if not hasattr(model, "load_weights"):
@@ -2433,8 +2448,13 @@ class RemoteModelLoader(BaseModelLoader):
         client,
     ) -> Generator[Tuple[str, torch.Tensor], None, None]:
         """Get an iterator for the model weights from remote storage."""
+        from sglang.srt.layers.utils import WeightTensor
+
         assert get_connector_type(client) == ConnectorType.FS
-        return client.weight_iterator()
+        return (
+            (name, WeightTensor(tensor))
+            for name, tensor in client.weight_iterator()
+        )
 
     def download_model(self, model_config: ModelConfig) -> None:
         pass
