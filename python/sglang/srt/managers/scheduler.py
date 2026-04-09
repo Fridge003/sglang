@@ -2742,9 +2742,9 @@ class Scheduler(
 
         # Run forward
         if self.is_generation:
-            # Check if we should skip speculative decoding based on batch size
-            skip_spec = self._should_skip_spec_decode(batch)
-            batch.skip_spec_decode = skip_spec
+            # skip_spec_decode is set by update_running_batch() before
+            # prepare_for_decode(); for extend batches it defaults to False.
+            skip_spec = batch.skip_spec_decode
 
             if self.spec_algorithm.is_none() or self.enable_overlap or skip_spec:
                 # In most cases, we use the model worker batch to run the forward.
@@ -2823,6 +2823,7 @@ class Scheduler(
                         )
                     # Invalidate draft state so it gets re-synced
                     batch.spec_info = None
+                    self.update_cache_from_scheduler(batch, batch_result)
                 else:
                     kwargs = (
                         {"pp_proxy_tensors": pp_proxy_tensors}

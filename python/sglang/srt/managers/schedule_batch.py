@@ -2130,7 +2130,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if hasattr(self, "nsa_cp_metadata") and self.nsa_cp_metadata is not None:
             self.nsa_cp_metadata = None
 
-        if self.is_spec_v2 and not self.skip_spec_decode:
+        if self.is_spec_v2:
             # TODO(spec-v2): all spec v2 should go through this path
             draft_input: EagleDraftInput = self.spec_info
             draft_input.prepare_for_decode(self)

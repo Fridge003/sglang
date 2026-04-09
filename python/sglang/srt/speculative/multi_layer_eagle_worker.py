@@ -268,6 +268,12 @@ class MultiLayerEagleWorker(TpModelWorker):
                 can_run_cuda_graph=can_run_cuda_graph,
             )
         else:
+            # If spec_info is None (e.g., after skipping spec decode due to
+            # speculative_max_batch_size), create an idle input so the draft
+            # model can re-initialize its state gracefully.
+            if batch.spec_info is None and not batch.forward_mode.is_idle():
+                self._draft_preprocess_idle(batch)
+
             with self.draft_tp_context(
                 self.mtp_model_runner(0).tp_group
             ), speculative_moe_backend_context():
