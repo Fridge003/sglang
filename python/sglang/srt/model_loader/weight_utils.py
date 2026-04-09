@@ -838,9 +838,12 @@ def buffered_multi_thread_safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 return safetensors.torch.load(f.read())
         else:
-            # Open without closing; the main loop keeps the file alive while
-            # yielding PySafeSlice objects and closes it when done.
-            return safetensors.safe_open(st_file, framework="pt", device="cpu")
+            # Eagerly load all tensors in the thread pool so that disk I/O is
+            # overlapped across shard files.  Using get_tensor() gives the
+            # safetensors C library's optimized contiguous-memcpy path which is
+            # significantly faster than per-weight PySafeSlice reads.
+            with safetensors.safe_open(st_file, framework="pt", device="cpu") as f:
+                return {k: f.get_tensor(k) for k in f.keys()}
 
     # Sliding window: max_workers loading + 1 prefetched.
     buffer_size = max_workers + 1
@@ -862,7 +865,7 @@ def buffered_multi_thread_safetensors_weights_iterator(
         ) as pbar:
             while pending:
                 future = pending.popleft()
-                file_obj = future.result()
+                state_dict = future.result()
                 del future  # let GC reclaim the Future's internal result
 
                 # Replenish: submit the next file to keep the buffer full.
@@ -870,21 +873,9 @@ def buffered_multi_thread_safetensors_weights_iterator(
                 if next_file is not None:
                     pending.append(executor.submit(_load_file, next_file))
 
-                if isinstance(file_obj, dict):
-                    # disable_mmap: dict of pre-loaded tensors
-                    for name in sorted(file_obj.keys()):
-                        yield name, WeightTensor(file_obj[name])
-                    del file_obj
-                else:
-                    # mmap: SafeOpen object - yield PySafeSlice objects so that
-                    # weight loaders can read only the needed shard from disk.
-                    # The file stays open until all slices for this shard are
-                    # consumed, then is closed in the finally block.
-                    try:
-                        for name in sorted(file_obj.keys()):
-                            yield name, WeightTensor(file_obj.get_slice(name))
-                    finally:
-                        file_obj.__exit__(None, None, None)
+                for name in sorted(state_dict.keys()):
+                    yield name, WeightTensor(state_dict[name])
+                del state_dict
                 pbar.update(1)
 
 
