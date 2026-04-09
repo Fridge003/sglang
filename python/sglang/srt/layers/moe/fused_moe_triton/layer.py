@@ -447,11 +447,16 @@ class FusedMoE(torch.nn.Module):
         else:
             if not self.use_presharded_weights:
                 if not is_bias and self.use_triton_kernels:
-                    # do not transpose for bias; materialize first
-                    loaded_weight = loaded_weight.get_tensor().transpose(-2, -1)
-                    loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * tp_rank, shard_size
-                    )
+                    ndim = len(loaded_weight.shape)                                                                                                                                       
+                    if shard_dim == ndim - 2:                                                                                                                                             
+                        pre_transpose_dim = ndim - 1                                                                                                                                      
+                    elif shard_dim == ndim - 1:                                                                                                                                           
+                        pre_transpose_dim = ndim - 2                                                                                                                                      
+                    else:                                                                                                                                                                 
+                        pre_transpose_dim = shard_dim                                                                                                                                     
+                    loaded_weight = loaded_weight.get_narrowed_tensor(                                                                                                                    
+                        pre_transpose_dim, shard_size * tp_rank, shard_size                                                                                                               
+                    ).transpose(-2, -1)  
                 else:
                     loaded_weight = loaded_weight.get_narrowed_tensor(
                         shard_dim, shard_size * tp_rank, shard_size
@@ -527,12 +532,17 @@ class FusedMoE(torch.nn.Module):
             )
         else:
             if not is_bias and not self.use_presharded_weights:
-                if self.use_triton_kernels:
-                    # materialize first, then transpose before narrowing
-                    loaded_weight = loaded_weight.get_tensor().transpose(-2, -1)
-                    loaded_weight = loaded_weight.narrow(
-                        shard_dim, shard_size * tp_rank, shard_size
-                    )
+                if self.use_triton_kernels:                                                                                                       
+                    ndim = len(loaded_weight.shape)                                                                                                                                       
+                    if shard_dim == ndim - 2:                                                                                                                                             
+                        pre_transpose_dim = ndim - 1                                                                                                                                      
+                    elif shard_dim == ndim - 1:                                                                                                                                           
+                        pre_transpose_dim = ndim - 2                                                                                                                                      
+                    else:                                                                                                                                                                 
+                        pre_transpose_dim = shard_dim                                                                                                                                     
+                    loaded_weight = loaded_weight.get_narrowed_tensor(                                                                                                                    
+                        pre_transpose_dim, shard_size * tp_rank, shard_size                                                                                                               
+                    ).transpose(-2, -1)  
                 else:
                     loaded_weight = loaded_weight.get_narrowed_tensor(
                         shard_dim, shard_size * tp_rank, shard_size
