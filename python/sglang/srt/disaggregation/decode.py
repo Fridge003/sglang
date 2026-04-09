@@ -776,9 +776,7 @@ class DecodePreallocQueue:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
-            dst_kv_indices = self._pre_alloc(
-                decode_req.req, prefix_indices, prefix_len
-            )
+            dst_kv_indices = self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
             # Recompute from actual pool state instead of manual subtraction.
             # _pre_alloc consumed pages (with rounding) and
             # _match_prefix_and_lock locked tree nodes -- both are now
