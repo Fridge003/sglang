@@ -2746,6 +2746,13 @@ class Scheduler(
             # prepare_for_decode(); for extend batches it defaults to False.
             skip_spec = batch.skip_spec_decode
 
+            # When skipping spec decode, clear stale spec_info before
+            # get_model_worker_batch() so the ModelWorkerBatch does not
+            # carry spec-specific positions/state that mismatch the
+            # non-spec batch shape (e.g. mRoPE position reshape crash).
+            if skip_spec and not self.spec_algorithm.is_none():
+                batch.spec_info = None
+
             if self.spec_algorithm.is_none() or self.enable_overlap or skip_spec:
                 # In most cases, we use the model worker batch to run the forward.
                 worker_batch_or_batch = batch.get_model_worker_batch()
