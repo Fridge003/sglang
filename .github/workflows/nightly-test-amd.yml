@@ -45,6 +45,7 @@ on:
           - nightly-8-gpu-qwen35
           - nightly-8-gpu-glm5
           - nightly-8-gpu-glm51
+          - nightly-8-gpu-glm51-mxfp4
           - nightly-8-gpu-minimax-m25
           - nightly-1-gpu-zimage-turbo
           - nightly-test-1-gpu-mi35x
@@ -63,6 +64,7 @@ on:
           - nightly-8-gpu-mi35x-qwen35
           - nightly-8-gpu-mi35x-glm5
           - nightly-8-gpu-mi35x-glm51
+          - nightly-8-gpu-mi35x-glm51-mxfp4
           - nightly-8-gpu-mi35x-minimax-m25
       job_filter:
         description: 'Or type comma-separated job names (overrides dropdown if non-empty)'
@@ -736,7 +738,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
           bash scripts/ci/amd/amd_ci_exec.sh pip install git+https://github.com/huggingface/transformers.git@96f807a33b75
 
-      - name: Accuracy Test (8-GPU GLM-5.1 NSA MoE)
+      - name: Accuracy Test (8-GPU GLM-5.1 NSA)
         timeout-minutes: 120
         run: |
           > github_summary.md  # Clear summary file
@@ -1397,7 +1399,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_exec.sh pip install tabulate
           bash scripts/ci/amd/amd_ci_exec.sh pip install git+https://github.com/huggingface/transformers.git@96f807a33b75
 
-      - name: Accuracy Test MI35x (8-GPU GLM-5.1 NSA MoE)
+      - name: Accuracy Test MI35x (8-GPU GLM-5.1 NSA)
         timeout-minutes: 180
         run: |
           > github_summary.md  # Clear summary file
