@@ -74,7 +74,7 @@ GLM51_MXFP4_MODELS = [
             "--chunked-prefill-size",
             "131072",
             "--mem-fraction-static",
-            "0.80",
+            "0.85",
             "--model-loader-extra-config",
             '{"enable_multithread_load": true}',
             "--watchdog-timeout",
