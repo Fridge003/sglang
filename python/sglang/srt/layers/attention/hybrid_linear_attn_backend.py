@@ -167,6 +167,19 @@ class MambaAttnBackendBase(AttentionBackend):
             forward_batch.req_pool_indices
         )
 
+        # When DP padding makes batch_size (num_tokens) larger than the actual
+        # number of requests (req_pool_indices), pad mamba_cache_indices with
+        # PAD_SLOT_ID so that conv/ssm kernels skip the padded entries.
+        if (
+            forward_batch.forward_mode.is_decode_or_idle()
+            and mamba_cache_indices.shape[0] < bs
+        ):
+            mamba_cache_indices = torch.nn.functional.pad(
+                mamba_cache_indices,
+                (0, bs - mamba_cache_indices.shape[0]),
+                value=self.pad_slot_id,
+            )
+
         if forward_batch.forward_mode.is_decode_or_idle():
             query_start_loc = torch.arange(
                 0, bs + 1, dtype=torch.int32, device=self.device
