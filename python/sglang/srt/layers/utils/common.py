@@ -68,10 +68,15 @@ class WeightTensor:
     def get_tensor(self) -> torch.Tensor:
         """Return the full weight as a :class:`torch.Tensor`.
 
-        No-op if already materialized.
+        No-op if already materialized.  The result is cached so repeated
+        calls are free.
         """
         if self._is_lazy:
-            return self._data[:]
+            tensor = self._data[:]
+            # Cache so subsequent calls are free
+            self._data = tensor
+            self._is_lazy = False
+            return tensor
         return self._data
 
     def get_narrowed_tensor(
