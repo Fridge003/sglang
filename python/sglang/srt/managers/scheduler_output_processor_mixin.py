@@ -385,8 +385,8 @@ class SchedulerOutputProcessorMixin:
             result.can_run_cuda_graph,
         )
 
-        if batch.spec_algorithm.is_none() or batch.is_spec_v2:
-            if batch.is_spec_v2:
+        if batch.spec_algorithm.is_none() or batch.is_spec_v2 or batch.skip_spec_decode:
+            if batch.is_spec_v2 and not batch.skip_spec_decode:
                 next_token_ids = self._resolve_spec_overlap_token_ids(result, batch)
             else:
                 next_token_ids = next_token_ids.tolist()
@@ -410,7 +410,7 @@ class SchedulerOutputProcessorMixin:
         # are already handled in the verify phase (eagle_info.py / ngram_info.py).
 
         self.num_generated_tokens += len(batch.reqs)
-        if not batch.spec_algorithm.is_none():
+        if not batch.spec_algorithm.is_none() and not batch.skip_spec_decode:
             self.update_spec_metrics(batch.batch_size(), result.num_accepted_tokens)
         if self.enable_metrics:
             self.metrics_collector.increment_decode_cuda_graph_pass(
@@ -421,7 +421,11 @@ class SchedulerOutputProcessorMixin:
 
         # Spec V1 handles output_ids, check_finished, grammar, and reasoning tokens
         # in the verify phase. Non-spec and V2 handle them here in post-processing.
-        is_spec_v1 = not batch.spec_algorithm.is_none() and not batch.is_spec_v2
+        is_spec_v1 = (
+            not batch.spec_algorithm.is_none()
+            and not batch.is_spec_v2
+            and not batch.skip_spec_decode
+        )
 
         for i, req in enumerate(batch.reqs):
             req: Req
@@ -446,7 +450,7 @@ class SchedulerOutputProcessorMixin:
             # Non-spec and V2: full post-processing
             next_token_id = next_token_ids[i]
             new_accepted_len = 1
-            if batch.spec_algorithm.is_none():
+            if batch.spec_algorithm.is_none() or batch.skip_spec_decode:
                 req.output_ids.append(next_token_id)
             else:
                 req.output_ids.extend(next_token_id)
@@ -501,7 +505,7 @@ class SchedulerOutputProcessorMixin:
             if req.grammar is not None:
                 # FIXME: this try-except block is for handling unexpected xgrammar issue.
                 try:
-                    if batch.spec_algorithm.is_none():
+                    if batch.spec_algorithm.is_none() or batch.skip_spec_decode:
                         # Normal decode: single token
                         req.grammar.accept_token(next_token_id)
                     elif batch.is_spec_v2:

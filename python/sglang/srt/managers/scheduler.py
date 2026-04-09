@@ -360,6 +360,7 @@ class Scheduler(
         self.spec_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
+        self.speculative_max_batch_size = server_args.speculative_max_batch_size
         self.gpu_id = gpu_id
         self.page_size = server_args.page_size
         self.enable_hierarchical_cache = server_args.enable_hierarchical_cache
@@ -2680,6 +2681,11 @@ class Scheduler(
         if batch.is_empty():
             return batch
 
+        # Determine if spec decode should be skipped for this batch
+        # based on the batch size threshold. This must be set before
+        # prepare_for_decode() so it can choose the correct code path.
+        batch.skip_spec_decode = self._should_skip_spec_decode(batch)
+
         # Update batch tensors
         batch.prepare_for_decode()
         return batch
@@ -2692,6 +2698,25 @@ class Scheduler(
         #       we shall keep its reference not being release during all the forwarding pass
         self.batch_record_ct = (self.batch_record_ct + 1) % 2
         self.batch_record_buf[self.batch_record_ct] = model_worker_batch
+
+    def _should_skip_spec_decode(self, batch: ScheduleBatch) -> bool:
+        """Check if speculative decoding should be skipped for this batch.
+
+        Speculative decoding is skipped when:
+        1. The spec algorithm is configured (otherwise there's nothing to skip)
+        2. speculative_max_batch_size is set
+        3. The batch is in decode mode (not extend/prefill)
+        4. The decode batch size exceeds speculative_max_batch_size
+        """
+        if self.spec_algorithm.is_none():
+            return False
+        # Read from global server args to support runtime updates
+        max_bs = get_global_server_args().speculative_max_batch_size
+        if max_bs is None:
+            return False
+        if not batch.forward_mode.is_decode():
+            return False
+        return batch.batch_size() > max_bs
 
     def run_batch(
         self,
@@ -2717,7 +2742,11 @@ class Scheduler(
 
         # Run forward
         if self.is_generation:
-            if self.spec_algorithm.is_none() or self.enable_overlap:
+            # Check if we should skip speculative decoding based on batch size
+            skip_spec = self._should_skip_spec_decode(batch)
+            batch.skip_spec_decode = skip_spec
+
+            if self.spec_algorithm.is_none() or self.enable_overlap or skip_spec:
                 # In most cases, we use the model worker batch to run the forward.
                 worker_batch_or_batch = batch.get_model_worker_batch()
             else:
@@ -2737,11 +2766,16 @@ class Scheduler(
                 bs = len(model_worker_batch.seq_lens)
                 future_indices = self.future_map.alloc_future_indices(bs)
 
+                # Choose worker: skip spec -> use target worker only
+                forward_worker = (
+                    self.tp_worker if skip_spec else self.model_worker
+                )
+
                 with self.forward_stream_ctx, self.record_bubble_metrics(batch):
                     self.forward_stream.wait_stream(self.schedule_stream)
                     self.future_map.resolve_future(model_worker_batch)
                     with self.record_forward_metrics(batch):
-                        batch_result = self.model_worker.forward_batch_generation(
+                        batch_result = forward_worker.forward_batch_generation(
                             model_worker_batch
                             # here pp is not compatible with overlap
                         )
@@ -2756,7 +2790,7 @@ class Scheduler(
                 # FIXME(lsyin): move this assignment elsewhere
                 future_indices_or_next_token_ids = -future_indices.indices
 
-                if batch.is_spec_v2:
+                if batch.is_spec_v2 and not skip_spec:
                     # FIXME(lsyin): tmp code for spec v2
                     # We only keep future indices for next draft input
 
@@ -2771,21 +2805,36 @@ class Scheduler(
                     # The future value, usually for next batch preparation
                     # Current implementation strictly synchronizes the seq_lens
                     batch.seq_lens = batch_result.next_draft_input.new_seq_lens
+                elif skip_spec and not self.spec_algorithm.is_none():
+                    # Spec decode was skipped; invalidate draft state so
+                    # it gets re-synced when spec decode resumes.
+                    batch.spec_info = None
             elif self.enable_pdmux and batch.forward_mode.is_split_prefill():
                 batch_result = self.tp_worker.forward_batch_split_prefill(batch)
                 future_indices_or_next_token_ids = batch_result.next_token_ids
             else:
-                kwargs = (
-                    {"pp_proxy_tensors": pp_proxy_tensors}
-                    if self.spec_algorithm.is_none()
-                    else {}
-                )
-                with self.record_forward_metrics(batch):
-                    batch_result = self.model_worker.forward_batch_generation(
-                        worker_batch_or_batch, **kwargs
+                if skip_spec:
+                    # Spec decode skipped: use tp_worker with model_worker_batch
+                    worker_batch_or_batch = batch.get_model_worker_batch()
+                    kwargs = {"pp_proxy_tensors": pp_proxy_tensors}
+                    with self.record_forward_metrics(batch):
+                        batch_result = self.tp_worker.forward_batch_generation(
+                            worker_batch_or_batch, **kwargs
+                        )
+                    # Invalidate draft state so it gets re-synced
+                    batch.spec_info = None
+                else:
+                    kwargs = (
+                        {"pp_proxy_tensors": pp_proxy_tensors}
+                        if self.spec_algorithm.is_none()
+                        else {}
                     )
+                    with self.record_forward_metrics(batch):
+                        batch_result = self.model_worker.forward_batch_generation(
+                            worker_batch_or_batch, **kwargs
+                        )
+                    self.update_cache_from_scheduler(batch, batch_result)
                 future_indices_or_next_token_ids = batch_result.next_token_ids
-                self.update_cache_from_scheduler(batch, batch_result)
 
             # NOTE: future_indices_or_next_token_ids is used in ScheduleBatch,
             #       which can probably be replaced by future_indices later [TODO(lsyin)].
@@ -3188,6 +3237,7 @@ class Scheduler(
                 "pp_max_micro_batch_size",
                 "speculative_accept_threshold_single",
                 "speculative_accept_threshold_acc",
+                "speculative_max_batch_size",
             ]
         )
 

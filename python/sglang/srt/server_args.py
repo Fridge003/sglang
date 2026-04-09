@@ -509,6 +509,7 @@ class ServerArgs:
     speculative_moe_runner_backend: Optional[str] = None
     speculative_moe_a2a_backend: Optional[str] = None
     speculative_draft_model_quantization: Optional[str] = None
+    speculative_max_batch_size: Optional[int] = None
 
     # Speculative decoding (ngram)
     speculative_ngram_min_bfs_breadth: int = 1
@@ -5077,6 +5078,15 @@ class ServerArgs:
             choices=SPECULATIVE_DRAFT_MODEL_QUANTIZATION_CHOICES,
             default=ServerArgs.speculative_draft_model_quantization,
             help="The quantization method for speculative model.",
+        )
+        parser.add_argument(
+            "--speculative-max-batch-size",
+            type=int,
+            default=ServerArgs.speculative_max_batch_size,
+            help="When the decode batch size exceeds this threshold, speculative decoding "
+            "is skipped and normal decoding is used instead. This is useful because speculative "
+            "decoding benefits latency at small batch sizes but can hurt throughput at large "
+            "batch sizes. If not set, speculative decoding is always used when enabled.",
         )
 
         # Speculative decoding (ngram)

@@ -1423,6 +1423,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     spec_algorithm: SpeculativeAlgorithm = None
     # spec_info: Optional[SpecInput] = None
     spec_info: Optional[SpecInput] = None
+    # When True, speculative decoding is skipped for this batch (e.g., batch size exceeds threshold)
+    skip_spec_decode: bool = False
 
     # Whether to return hidden states
     return_hidden_states: bool = False
@@ -2109,6 +2111,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     @property
     def is_spec_v2(self):
         # FIXME: finally deprecate is_spec_v2
+        if self.skip_spec_decode:
+            return False
         ret = self.enable_overlap and not self.spec_algorithm.is_none()
         assert not ret or self.spec_algorithm.supports_spec_v2()
         return ret
@@ -2126,12 +2130,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if hasattr(self, "nsa_cp_metadata") and self.nsa_cp_metadata is not None:
             self.nsa_cp_metadata = None
 
-        if self.is_spec_v2:
+        if self.is_spec_v2 and not self.skip_spec_decode:
             # TODO(spec-v2): all spec v2 should go through this path
             draft_input: EagleDraftInput = self.spec_info
             draft_input.prepare_for_decode(self)
 
-        if not self.spec_algorithm.is_none():
+        if not self.spec_algorithm.is_none() and not self.skip_spec_decode:
             # if spec decoding is used, the decode batch is prepared inside
             # `forward_batch_speculative_generation` after running draft models.
             return
@@ -2462,6 +2466,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             return_logprob=self.return_logprob,
             decoding_reqs=self.decoding_reqs,
             spec_algorithm=self.spec_algorithm,
+            skip_spec_decode=self.skip_spec_decode,
             global_num_tokens=self.global_num_tokens,
             global_num_tokens_for_logprob=self.global_num_tokens_for_logprob,
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
