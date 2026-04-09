@@ -9,7 +9,12 @@ from sglang.srt.utils import cached_triton_kernel
 
 
 @cached_triton_kernel(
-    lambda _, kwargs: (kwargs["NUM_SLICES"], kwargs["BLOCK_M"], kwargs["OUTPUT_DIM"])
+    lambda _, kwargs: (
+        kwargs["NUM_SLICES"],
+        kwargs["BLOCK_M"],
+        kwargs["OUTPUT_DIM"],
+        kwargs["MAX_RANK"],
+    )
 )
 @triton.jit(do_not_specialize=["num_segs"])
 def _chunked_lora_expand_kernel(
@@ -175,10 +180,12 @@ def chunked_sgmv_lora_expand_forward(
     num_slices = len(slice_offsets) - 1
     assert input_dim == num_slices * MAX_RANK
 
-    # TODO (lifuhuang): fine-tune per operation
     BLOCK_M = batch_info.max_len
-    BLOCK_K = 16
+    # Use BLOCK_K matching the rank (up to 64) to minimize K-loop iterations.
+    # Must be a power-of-2 >= 16 for tl.dot on SM90.
+    BLOCK_K = max(16, min(MAX_RANK, 64))
     BLOCK_N = 64
+    NUM_WARPS = 8
 
     num_segments = batch_info.num_segments
 
@@ -211,6 +218,7 @@ def chunked_sgmv_lora_expand_forward(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        num_warps=NUM_WARPS,
     )
 
     return output

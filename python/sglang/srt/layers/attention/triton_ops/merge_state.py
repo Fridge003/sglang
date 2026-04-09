@@ -53,8 +53,11 @@ def merge_state_kernel(
         mask=head_mask,
     )
 
-    p_scale = tl.exp(p_lse) / out_se
-    s_scale = tl.exp(s_lse) / out_se
+    # Use reciprocal to replace 2 divisions with 1 rcp + 2 multiplies
+    # (rcp.approx ~4 cycles vs div.full.f32 ~20 cycles on SM90)
+    inv_se = 1.0 / out_se
+    p_scale = tl.exp(p_lse) * inv_se
+    s_scale = tl.exp(s_lse) * inv_se
     out = p_out * p_scale + s_out * s_scale
     tl.store(
         output + token_idx * num_heads * HEAD_SIZE + head_idx * HEAD_SIZE + head_arange,

@@ -128,6 +128,10 @@ def triton_mrope_fused(
     pad_n_qh = triton.next_power_of_2(n_qh)
     pad_n_kh = triton.next_power_of_2(n_kh)
     pad_hd = triton.next_power_of_2(head_size)
+    # Tuned on H200: fewer warps yield better performance for this
+    # memory-bound kernel (wider vectorization, more ILP per thread).
+    # Threshold chosen from sweep over typical VL model head configs.
+    num_warps = 2 if (pad_n_qh * pad_hd) <= 8192 else 1
     _triton_mrope_forward_fused[(num_tokens,)](
         q,
         k,
@@ -150,6 +154,8 @@ def triton_mrope_fused(
         mrope_interleaved_glm,
         is_neox_style,
         axis_map,
+        num_warps=num_warps,
+        num_stages=1,
     )
 
 

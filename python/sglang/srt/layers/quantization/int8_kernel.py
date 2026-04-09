@@ -46,8 +46,8 @@ def _per_token_quant_int8(
     x = tl.load(x_ptr + row_id * stride_x + cols, mask=mask, other=0.0).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x)), 1e-10)
     scale_x = absmax / 127
-    x_q = x * (127 / absmax)
-    x_q = tl.extra.cuda.libdevice.round(x_q).to(tl.int8)
+    inv_scale = 127.0 / absmax
+    x_q = tl.extra.cuda.libdevice.rint(x * inv_scale).to(tl.int8)
     if CAL_SUM:
         x_sum = tl.sum(x, axis=0)
         tl.store(x_sum_ptr + row_id, x_sum.to(x_sum_ptr.dtype.element_ty))
@@ -66,8 +66,9 @@ def per_token_quant_int8(x, scale_dtype=torch.float32, cal_sum=False):
     else:
         x_sum = None
     BLOCK = triton.next_power_of_2(N)
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK // 256, 1), 8)
+    # heuristics for number of warps: cap at 4 to improve vectorization
+    # and reduce warp scheduling overhead for this memory-bound kernel
+    num_warps = min(max(BLOCK // 256, 1), 4)
 
     assert x.is_contiguous()
     _per_token_quant_int8[(M,)](
@@ -125,7 +126,8 @@ def _per_token_group_quant_int8(
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
     y_s = _absmax / int8_max
-    y_q = tl.clamp(y / y_s, int8_min, int8_max).to(y_q_ptr.dtype.element_ty)
+    inv_s = int8_max / _absmax
+    y_q = tl.clamp(y * inv_s, int8_min, int8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
     tl.store(y_s_ptr, y_s)
@@ -170,8 +172,9 @@ def per_token_group_quant_int8(
     )
 
     BLOCK = triton.next_power_of_2(N)
-    # heuristics for number of warps
-    num_warps = min(max(BLOCK // 256, 1), 8)
+    # heuristics for number of warps: cap at 4 to improve vectorization
+    # and reduce warp scheduling overhead for this memory-bound kernel
+    num_warps = min(max(BLOCK // 256, 1), 4)
     num_stages = 1
     _per_token_group_quant_int8[(M,)](
         x,

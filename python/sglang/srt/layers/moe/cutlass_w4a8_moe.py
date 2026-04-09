@@ -20,6 +20,7 @@ from sgl_kernel import silu_and_mul
 from sglang.jit_kernel.per_tensor_quant_fp8 import per_tensor_quant_fp8
 from sglang.srt.distributed import get_moe_expert_parallel_world_size
 from sglang.srt.layers.moe.ep_moe.kernels import (
+    _has_gluon,
     cutlass_w4_run_moe_ep_preproess,
     deepep_ll_get_cutlass_w4a8_moe_mm_data,
     deepep_permute_triton_kernel,
@@ -397,16 +398,30 @@ def cutlass_w4a8_moe_deepep_normal(
         device=c2.device,
         dtype=torch.bfloat16,
     )
-    deepep_post_reorder_triton_kernel[(num_tokens,)](
-        c2,
-        output,
-        src2dst,
-        topk_ids_,
-        topk_weights,
-        topk,
-        c2.shape[1],
-        BLOCK_SIZE=512,
-    )
+    BLOCK_SIZE = 1024
+    hidden_size = c2.shape[1]
+    if _has_gluon and topk == 2:
+        # Gluon variant: predicated where-mask eliminates warp divergence
+        # in the topk inner loop — 1.12-1.28x faster at small token counts.
+        from triton.experimental.gluon import language as gl
+        from sglang.srt.layers.moe.ep_moe.kernels import (
+            deepep_post_reorder_gluon_kernel,
+        )
+
+        num_warps = 4
+        ept = BLOCK_SIZE // (32 * num_warps)
+        layout = gl.BlockedLayout([ept], [32], [num_warps], [0])
+        deepep_post_reorder_gluon_kernel[(num_tokens,)](
+            c2, output, src2dst, topk_ids_, topk_weights,
+            topk, hidden_size,
+            BLOCK_SIZE=BLOCK_SIZE, layout=layout, num_warps=num_warps,
+        )
+    else:
+        deepep_post_reorder_triton_kernel[(num_tokens,)](
+            c2, output, src2dst, topk_ids_, topk_weights,
+            topk, hidden_size,
+            BLOCK_SIZE=BLOCK_SIZE, num_warps=4, num_stages=2,
+        )
 
     return output
 
