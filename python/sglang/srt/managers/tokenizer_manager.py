@@ -150,7 +150,6 @@ class ReqState:
 
     # Accumulate text lazily so incremental streaming can emit the incoming
     # delta directly without rebuilding the full output prefix.
-    buffer_text: bool = False
     text: str = ""
     text_chunks: List[str] = dataclasses.field(default_factory=list)
 
@@ -195,24 +194,6 @@ class ReqState:
     output_top_logprobs: List[Any] = dataclasses.field(default_factory=list)
     input_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
     output_token_ids_logprobs: List[Any] = dataclasses.field(default_factory=list)
-
-
-def make_req_state(
-    out_list: List[Dict[Any, Any]],
-    finished: bool,
-    event: asyncio.Event,
-    obj: Union[GenerateReqInput, EmbeddingReqInput],
-    time_stats: APIServerReqTimeStats,
-) -> ReqState:
-    is_streaming_request = getattr(obj, "stream", False)
-    return ReqState(
-        out_list,
-        finished,
-        event,
-        obj,
-        time_stats,
-        buffer_text=not is_streaming_request,
-    )
 
 
 def _slice_streaming_output_meta_info(
@@ -2463,13 +2444,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
 
         if not hasattr(obj, "is_single") or obj.is_single:
             time_stats = APIServerReqTimeStats(disagg_mode=self.disaggregation_mode)
-            state = make_req_state(
-                [],
-                False,
-                asyncio.Event(),
-                obj,
-                time_stats,
-            )
+            state = ReqState([], False, asyncio.Event(), obj, time_stats)
             self.rid_to_state[obj.rid] = state
 
             if self.server_args.enable_trace:
@@ -2485,13 +2460,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerScoreMixin):
         else:
             for i in range(len(obj.rid)):
                 time_stats = APIServerReqTimeStats(disagg_mode=self.disaggregation_mode)
-                state = make_req_state(
-                    [],
-                    False,
-                    asyncio.Event(),
-                    obj[i],
-                    time_stats,
-                )
+                state = ReqState([], False, asyncio.Event(), obj[i], time_stats)
                 self.rid_to_state[obj.rid[i]] = state
 
                 if self.server_args.enable_trace:
