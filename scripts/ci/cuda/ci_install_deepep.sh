@@ -115,5 +115,5 @@ if [ "$GRACE_BLACKWELL" = "1" ]; then
     fi
     TORCH_CUDA_ARCH_LIST="${CHOSEN_TORCH_CUDA_ARCH_LIST}" pip install --no-build-isolation .
 else
-    python3 setup.py install
+    TORCH_CUDA_ARCH_LIST='9.0' python3 setup.py install
 fi
