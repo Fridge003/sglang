@@ -75,8 +75,10 @@ def get_successful_jobs(repo, run_id):
 
 def determine_backend(job_name):
     """Determine backend from job name."""
-    if "cpu" in job_name.lower():
-        return "cpu"
+    name = job_name.lower()
+    for backend in ["cpu", "amd", "npu"]:
+        if backend in name:
+            return backend
     return "cuda"
 
 
