@@ -1,21 +1,29 @@
-use pyo3::prelude::*;
-use std::sync::Arc;
-use tokio::sync::Notify;
+pub mod bridge;
+pub mod server;
+pub mod tokenizer;
 
 pub mod proto {
     tonic::include_proto!("sglang.runtime.v1");
 }
 
-/// Handle returned by `start_server` — used to shut down the gRPC server.
+use pyo3::prelude::*;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+use bridge::PyBridge;
+use tokenizer::RustTokenizer;
+
+/// Handle returned to Python that controls the running gRPC server.
 #[pyclass]
-pub struct GrpcServerHandle {
+struct GrpcServerHandle {
     shutdown: Arc<Notify>,
     join_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 #[pymethods]
 impl GrpcServerHandle {
-    /// Signal the server to stop and wait for the background thread to exit.
+    /// Gracefully shut down the gRPC server.
     fn shutdown(&mut self) {
         self.shutdown.notify_one();
         if let Some(handle) = self.join_handle.take() {
@@ -23,7 +31,7 @@ impl GrpcServerHandle {
         }
     }
 
-    /// Returns `true` while the server thread is still running.
+    /// Check if the server thread is still running.
     fn is_alive(&self) -> bool {
         self.join_handle
             .as_ref()
@@ -31,44 +39,77 @@ impl GrpcServerHandle {
     }
 }
 
-/// Start the gRPC server in a background thread.
+/// Extract tokenizer path and context_len from the Python RuntimeHandle (one-time GIL).
+fn extract_tokenizer_info(runtime_handle: &PyObject) -> (Option<String>, i32) {
+    Python::with_gil(|py| {
+        let tm = match runtime_handle.getattr(py, "tokenizer_manager") {
+            Ok(tm) => tm,
+            Err(_) => return (None, 0),
+        };
+
+        let model_path: Option<String> = tm
+            .getattr(py, "model_path")
+            .ok()
+            .and_then(|v| v.extract(py).ok());
+
+        let context_len: i32 = tm
+            .getattr(py, "model_config")
+            .ok()
+            .and_then(|mc| mc.getattr(py, "context_len").ok())
+            .and_then(|v| v.extract(py).ok())
+            .unwrap_or(0);
+
+        (model_path, context_len)
+    })
+}
+
+/// Start the gRPC server in a background thread with its own Tokio runtime.
 ///
-/// * `host` – bind address (e.g. "0.0.0.0")
-/// * `port` – listen port
-/// * `runtime_handle` – Python `RuntimeHandle` object (from `grpc_bridge.py`)
+/// Args:
+///     host: Bind address (e.g., "0.0.0.0")
+///     port: Port number (e.g., 40000)
+///     runtime_handle: Python RuntimeHandle object with submit_generate, submit_embed, abort, etc.
 ///
-/// Returns a `GrpcServerHandle` that can be used to shut the server down.
+/// Returns:
+///     GrpcServerHandle that can be used to shut down the server.
 #[pyfunction]
-fn start_server(host: String, port: u16, runtime_handle: PyObject) -> PyResult<GrpcServerHandle> {
-    let _ = &runtime_handle; // Will be used in Phase 1 PR 2
+#[pyo3(signature = (host, port, runtime_handle))]
+fn start_server(
+    host: String,
+    port: u16,
+    runtime_handle: PyObject,
+) -> PyResult<GrpcServerHandle> {
+    let addr: SocketAddr = format!("{}:{}", host, port)
+        .parse()
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e)))?;
+
+    // Extract tokenizer info from Python (one-time GIL acquisition)
+    let (model_path, context_len) = extract_tokenizer_info(&runtime_handle);
+
+    // Attempt to load the Rust tokenizer
+    let rust_tokenizer = model_path
+        .as_deref()
+        .and_then(|p| RustTokenizer::from_model_path(p, context_len));
+
+    let bridge = Arc::new(PyBridge::new(runtime_handle, rust_tokenizer, context_len));
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = shutdown.clone();
 
-    let addr_str = format!("{}:{}", host, port);
-    let addr: std::net::SocketAddr = addr_str
-        .parse()
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Bad address: {e}")))?;
-
     let join_handle = std::thread::Builder::new()
-        .name("grpc-server".into())
+        .name("sglang-grpc".to_string())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(4)
                 .enable_all()
+                .thread_name("sglang-grpc-tokio")
                 .build()
-                .expect("Failed to build Tokio runtime");
+                .expect("Failed to build Tokio runtime for gRPC server");
 
-            rt.block_on(async move {
-                tracing::info!("gRPC server listening on {}", addr);
-                // Server implementation will be added in PR 2.
-                // For now, just wait for shutdown signal.
-                shutdown_clone.notified().await;
-                tracing::info!("gRPC server shutting down");
-            });
+            if let Err(e) = rt.block_on(server::run_grpc_server(addr, bridge, shutdown_clone)) {
+                eprintln!("gRPC server error: {}", e);
+            }
         })
-        .map_err(|e| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to spawn thread: {e}"))
-        })?;
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to spawn gRPC thread: {}", e)))?;
 
     Ok(GrpcServerHandle {
         shutdown,
@@ -76,7 +117,6 @@ fn start_server(host: String, port: u16, runtime_handle: PyObject) -> PyResult<G
     })
 }
 
-/// Python module exported by the Rust extension.
 #[pymodule]
 fn sglang_grpc_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
