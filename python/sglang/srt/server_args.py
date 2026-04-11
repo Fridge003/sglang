@@ -314,6 +314,9 @@ class ServerArgs:
     port: int = 30000
     fastapi_root_path: str = ""
     grpc_mode: bool = False
+    grpc_port: Optional[int] = None
+    disable_grpc: bool = False
+    smg_grpc: bool = False
     skip_server_warmup: bool = False
     warmups: Optional[str] = None
     nccl_port: Optional[int] = None
@@ -997,6 +1000,21 @@ class ServerArgs:
             )
             envs.SGLANG_SPEC_NAN_DETECTION.set(True)
             envs.SGLANG_SPEC_OOB_DETECTION.set(True)
+
+        if self.grpc_mode and not self.smg_grpc:
+            logger.warning(
+                "--grpc-mode is deprecated and will be removed in a future version. "
+                "Use --smg-grpc instead."
+            )
+            self.smg_grpc = True
+
+        if self.grpc_port is None:
+            self.grpc_port = self.port + 10000
+
+        if self.grpc_port is not None and not (1 <= self.grpc_port <= 65535):
+            raise ValueError(
+                f"--grpc-port ({self.grpc_port}) must be between 1 and 65535"
+            )
 
     def _handle_prefill_delayer_env_compat(self):
         if envs.SGLANG_SCHEDULER_DECREASE_PREFILL_IDLE.get():
@@ -4056,7 +4074,23 @@ class ServerArgs:
         parser.add_argument(
             "--grpc-mode",
             action="store_true",
-            help="If set, use gRPC server instead of HTTP server.",
+            help="(Deprecated, use --smg-grpc) If set, use legacy SMG gRPC server instead of HTTP server.",
+        )
+        parser.add_argument(
+            "--grpc-port",
+            type=int,
+            default=None,
+            help="Port for the native gRPC server. Defaults to --port + 10000 (e.g., 30000 → 40000).",
+        )
+        parser.add_argument(
+            "--disable-grpc",
+            action="store_true",
+            help="If set, do not start the native gRPC server alongside HTTP.",
+        )
+        parser.add_argument(
+            "--smg-grpc",
+            action="store_true",
+            help="If set, use the legacy SMG gRPC server (smg-grpc-servicer) instead of HTTP server.",
         )
         parser.add_argument(
             "--skip-server-warmup",
@@ -6613,6 +6647,19 @@ class ServerArgs:
             raise ValueError(
                 "When enabling two batch overlap, moe_a2a_backend cannot be 'none'."
             )
+
+        if (
+            not self.disable_grpc
+            and self.grpc_port is not None
+            and self.grpc_port == self.port
+        ):
+            raise ValueError(
+                f"--grpc-port ({self.grpc_port}) must differ from --port ({self.port})"
+            )
+
+        # TODO: Also validate grpc_port != metrics_http_port and grpc_port != nccl_port
+        # to avoid opaque bind errors at runtime. Deferred because metrics_http_port
+        # and nccl_port have dynamic defaults that may not be resolved yet here.
 
         if self.gc_threshold:
             if not (1 <= len(self.gc_threshold) <= 3):
