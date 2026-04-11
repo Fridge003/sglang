@@ -19,11 +19,16 @@ from sglang.srt.utils import is_npu
 
 _is_npu = is_npu()
 
-if _is_npu:
-    import mindspore as ms
-    import numpy as np
-    import torch_npu
-    from mindspore import Tensor, mint, mutable
+if not _is_npu:
+    raise ImportError(
+        "MindSpore models require Ascend NPU. "
+        "Skipping MindSpore model registration on this platform."
+    )
+
+import mindspore as ms
+import numpy as np
+import torch_npu
+from mindspore import Tensor, mint, mutable
 
 logger = logging.getLogger(__name__)
 

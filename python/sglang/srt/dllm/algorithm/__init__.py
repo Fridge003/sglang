@@ -17,7 +17,7 @@ def import_algorithms():
         try:
             module = importlib.import_module(name)
         except Exception as e:
-            logger.warning(f"Ignore import error when loading {name}: {e}")
+            logger.info(f"Ignore import error when loading {name}: {e}")
             continue
         if not hasattr(module, "Algorithm"):
             continue
