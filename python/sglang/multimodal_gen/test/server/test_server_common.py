@@ -59,7 +59,9 @@ def _validate_case_environment(case: DiffusionTestCase) -> None:
         return
 
     min_version = version.parse("5.3.0")
-    current_version = version.parse(version.parse(transformers.__version__).base_version)
+    current_version = version.parse(
+        version.parse(transformers.__version__).base_version
+    )
     if current_version < min_version:
         pytest.fail(
             f"{case.id}: Qwen-Image server tests require transformers>={min_version}, "
