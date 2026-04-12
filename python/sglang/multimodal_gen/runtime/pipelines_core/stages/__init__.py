@@ -24,6 +24,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2AVDenoisingStage,
     LTX2RefinementStage,
 )
+from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
+    LTX2DenoisingStage,
+)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_dmd import (
     DmdDenoisingStage,
 )
@@ -80,6 +83,7 @@ __all__ = [
     "LTX2AVLatentPreparationStage",
     "DenoisingStage",
     "DmdDenoisingStage",
+    "LTX2DenoisingStage",
     "LTX2AVDenoisingStage",
     "CausalDMDDenoisingStage",
     "EncodingStage",
