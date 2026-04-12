@@ -811,12 +811,13 @@ class DenoisingStage(PipelineStage):
             server_args=server_args,
             batch=batch,
         )
-        attn_metadata = self._build_attn_metadata(
-            step_index,
-            batch,
-            server_args,
-            timestep_value=t_int,
-            timesteps=timesteps_cpu,
+        attn_metadata = self._prepare_step_attn_metadata(
+            ctx=ctx,
+            batch=batch,
+            server_args=server_args,
+            step_index=step_index,
+            t_int=t_int,
+            timesteps_cpu=timesteps_cpu,
         )
         return DenoisingStepState(
             step_index=step_index,
@@ -826,6 +827,23 @@ class DenoisingStage(PipelineStage):
             current_model=current_model,
             current_guidance_scale=current_guidance_scale,
             attn_metadata=attn_metadata,
+        )
+
+    def _prepare_step_attn_metadata(
+        self,
+        ctx: DenoisingContext,
+        batch: Req,
+        server_args: ServerArgs,
+        step_index: int,
+        t_int: int,
+        timesteps_cpu: torch.Tensor,
+    ) -> Any | None:
+        return self._build_attn_metadata(
+            step_index,
+            batch,
+            server_args,
+            timestep_value=t_int,
+            timesteps=timesteps_cpu,
         )
 
     def _run_denoising_step(

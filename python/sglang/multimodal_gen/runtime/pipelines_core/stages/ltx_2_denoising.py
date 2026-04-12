@@ -655,33 +655,17 @@ class LTX2DenoisingStage(DenoisingStage):
             raise ValueError("LTX-2 audio scheduler was not prepared.")
         ctx.audio_scheduler.set_begin_index(0)
 
-    def _prepare_step_state(
+    def _prepare_step_attn_metadata(
         self,
         ctx: LTX2DenoisingContext,
         batch: Req,
         server_args: ServerArgs,
         step_index: int,
-        t_host: torch.Tensor,
+        t_int: int,
         timesteps_cpu: torch.Tensor,
-    ) -> DenoisingStepState:
-        t_int = int(t_host.item())
-        t_device = ctx.timesteps[step_index]
-        current_model, current_guidance_scale = self._select_and_manage_model(
-            t_int=t_int,
-            boundary_timestep=ctx.boundary_timestep,
-            server_args=server_args,
-            batch=batch,
-        )
-        attn_metadata = self._build_attn_metadata(step_index, batch, server_args)
-        return DenoisingStepState(
-            step_index=step_index,
-            t_host=t_host,
-            t_device=t_device,
-            t_int=t_int,
-            current_model=current_model,
-            current_guidance_scale=current_guidance_scale,
-            attn_metadata=attn_metadata,
-        )
+    ):
+        del ctx, t_int, timesteps_cpu
+        return self._build_attn_metadata(step_index, batch, server_args)
 
     def _run_denoising_step(
         self,
