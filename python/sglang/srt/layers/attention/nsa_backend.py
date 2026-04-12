@@ -1801,6 +1801,7 @@ class NativeSparseAttnBackend(
                 enable_pdl=False,
                 is_causal=causal,
                 return_lse=False,
+                skip_softmax_threshold_scale_factor=envs.SGLANG_SKIP_SOFTMAX_PREFILL_THRESHOLD_SCALE_FACTOR.get(),
             )
 
             # # Use FA4 for GLM-5 on B200
