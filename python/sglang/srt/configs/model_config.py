@@ -78,6 +78,24 @@ def is_deepseek_nsa(config) -> bool:
     )
 
 
+def is_glm5_nsa(config) -> bool:
+    architectures = (
+        config.get("architectures")
+        if isinstance(config, dict)
+        else getattr(config, "architectures", None)
+    )
+    index_topk = (
+        config.get("index_topk")
+        if isinstance(config, dict)
+        else getattr(config, "index_topk", None)
+    )
+    return (
+        architectures is not None
+        and architectures[0] == "GlmMoeDsaForCausalLM"
+        and index_topk is not None
+    )
+
+
 def get_nsa_index_head_dim(config: PretrainedConfig) -> int:
     assert is_deepseek_nsa(config)
     return config.index_head_dim
