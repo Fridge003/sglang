@@ -587,8 +587,10 @@ class LTX2DenoisingStage(DenoisingStage):
             else ("stage1" if ctx.use_ltx23_legacy_one_stage else "one_stage")
         )
         ctx.audio_latents = batch.audio_latents
+        # Video and audio keep separate scheduler state throughout the denoising loop.
         ctx.audio_scheduler = copy.deepcopy(self.scheduler)
 
+        # Prepare image latents and embeddings for LTX-2 TI2V generation.
         self._prepare_ltx2_image_latent(batch, server_args)
         do_ti2v = self._should_apply_ltx2_ti2v(batch)
 
@@ -620,6 +622,9 @@ class LTX2DenoisingStage(DenoisingStage):
             else:
                 batch.did_sp_shard_audio_latents = False
 
+        # For LTX-2 packed token latents, SP sharding happens on the time dimension
+        # (frames). The model must see local latent frames (RoPE offset is applied
+        # inside the model using SP rank).
         ctx.latent_num_frames_for_model = self._get_video_latent_num_frames_for_model(
             batch=batch, server_args=server_args, latents=ctx.latents
         )
@@ -634,6 +639,7 @@ class LTX2DenoisingStage(DenoisingStage):
         if do_ti2v:
             if not (isinstance(ctx.latents, torch.Tensor) and ctx.latents.ndim == 3):
                 raise ValueError("LTX-2 TI2V expects packed token latents [B, S, D].")
+            # Keep conditioned tokens clean and reuse the mask during every step update.
             ctx.latents, ctx.denoise_mask, ctx.clean_latent = (
                 self._prepare_ltx2_ti2v_clean_state(
                     latents=ctx.latents,
@@ -661,6 +667,7 @@ class LTX2DenoisingStage(DenoisingStage):
         t_int: int,
         timesteps_cpu: torch.Tensor,
     ):
+        # Legacy LTX-2 paths used the plain attention-metadata builder call here.
         del ctx, t_int, timesteps_cpu
         return self._build_attn_metadata(step_index, batch, server_args)
 

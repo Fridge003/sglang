@@ -611,6 +611,9 @@ class DenoisingStage(PipelineStage):
     def _prepare_denoising_loop(self, batch: Req, server_args: ServerArgs):
         """
         Prepare all necessary invariant variables for the denoising loop.
+
+        Returns:
+            A context object containing the invariant state for the denoising loop.
         """
         assert self.transformer is not None
         pipeline = self.pipeline() if self.pipeline else None
@@ -838,6 +841,8 @@ class DenoisingStage(PipelineStage):
         t_int: int,
         timesteps_cpu: torch.Tensor,
     ) -> Any | None:
+        # Keep attention metadata preparation overridable so model-specific stages
+        # can preserve their original semantics without duplicating step state setup.
         return self._build_attn_metadata(
             step_index,
             batch,
@@ -1246,6 +1251,7 @@ class DenoisingStage(PipelineStage):
         ctx = self._prepare_denoising_loop(batch, server_args)
         denoising_start_time = time.time()
         self._before_denoising_loop(ctx, batch, server_args)
+        # to avoid device-sync caused by timestep comparison
         timesteps_cpu = ctx.timesteps.cpu()
         num_timesteps = timesteps_cpu.shape[0]
         with torch.autocast(
