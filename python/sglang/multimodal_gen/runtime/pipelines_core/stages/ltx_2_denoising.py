@@ -36,9 +36,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
-    VerificationResult,
-)
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -1202,45 +1199,13 @@ class LTX2DenoisingStage(DenoisingStage):
             is_warmup=is_warmup,
         )
 
-    def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
-        """Verify denoising stage inputs.
+    def _get_prompt_embeds_validator(self, batch: Req):
+        del batch
+        return lambda x: V.is_tensor(x) or V.list_not_empty(x)
 
-        Note: LTX-2 connector stage converts `prompt_embeds`/`negative_prompt_embeds`
-        from list-of-tensors to a single tensor (video context) and stores audio
-        context separately.
-        """
-
-        result = VerificationResult()
-        result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.min_dims(1)])
-
-        # LTX-2 may carry prompt embeddings as either a tensor (preferred) or legacy list.
-        result.add_check(
-            "prompt_embeds",
-            batch.prompt_embeds,
-            lambda x: V.is_tensor(x) or V.list_not_empty(x),
-        )
-
-        # Keep base expectation: image_embeds is always a list (may be empty).
-        result.add_check("image_embeds", batch.image_embeds, V.is_list)
-
-        result.add_check(
-            "num_inference_steps", batch.num_inference_steps, V.positive_int
-        )
-        result.add_check("guidance_scale", batch.guidance_scale, V.non_negative_float)
-        result.add_check("eta", batch.eta, V.non_negative_float)
-        result.add_check("generator", batch.generator, V.generator_or_list_generators)
-        result.add_check(
-            "do_classifier_free_guidance",
-            batch.do_classifier_free_guidance,
-            V.bool_value,
-        )
-
-        # When CFG is enabled, negative prompt embeddings must exist (tensor or legacy list).
-        result.add_check(
-            "negative_prompt_embeds",
-            batch.negative_prompt_embeds,
+    def _get_negative_prompt_embeds_validator(self, batch: Req):
+        return (
             lambda x: (not batch.do_classifier_free_guidance)
             or V.is_tensor(x)
-            or V.list_not_empty(x),
+            or V.list_not_empty(x)
         )
-        return result

@@ -10,7 +10,7 @@ import math
 import os
 import time
 import weakref
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -845,6 +845,17 @@ class DenoisingStage(PipelineStage):
             timestep_value=t_int,
             timesteps=timesteps_cpu,
         )
+
+    def _get_prompt_embeds_validator(
+        self, batch: Req
+    ) -> Callable[[Any], bool] | list[Callable[[Any], bool]]:
+        del batch
+        return V.list_not_empty
+
+    def _get_negative_prompt_embeds_validator(
+        self, batch: Req
+    ) -> Callable[[Any], bool] | list[Callable[[Any], bool]]:
+        return lambda x: not batch.do_classifier_free_guidance or V.list_not_empty(x)
 
     def _run_denoising_step(
         self,
@@ -1923,7 +1934,11 @@ class DenoisingStage(PipelineStage):
         result.add_check("timesteps", batch.timesteps, [V.is_tensor, V.min_dims(1)])
         # disable temporarily for image-generation models
         # result.add_check("latents", batch.latents, [V.is_tensor, V.with_dims(5)])
-        result.add_check("prompt_embeds", batch.prompt_embeds, V.list_not_empty)
+        result.add_check(
+            "prompt_embeds",
+            batch.prompt_embeds,
+            self._get_prompt_embeds_validator(batch),
+        )
         result.add_check("image_embeds", batch.image_embeds, V.is_list)
         # result.add_check(
         #     "image_latent", batch.image_latent, V.none_or_tensor_with_dims(5)
@@ -1942,7 +1957,7 @@ class DenoisingStage(PipelineStage):
         result.add_check(
             "negative_prompt_embeds",
             batch.negative_prompt_embeds,
-            lambda x: not batch.do_classifier_free_guidance or V.list_not_empty(x),
+            self._get_negative_prompt_embeds_validator(batch),
         )
         return result
 
