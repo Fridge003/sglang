@@ -8,15 +8,14 @@ If the actual run is significantly better than the baseline, the improved cases 
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 import openai
 import pytest
 import requests
-import transformers
 from openai import OpenAI
-from packaging import version
 
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
@@ -52,29 +51,15 @@ from sglang.multimodal_gen.test.test_utils import (
 
 logger = init_logger(__name__)
 
-
-def _validate_case_environment(case: DiffusionTestCase) -> None:
-    model_path = case.server_args.model_path
-    if not model_path.startswith("Qwen/Qwen-Image"):
-        return
-
-    min_version = version.parse("5.3.0")
-    current_version = version.parse(
-        version.parse(transformers.__version__).base_version
-    )
-    if current_version < min_version:
-        pytest.fail(
-            f"{case.id}: Qwen-Image server tests require transformers>={min_version}, "
-            f"found {transformers.__version__}. "
-            "This environment is inconsistent with python/pyproject.toml and will "
-            "fail with opaque 500 errors during generation."
-        )
+# Track test cases missing estimated_full_test_time_s for time measurement output
+_MISSING_ESTIMATED_TIME_CASES: set[str] = set()
+_PENDING_BASELINE_DUMPS: dict[str, tuple["PerformanceSummary", bool]] = {}
 
 
 @pytest.fixture
 def diffusion_server(case: DiffusionTestCase) -> ServerContext:
     """Start a diffusion server for a single case and tear it down afterwards."""
-    _validate_case_environment(case)
+    _fixture_start_time = time.perf_counter()
     server_args = case.server_args
 
     # Skip ring attention tests on AMD/ROCm - Ring Attention requires Flash Attention
@@ -139,10 +124,26 @@ def diffusion_server(case: DiffusionTestCase) -> ServerContext:
         env_vars["SGLANG_CACHE_DIT_ENABLED"] = "true"
 
     # start server
+    wait_deadline = float(os.environ.get("SGLANG_TEST_WAIT_SECS", "1200"))
+    logger.info(
+        "[server-test] Starting server for test case: %s\n"
+        "  Model: %s\n"
+        "  Port: %s\n"
+        "  Wait deadline: %ss\n"
+        "  Extra args: %s\n"
+        "  Num GPUs: %s",
+        case.id,
+        server_args.model_path,
+        port,
+        wait_deadline,
+        extra_args,
+        server_args.num_gpus,
+    )
+
     manager = ServerManager(
         model=server_args.model_path,
         port=port,
-        wait_deadline=float(os.environ.get("SGLANG_TEST_WAIT_SECS", "1200")),
+        wait_deadline=wait_deadline,
         extra_args=extra_args,
         env_vars=env_vars,
     )
@@ -176,6 +177,38 @@ def diffusion_server(case: DiffusionTestCase) -> ServerContext:
         yield ctx
     finally:
         ctx.cleanup()
+
+        _fixture_end_time = time.perf_counter()
+        _measured_full_time = _fixture_end_time - _fixture_start_time
+        is_baseline_generation_mode = os.environ.get("SGLANG_GEN_BASELINE", "0") == "1"
+
+        pending_dump = _PENDING_BASELINE_DUMPS.pop(case.id, None)
+        if pending_dump is not None:
+            summary, missing_scenario = pending_dump
+            DiffusionServerBase()._dump_baseline_for_testcase(
+                case,
+                summary,
+                missing_scenario=missing_scenario,
+                measured_full_time=_measured_full_time,
+            )
+
+        scenario = BASELINE_CONFIG.scenarios.get(case.id)
+        needs_estimated_time = (
+            scenario is None or scenario.estimated_full_test_time_s is None
+        )
+
+        if needs_estimated_time and not is_baseline_generation_mode:
+            _MISSING_ESTIMATED_TIME_CASES.add(case.id)
+            logger.error(
+                f'\n{"=" * 60}\n'
+                f'Add "estimated_full_test_time_s" to scenario "{case.id}":\n\n'
+                f"File: python/sglang/multimodal_gen/test/server/perf_baselines.json\n\n"
+                f'    "{case.id}": {{\n'
+                f"        ...\n"
+                f'        "estimated_full_test_time_s": {_measured_full_time:.1f}\n'
+                f"    }}\n"
+                f'{"=" * 60}\n'
+            )
 
 
 class DiffusionServerBase:
@@ -292,6 +325,16 @@ Consider updating perf_baselines.json with the snippets below:
             if not is_baseline_generation_mode:
                 missing_scenario = True
 
+        # Check for missing estimated_full_test_time_s
+        missing_estimated_time = False
+        if (
+            not missing_scenario
+            and not is_baseline_generation_mode
+            and scenario.estimated_full_test_time_s is None
+        ):
+            missing_estimated_time = True
+            _MISSING_ESTIMATED_TIME_CASES.add(case.id)
+
         validator_name = case.server_args.custom_validator or "default"
         validator_class = VALIDATOR_REGISTRY.get(validator_name, PerformanceValidator)
 
@@ -304,7 +347,11 @@ Consider updating perf_baselines.json with the snippets below:
         summary = validator.collect_metrics(perf_record)
 
         if case.run_perf_check:
-            if is_baseline_generation_mode or missing_scenario:
+            if is_baseline_generation_mode:
+                _PENDING_BASELINE_DUMPS[case.id] = (summary, missing_scenario)
+                return
+
+            if missing_scenario:
                 self._dump_baseline_for_testcase(case, summary, missing_scenario)
                 if missing_scenario:
                     pytest.fail(
@@ -371,8 +418,8 @@ Consider updating perf_baselines.json with the snippets below:
             is_sig_faster(summary.e2e_ms, scenario.expected_e2e_ms)
             or is_sig_faster(summary.avg_denoise_ms, scenario.expected_avg_denoise_ms)
             or is_sig_faster(
-                summary.median_denoise_ms, scenario.expected_median_denoise_ms
-            )
+            summary.median_denoise_ms, scenario.expected_median_denoise_ms
+        )
         ):
             is_improved = True
         # Combine metrics, always taking the better (lower) value
@@ -389,7 +436,7 @@ Consider updating perf_baselines.json with the snippets below:
                 safe_get_metric(scenario.denoise_step_ms, step),
             )
             for step in set(summary.all_denoise_steps.keys())
-            | set(scenario.denoise_step_ms)
+                        | set(scenario.denoise_step_ms)
         }
 
         # Check for stage-level improvements
@@ -430,6 +477,7 @@ Consider updating perf_baselines.json with the snippets below:
         case: DiffusionTestCase,
         summary: "PerformanceSummary",
         missing_scenario: bool = False,
+        measured_full_time: float | None = None,
     ) -> None:
         """Dump performance metrics as a JSON scenario for baselines."""
         import json
@@ -446,6 +494,9 @@ Consider updating perf_baselines.json with the snippets below:
             "expected_avg_denoise_ms": round(summary.avg_denoise_ms, 2),
             "expected_median_denoise_ms": round(summary.median_denoise_ms, 2),
         }
+
+        if measured_full_time is not None:
+            baseline["estimated_full_test_time_s"] = round(measured_full_time, 1)
 
         # Video-specific metrics
         if case.server_args.modality == "video":
