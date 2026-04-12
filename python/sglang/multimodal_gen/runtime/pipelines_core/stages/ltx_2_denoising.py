@@ -686,7 +686,9 @@ class LTX2DenoisingStage(DenoisingStage):
         sigmas = getattr(self.scheduler, "sigmas", None)
         if sigmas is None or not isinstance(sigmas, torch.Tensor):
             raise ValueError("Expected scheduler.sigmas to be a tensor for LTX-2.")
-        sigma = sigmas[step.step_index].to(device=ctx.latents.device, dtype=torch.float32)
+        sigma = sigmas[step.step_index].to(
+            device=ctx.latents.device, dtype=torch.float32
+        )
         sigma_next = sigmas[step.step_index + 1].to(
             device=ctx.latents.device, dtype=torch.float32
         )
@@ -958,7 +960,9 @@ class LTX2DenoisingStage(DenoisingStage):
                 v_neg, a_v_neg = step.current_model(
                     **build_model_kwargs(
                         encoder_hidden_states=batch.negative_prompt_embeds[0],
-                        audio_encoder_hidden_states=batch.negative_audio_prompt_embeds[0],
+                        audio_encoder_hidden_states=batch.negative_audio_prompt_embeds[
+                            0
+                        ],
                         encoder_attention_mask=self._get_ltx_prompt_attention_mask(
                             batch,
                             is_ltx23_variant=(
@@ -1092,9 +1096,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     cfg_scale=float(stage1_guider_params["video_cfg_scale"]),
                     stg_scale=float(stage1_guider_params["video_stg_scale"]),
                     rescale_scale=float(stage1_guider_params["video_rescale_scale"]),
-                    modality_scale=float(
-                        stage1_guider_params["video_modality_scale"]
-                    ),
+                    modality_scale=float(stage1_guider_params["video_modality_scale"]),
                 )
             if not audio_skip:
                 denoised_audio = self._ltx2_calculate_guided_x0(
@@ -1117,21 +1119,19 @@ class LTX2DenoisingStage(DenoisingStage):
                     cfg_scale=float(stage1_guider_params["audio_cfg_scale"]),
                     stg_scale=float(stage1_guider_params["audio_stg_scale"]),
                     rescale_scale=float(stage1_guider_params["audio_rescale_scale"]),
-                    modality_scale=float(
-                        stage1_guider_params["audio_modality_scale"]
-                    ),
+                    modality_scale=float(stage1_guider_params["audio_modality_scale"]),
                 )
         elif (
             batch.do_classifier_free_guidance
             and denoised_video_neg is not None
             and denoised_audio_neg is not None
         ):
-            denoised_video = denoised_video + (
-                batch.guidance_scale - 1.0
-            ) * (denoised_video - denoised_video_neg)
-            denoised_audio = denoised_audio + (
-                batch.guidance_scale - 1.0
-            ) * (denoised_audio - denoised_audio_neg)
+            denoised_video = denoised_video + (batch.guidance_scale - 1.0) * (
+                denoised_video - denoised_video_neg
+            )
+            denoised_audio = denoised_audio + (batch.guidance_scale - 1.0) * (
+                denoised_audio - denoised_audio_neg
+            )
 
         if ctx.denoise_mask is not None and ctx.clean_latent is not None:
             denoised_video = (
