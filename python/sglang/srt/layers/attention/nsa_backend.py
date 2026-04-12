@@ -9,7 +9,6 @@ import torch
 from sglang.srt.configs.model_config import (
     get_nsa_index_topk,
     is_deepseek_nsa,
-    is_glm5_nsa,
 )
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
@@ -1782,7 +1781,7 @@ class NativeSparseAttnBackend(
         )
 
         if self.device_sm_major >= 10:
-            if is_glm5_nsa():
+            if layer.head_dim == 256:
                 # Use FA4 for GLM-5 on B200
                 return flash_attn_varlen_func(
                     q=q,
