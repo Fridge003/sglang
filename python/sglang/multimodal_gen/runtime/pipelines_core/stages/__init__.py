@@ -24,9 +24,6 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_av import (
     LTX2AVDenoisingStage,
     LTX2RefinementStage,
 )
-from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
-    LTX2DenoisingStage,
-)
 from sglang.multimodal_gen.runtime.pipelines_core.stages.denoising_dmd import (
     DmdDenoisingStage,
 )
@@ -58,6 +55,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation impo
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.latent_preparation_av import (
     LTX2AVLatentPreparationStage,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
+    LTX2DenoisingStage,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.text_connector import (
     LTX2TextConnectorStage,
