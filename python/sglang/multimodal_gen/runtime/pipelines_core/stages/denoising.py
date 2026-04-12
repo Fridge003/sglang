@@ -869,6 +869,8 @@ class DenoisingStage(PipelineStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
+        # Run a single denoising step. Model-specific stages should override this
+        # instead of the whole loop whenever possible.
         latent_model_input = ctx.latents.to(ctx.target_dtype)
         if batch.image_latent is not None:
             assert (
