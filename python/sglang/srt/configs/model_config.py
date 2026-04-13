@@ -180,11 +180,7 @@ class ModelConfig:
         self.is_generation = is_generation_model(
             self.hf_config.architectures, is_embedding
         )
-        has_multimodal_subconfig = (
-            self.hf_config is not self.hf_text_config
-            or hasattr(self.hf_config, "vision_config")
-            or hasattr(self.hf_config, "audio_config")
-        )
+        has_multimodal_subconfig = self.hf_config is not self.hf_text_config
         self.is_multimodal = enable_multimodal and (
             is_multimodal_model(self.hf_config.architectures)
             or has_multimodal_subconfig
