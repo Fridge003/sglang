@@ -386,6 +386,23 @@ pip install -e . --no-build-isolation
 # ------------------------------------------------------------------------------
 # Prepare runner
 # ------------------------------------------------------------------------------
+# Expose NVIDIA cu13 libraries to the dynamic linker.
+# nvidia-cuda-runtime>=13.x installs libcudart.so.13 under site-packages/nvidia/cu13/lib/
+# but does not ship a .pth file, so dlopen() can't find it via LD_LIBRARY_PATH.
+# Flashinfer's pre-compiled JIT cache .so files link against libcudart.so.13 and fail
+# to load unless this path is added explicitly.
+NVIDIA_CU13_LIB=$(python3 -c "
+import glob, os
+paths = glob.glob('/usr/local/lib/python*/dist-packages/nvidia/cu13/lib')
+print(paths[0] if paths else '')
+" 2>/dev/null || true)
+if [ -n "${NVIDIA_CU13_LIB}" ] && [ -d "${NVIDIA_CU13_LIB}" ]; then
+    echo "Adding ${NVIDIA_CU13_LIB} to LD_LIBRARY_PATH"
+    export LD_LIBRARY_PATH="${NVIDIA_CU13_LIB}:${LD_LIBRARY_PATH:-}"
+    # Persist to subsequent GitHub Actions steps
+    [ -n "${GITHUB_ENV:-}" ] && echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
+fi
+
 # Prepare the CI runner (cleanup HuggingFace cache, etc.)
 bash "${SCRIPT_DIR}/prepare_runner.sh"
 
