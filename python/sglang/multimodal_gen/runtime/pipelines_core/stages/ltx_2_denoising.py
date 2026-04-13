@@ -44,7 +44,7 @@ from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class LTX2DenoisingContext(DenoisingContext):
     """Loop-scoped denoising state for joint LTX-2 video and audio generation."""
 
@@ -574,7 +574,7 @@ class LTX2DenoisingStage(DenoisingStage):
         """Extend the base context with LTX-2 audio, SP, and TI2V state."""
         self._disable_cache_dit_for_request = batch.image_path is not None
         base_ctx = super()._prepare_denoising_loop(batch, server_args)
-        ctx = LTX2DenoisingContext(**vars(base_ctx))
+        ctx = LTX2DenoisingContext(**base_ctx.to_kwargs())
         ctx.is_ltx23_variant = is_ltx23_native_variant(
             server_args.pipeline_config.vae_config.arch_config
         )
@@ -689,6 +689,7 @@ class LTX2DenoisingStage(DenoisingStage):
         if ctx.audio_scheduler is None:
             raise ValueError("LTX-2 audio scheduler was not prepared.")
 
+        # 1. Read the scheduler sigma pair and derive the Euler delta.
         sigmas = getattr(self.scheduler, "sigmas", None)
         if sigmas is None or not isinstance(sigmas, torch.Tensor):
             raise ValueError("Expected scheduler.sigmas to be a tensor for LTX-2.")
@@ -700,6 +701,7 @@ class LTX2DenoisingStage(DenoisingStage):
         )
         dt = sigma_next - sigma
 
+        # 2. Materialize the current video/audio latent inputs in the compute dtype.
         latent_model_input = ctx.latents.to(ctx.target_dtype)
         audio_latent_model_input = ctx.audio_latents.to(ctx.target_dtype)
         stage1_guider_params = self._get_ltx2_stage1_guider_params(
@@ -715,6 +717,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 f"Unexpected audio latents rank: {audio_latent_model_input.ndim}, shape={tuple(audio_latent_model_input.shape)}"
             )
 
+        # 3. Prepare any LTX-specific RoPE coordinates and timestep layouts.
         video_coords = None
         audio_coords = None
         if not ctx.use_ltx23_legacy_one_stage:
@@ -770,6 +773,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 * timestep_scale_multiplier
             ).expand(batch_size)
 
+        # 4. Build attention masks that account for SP padding and replicated audio.
         if ctx.use_ltx23_legacy_one_stage:
             video_self_attention_mask = None
             audio_self_attention_mask = None
@@ -845,6 +849,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 kwargs["disable_v2a_cross_attn"] = True
             return kwargs
 
+        # 5. Run the branch-specific LTX forward path and apply CFG/guider logic.
         prompt_attention_mask = self._get_ltx_prompt_attention_mask(
             batch,
             is_ltx23_variant=(
@@ -1145,6 +1150,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 + ctx.clean_latent.float() * (1.0 - ctx.denoise_mask)
             )
 
+        # 6. Convert x0 predictions back to velocity and update both latent streams.
         if sigma_val == 0.0:
             v_video = torch.zeros_like(denoised_video)
             v_audio = torch.zeros_like(denoised_audio)
@@ -1200,11 +1206,16 @@ class LTX2DenoisingStage(DenoisingStage):
         trajectory_latents: list,
         trajectory_timesteps: list,
         server_args: ServerArgs,
+        trajectory_audio_latents: list | None = None,
         is_warmup: bool = False,
         *args,
         **kwargs,
     ):
         """Trim SP token padding before delegating to the base finalizer."""
+        if trajectory_audio_latents:
+            batch.trajectory_audio_latents = torch.stack(
+                trajectory_audio_latents, dim=1
+            ).cpu()
         latents = self._truncate_sp_padded_token_latents(batch, latents)
         super()._post_denoising_loop(
             batch=batch,

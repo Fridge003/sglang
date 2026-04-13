@@ -41,6 +41,7 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
         *args,
         **kwargs,
     ):
+        """Finalize AV requests by gathering audio latents and unpacking both streams."""
         if trajectory_latents:
             trajectory_tensor = torch.stack(trajectory_latents, dim=1)
             trajectory_timesteps_tensor = torch.stack(trajectory_timesteps, dim=0)
@@ -89,6 +90,8 @@ class LTX2AVDenoisingStage(LTX2DenoisingStage):
 
 
 class LTX2RefinementStage(LTX2AVDenoisingStage):
+    """Stage-2 refinement wrapper that re-noises distilled LTX latents once."""
+
     def __init__(
         self, transformer, scheduler, distilled_sigmas, vae=None, audio_vae=None
     ):
@@ -151,6 +154,7 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         return "LTX-2.3" not in str(getattr(server_args, "model_path", ""))
 
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
+        """Run the distilled refinement schedule on top of the shared AV denoiser."""
         batch.extra["ltx2_phase"] = "stage2"
         if self._should_reset_stage2_generators(server_args):
             self._reset_stage2_generators(batch)

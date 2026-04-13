@@ -11,13 +11,12 @@ import os
 import time
 import weakref
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from typing import Any
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 from tqdm.auto import tqdm
 
 from sglang.multimodal_gen import envs
@@ -25,9 +24,6 @@ from sglang.multimodal_gen.configs.pipeline_configs.base import ModelTaskType, S
 from sglang.multimodal_gen.configs.pipeline_configs.flux import (
     Flux2PipelineConfig,
     FluxPipelineConfig,
-)
-from sglang.multimodal_gen.configs.pipeline_configs.wan import (
-    Wan2_2_TI2V_5B_Config,
 )
 from sglang.multimodal_gen.configs.pipeline_configs.zimage import ZImagePipelineConfig
 from sglang.multimodal_gen.runtime.cache.cache_dit_integration import (
@@ -42,7 +38,6 @@ from sglang.multimodal_gen.runtime.distributed import (
     cfg_model_parallel_all_reduce,
     get_local_torch_device,
     get_sp_group,
-    get_sp_parallel_rank,
     get_sp_world_size,
     get_tp_group,
     get_world_group,
@@ -55,11 +50,11 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_cfg_group,
     get_classifier_free_guidance_rank,
 )
-from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.attention.STA_configuration import (
     configure_sta,
     save_mask_search_results,
 )
+from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader import (
     TransformerLoader,
 )
@@ -68,6 +63,13 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import (
     PipelineStage,
     StageParallelismType,
+)
+from sglang.multimodal_gen.runtime.pipelines_core.stages.model_specific_stages.wan_ti2v import (
+    blend_wan_ti2v_latents,
+    expand_wan_ti2v_timestep,
+    prepare_wan_ti2v_latents,
+    prepare_wan_ti2v_sp_inputs,
+    should_apply_wan_ti2v,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     StageValidators as V,
@@ -90,13 +92,13 @@ from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiT
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 from sglang.multimodal_gen.runtime.utils.profiler import SGLDiffusionProfiler
-from sglang.multimodal_gen.utils import dict_to_3d_list, masks_like
+from sglang.multimodal_gen.utils import dict_to_3d_list
 from sglang.srt.utils.common import get_compiler_backend
 
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class DenoisingContext:
     """Loop-scoped state shared across the denoising skeleton and its hooks."""
 
@@ -125,6 +127,10 @@ class DenoisingContext:
 
     def get(self, key: str, default: Any = None) -> Any:
         return getattr(self, key, default)
+
+    def to_kwargs(self) -> dict[str, Any]:
+        """Return a shallow field mapping for derived context construction."""
+        return {item.name: getattr(self, item.name) for item in fields(self)}
 
 
 @dataclass(slots=True)
@@ -476,118 +482,6 @@ class DenoisingStage(PipelineStage):
         # return StageParallelismType.CFG_PARALLEL if get_global_server_args().enable_cfg_parallel else StageParallelismType.REPLICATED
         return StageParallelismType.REPLICATED
 
-    def _preprocess_latents_for_wan_ti2v(
-        self, latents, target_dtype, batch, server_args: ServerArgs
-    ):
-        # FIXME: should probably move to latent preparation stage, to handle with offload
-        # Wan2.2 TI2V directly replaces the first frame of the latent with
-        # the image latent instead of appending along the channel dim
-        assert batch.image_latent is None, "TI2V task should not have image latents"
-        assert self.vae is not None, "VAE is not provided for TI2V task"
-        self.vae = self.vae.to(batch.condition_image.device)
-        z = self.vae.encode(batch.condition_image).mean.float()
-        if self.vae.device != "cpu" and server_args.vae_cpu_offload:
-            self.vae = self.vae.to("cpu")
-        if hasattr(self.vae, "shift_factor") and self.vae.shift_factor is not None:
-            if isinstance(self.vae.shift_factor, torch.Tensor):
-                z -= self.vae.shift_factor.to(z.device, z.dtype)
-            else:
-                z -= self.vae.shift_factor
-
-        if isinstance(self.vae.scaling_factor, torch.Tensor):
-            z = z * self.vae.scaling_factor.to(z.device, z.dtype)
-        else:
-            z = z * self.vae.scaling_factor
-        # z: [B, C, 1, H, W]
-        latent_model_input = latents.to(target_dtype)
-        # Keep as [B, C, T, H, W] for proper broadcasting
-        assert latent_model_input.ndim == 5
-
-        # Create mask with proper shape [B, C, T, H, W]
-        latent_for_mask = latent_model_input.squeeze(0)  # [C, T, H, W]
-        _, reserved_frames_masks = masks_like([latent_for_mask], zero=True)
-        reserved_frames_mask = reserved_frames_masks[0].unsqueeze(0)  # [1, C, T, H, W]
-
-        # replace GLOBAL first frame with image - proper broadcasting
-        # z: [B, C, 1, H, W], reserved_frames_mask: [1, C, T, H, W]
-        # Both will broadcast correctly
-        latents = (
-            1.0 - reserved_frames_mask
-        ) * z + reserved_frames_mask * latent_model_input
-        assert latents.ndim == 5
-        latents = latents.to(get_local_torch_device())
-        batch.latents = latents
-
-        F = batch.num_frames
-        temporal_scale = (
-            server_args.pipeline_config.vae_config.arch_config.scale_factor_temporal
-        )
-        spatial_scale = (
-            server_args.pipeline_config.vae_config.arch_config.scale_factor_spatial
-        )
-        patch_size = server_args.pipeline_config.dit_config.arch_config.patch_size
-        seq_len = (
-            ((F - 1) // temporal_scale + 1)
-            * (batch.height // spatial_scale)
-            * (batch.width // spatial_scale)
-            // (patch_size[1] * patch_size[2])
-        )
-        seq_len = int(math.ceil(seq_len / get_sp_world_size())) * get_sp_world_size()
-        return seq_len, z, reserved_frames_masks
-
-    def _postprocess_latents_for_wan_ti2v(self, z, reserved_frames_masks, batch):
-        rank_in_sp_group = get_sp_parallel_rank()
-        sp_world_size = get_sp_world_size()
-
-        if getattr(batch, "did_sp_shard_latents", False):
-            # Shard z (image latent) along time dimension
-            # z shape: [1, C, 1, H, W] - only first frame
-            # Only rank 0 has the first frame after sharding
-            if z.shape[2] == 1:
-                # z is single frame, only rank 0 needs it
-                if rank_in_sp_group == 0:
-                    z_sp = z
-                else:
-                    # Other ranks don't have the first frame
-                    z_sp = None
-            else:
-                # Should not happen for TI2V
-                z_sp = z
-
-            # Shard reserved_frames_mask along time dimension to match sharded latents
-            # reserved_frames_mask is a list from masks_like, extract reserved_frames_mask[0] first
-            # reserved_frames_mask[0] shape: [C, T, H, W]
-            # All ranks need their portion of reserved_frames_mask for timestep calculation
-            if reserved_frames_masks is not None:
-                reserved_frames_mask = reserved_frames_masks[
-                    0
-                ]  # Extract tensor from list
-                time_dim = reserved_frames_mask.shape[1]  # [C, T, H, W]
-                if time_dim > 0 and time_dim % sp_world_size == 0:
-                    reserved_frames_mask_sp_tensor = rearrange(
-                        reserved_frames_mask,
-                        "c (n t) h w -> c n t h w",
-                        n=sp_world_size,
-                    ).contiguous()
-                    reserved_frames_mask_sp_tensor = reserved_frames_mask_sp_tensor[
-                        :, rank_in_sp_group, :, :, :
-                    ]
-                    reserved_frames_mask_sp = (
-                        reserved_frames_mask_sp_tensor  # Store as tensor, not list
-                    )
-                else:
-                    reserved_frames_mask_sp = reserved_frames_mask
-            else:
-                reserved_frames_mask_sp = None
-        else:
-            # SP not enabled or latents not sharded
-            z_sp = z
-            reserved_frames_mask_sp = (
-                reserved_frames_masks[0] if reserved_frames_masks is not None else None
-            )  # Extract tensor
-
-        return reserved_frames_mask_sp, z_sp
-
     def _handle_boundary_ratio(
         self,
         server_args,
@@ -663,8 +557,8 @@ class DenoisingStage(PipelineStage):
         # Setup precision and autocast settings
         target_dtype = torch.bfloat16
         autocast_enabled = (
-            target_dtype != torch.float32
-        ) and not server_args.disable_autocast
+                               target_dtype != torch.float32
+                           ) and not server_args.disable_autocast
 
         # Prepare image latents and embeddings for I2V generation
         image_embeds = batch.image_embeds
@@ -687,17 +581,16 @@ class DenoisingStage(PipelineStage):
             assert neg_prompt_embeds is not None
             # Removed Tensor truthiness assert to avoid GPU sync
 
-        # specifically for Wan2_2_TI2V_5B_Config, not applicable for FastWan2_2_TI2V_5B_Config
-        should_preprocess_for_wan_ti2v = (
-            server_args.pipeline_config.task_type == ModelTaskType.TI2V
-            and batch.condition_image is not None
-            and type(server_args.pipeline_config) is Wan2_2_TI2V_5B_Config
-        )
+        should_preprocess_for_wan_ti2v = should_apply_wan_ti2v(batch, server_args)
 
         # TI2V specific preparations - before SP sharding
         if should_preprocess_for_wan_ti2v:
-            seq_len, z, reserved_frames_masks = self._preprocess_latents_for_wan_ti2v(
-                latents, target_dtype, batch, server_args
+            seq_len, z, reserved_frames_masks = prepare_wan_ti2v_latents(
+                self.vae,
+                latents,
+                target_dtype,
+                batch,
+                server_args,
             )
         else:
             seq_len, z, reserved_frames_masks = (
@@ -712,7 +605,7 @@ class DenoisingStage(PipelineStage):
 
         # Shard z and reserved_frames_mask for TI2V if SP is enabled
         if should_preprocess_for_wan_ti2v:
-            reserved_frames_mask_sp, z_sp = self._postprocess_latents_for_wan_ti2v(
+            reserved_frames_mask_sp, z_sp = prepare_wan_ti2v_sp_inputs(
                 z, reserved_frames_masks, batch
             )
         else:
@@ -878,10 +771,11 @@ class DenoisingStage(PipelineStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
-        """Run one scheduler-backed denoising step for the base implementation.
-            Model-specific stages should override this instead of the whole loop whenever possible to achieve better performance
+        """Run one scheduler-backed denoising step in the shared base path.
 
+           Model-specific stages should override this instead of the whole loop whenever possible to achieve better performance
         """
+        # 1. Prepare latent inputs in the model's compute dtype.
         latent_model_input = ctx.latents.to(ctx.target_dtype)
         if batch.image_latent is not None:
             assert (
@@ -891,6 +785,7 @@ class DenoisingStage(PipelineStage):
                 [latent_model_input, batch.image_latent], dim=1
             ).to(ctx.target_dtype)
 
+        # 2. Expand the timestep to the shape expected by the current model.
         timestep = self.expand_timestep_before_forward(
             batch,
             server_args,
@@ -900,10 +795,12 @@ class DenoisingStage(PipelineStage):
             ctx.reserved_frames_mask,
         )
 
+        # 3. Apply scheduler-side input scaling before the model forward.
         latent_model_input = self.scheduler.scale_model_input(
             latent_model_input, step.t_device
         )
 
+        # 4. Run the model prediction path, including CFG when enabled.
         noise_pred = self._predict_noise_with_cfg(
             current_model=step.current_model,
             latent_model_input=latent_model_input,
@@ -923,6 +820,7 @@ class DenoisingStage(PipelineStage):
         if server_args.comfyui_mode:
             batch.noise_pred = noise_pred
 
+        # 5. Advance the scheduler state with the predicted noise.
         ctx.latents = self.scheduler.step(
             model_output=noise_pred,
             timestep=step.t_device,
@@ -931,6 +829,7 @@ class DenoisingStage(PipelineStage):
             return_dict=False,
         )[0]
 
+        # 6. Re-apply any model-specific latent constraints after the update.
         ctx.latents = self.post_forward_for_ti2v_task(
             batch,
             server_args,
@@ -1184,45 +1083,18 @@ class DenoisingStage(PipelineStage):
         reserved_frames_mask,
     ):
         bsz = batch.raw_latent_shape[0]
-        should_preprocess_for_wan_ti2v = (
-            server_args.pipeline_config.task_type == ModelTaskType.TI2V
-            and batch.condition_image is not None
-            and type(server_args.pipeline_config) is Wan2_2_TI2V_5B_Config
-        )
+        should_preprocess_for_wan_ti2v = should_apply_wan_ti2v(batch, server_args)
 
         # expand timestep
         if should_preprocess_for_wan_ti2v:
-            # Explicitly cast t_device to the target float type at the beginning.
-            # This ensures any precision-based rounding (e.g., float32(999.0) -> bfloat16(1000.0))
-            # is applied consistently *before* it's used by any rank.
-            t_device_rounded = t_device.to(target_dtype)
-
-            local_seq_len = seq_len
-            if get_sp_world_size() > 1 and getattr(
-                batch, "did_sp_shard_latents", False
-            ):
-                local_seq_len = seq_len // get_sp_world_size()
-
-            if get_sp_parallel_rank() == 0 and reserved_frames_mask is not None:
-                # Rank 0 has the first frame, create a special timestep tensor
-                # NOTE: The spatial downsampling in the next line is suspicious but kept
-                # to match original model's potential training configuration.
-                temp_ts = (
-                    reserved_frames_mask[0][:, ::2, ::2] * t_device_rounded
-                ).flatten()
-
-                # Pad to full local sequence length
-                temp_ts = torch.cat(
-                    [
-                        temp_ts,
-                        temp_ts.new_ones(local_seq_len - temp_ts.size(0))
-                        * t_device_rounded,
-                    ]
-                )
-                timestep = temp_ts.unsqueeze(0).repeat(bsz, 1)
-            else:
-                # Other ranks get a uniform timestep tensor of the correct shape [B, local_seq_len]
-                timestep = t_device.repeat(bsz, local_seq_len)
+            assert seq_len is not None, "Wan TI2V requires a token sequence length."
+            timestep = expand_wan_ti2v_timestep(
+                batch,
+                t_device,
+                target_dtype,
+                seq_len,
+                reserved_frames_mask,
+            )
         else:
             timestep = t_device.repeat(bsz)
         return timestep
@@ -1230,27 +1102,10 @@ class DenoisingStage(PipelineStage):
     def post_forward_for_ti2v_task(
         self, batch: Req, server_args: ServerArgs, reserved_frames_mask, latents, z
     ):
-        """
-        For Wan2.2 ti2v task, global first frame should be replaced with encoded image after each timestep
-        """
-        should_preprocess_for_wan_ti2v = (
-            server_args.pipeline_config.task_type == ModelTaskType.TI2V
-            and batch.condition_image is not None
-            and type(server_args.pipeline_config) is Wan2_2_TI2V_5B_Config
-        )
+        """Re-apply Wan TI2V first-frame conditioning after each denoising step."""
+        should_preprocess_for_wan_ti2v = should_apply_wan_ti2v(batch, server_args)
         if should_preprocess_for_wan_ti2v:
-            # Apply TI2V mask blending with SP-aware z and reserved_frames_mask.
-            # This ensures the first frame is always the condition image after each step.
-            # This is only applied on rank 0, where z is not None.
-            if z is not None and reserved_frames_mask is not None:
-                # z: [1, C, 1, H, W]
-                # latents: [1, C, T_local, H, W]
-                # reserved_frames_mask: [C, T_local, H, W]
-                # Unsqueeze mask to [1, C, T_local, H, W] for broadcasting.
-                # z will broadcast along the time dimension.
-                latents = (
-                    1.0 - reserved_frames_mask.unsqueeze(0)
-                ) * z + reserved_frames_mask.unsqueeze(0) * latents
+            latents = blend_wan_ti2v_latents(latents, reserved_frames_mask, z)
 
         return latents
 
@@ -1814,9 +1669,9 @@ class DenoisingStage(PipelineStage):
 
         logger.info("STA_mode: %s", STA_mode)
         if (batch.num_frames, batch.height, batch.width) != (
-            69,
-            768,
-            1280,
+                69,
+                768,
+                1280,
         ) and STA_mode != "STA_inference":
             raise NotImplementedError(
                 "STA mask search/tuning is not supported for this resolution"
