@@ -181,8 +181,10 @@ class LTX2DenoisingStage(DenoisingStage):
         )
         denoise_mask[:, :num_img_tokens, :] = 0.0
         if clean_latent_background is not None:
-            clean_latent = clean_latent_background.detach().clone().to(
-                device=latents.device, dtype=latents.dtype
+            clean_latent = (
+                clean_latent_background.detach()
+                .clone()
+                .to(device=latents.device, dtype=latents.dtype)
             )
         elif zero_clean_latent:
             clean_latent = torch.zeros_like(latents)
