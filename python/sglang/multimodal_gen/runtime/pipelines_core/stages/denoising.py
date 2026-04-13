@@ -50,11 +50,11 @@ from sglang.multimodal_gen.runtime.distributed.parallel_state import (
     get_cfg_group,
     get_classifier_free_guidance_rank,
 )
+from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.layers.attention.STA_configuration import (
     configure_sta,
     save_mask_search_results,
 )
-from sglang.multimodal_gen.runtime.layers.attention.selector import get_attn_backend
 from sglang.multimodal_gen.runtime.loader.component_loaders.transformer_loader import (
     TransformerLoader,
 )
@@ -557,8 +557,8 @@ class DenoisingStage(PipelineStage):
         # Setup precision and autocast settings
         target_dtype = torch.bfloat16
         autocast_enabled = (
-                               target_dtype != torch.float32
-                           ) and not server_args.disable_autocast
+            target_dtype != torch.float32
+        ) and not server_args.disable_autocast
 
         # Prepare image latents and embeddings for I2V generation
         image_embeds = batch.image_embeds
@@ -773,7 +773,7 @@ class DenoisingStage(PipelineStage):
     ) -> None:
         """Run one scheduler-backed denoising step in the shared base path.
 
-           Model-specific stages should override this instead of the whole loop whenever possible to achieve better performance
+        Model-specific stages should override this instead of the whole loop whenever possible to achieve better performance
         """
         # 1. Prepare latent inputs in the model's compute dtype.
         latent_model_input = ctx.latents.to(ctx.target_dtype)
@@ -1669,9 +1669,9 @@ class DenoisingStage(PipelineStage):
 
         logger.info("STA_mode: %s", STA_mode)
         if (batch.num_frames, batch.height, batch.width) != (
-                69,
-                768,
-                1280,
+            69,
+            768,
+            1280,
         ) and STA_mode != "STA_inference":
             raise NotImplementedError(
                 "STA mask search/tuning is not supported for this resolution"
