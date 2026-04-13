@@ -27,7 +27,7 @@ for url in \
     [ -f "$whl" ] && unzip -tq "$whl" &>/dev/null || curl -fL -o "$whl" "$url"
 done
 
-pip install --no-deps "$NVIDIA_WHEEL_CACHE"/nvidia_cudnn_cu12-*.whl \
+pip install --no-deps --force-reinstall "$NVIDIA_WHEEL_CACHE"/nvidia_cudnn_cu12-*.whl \
     "$NVIDIA_WHEEL_CACHE"/nvidia_nvshmem_cu12-*.whl 2>/dev/null || true
 
 # If pre-cached NVIDIA pip wheels exist, tell pip to check there first.

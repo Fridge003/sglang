@@ -331,6 +331,16 @@ mark_step_done "Install extra dependency"
 # ------------------------------------------------------------------------------
 # Fix other dependencies
 # ------------------------------------------------------------------------------
+# Fix dependencies: Cudnn with version less than 9.16.0.29 will cause performance regression on Conv3D kernel.
+# Must happen BEFORE `import torch` below: if libcudnn.so.9 is missing (e.g. cache_nvidia_wheels.sh left a
+# partial install from a previous killed run), import torch will fail with ImportError: libcudnn.so.9.
+INSTALLED_CUDNN=$(pip show nvidia-cudnn-cu12 2>/dev/null | grep "^Version:" | awk '{print $2}' || echo "")
+if [ "$INSTALLED_CUDNN" = "$NVIDIA_CUDNN_VERSION" ]; then
+    echo "nvidia-cudnn-cu12==${NVIDIA_CUDNN_VERSION} already installed, skipping reinstall"
+else
+    $PIP_CMD install nvidia-cudnn-cu12==${NVIDIA_CUDNN_VERSION} $PIP_INSTALL_SUFFIX
+fi
+
 # Fix CUDA version mismatch between torch and torchaudio.
 # PyPI's torch bundles a specific CUDA version but torchaudio from pytorch.org/cu130 may use a different one.
 # This mismatch causes torchaudio's C extension to fail loading, producing:
@@ -353,14 +363,6 @@ if [ "$INSTALLED_NVSHMEM" = "$NVIDIA_NVSHMEM_VERSION" ]; then
     echo "nvidia-nvshmem-cu12==${NVIDIA_NVSHMEM_VERSION} already installed, skipping reinstall"
 else
     $PIP_CMD install nvidia-nvshmem-cu12==${NVIDIA_NVSHMEM_VERSION} $PIP_INSTALL_SUFFIX
-fi
-
-# Fix dependencies: Cudnn with version less than 9.16.0.29 will cause performance regression on Conv3D kernel
-INSTALLED_CUDNN=$(pip show nvidia-cudnn-cu12 2>/dev/null | grep "^Version:" | awk '{print $2}' || echo "")
-if [ "$INSTALLED_CUDNN" = "$NVIDIA_CUDNN_VERSION" ]; then
-    echo "nvidia-cudnn-cu12==${NVIDIA_CUDNN_VERSION} already installed, skipping reinstall"
-else
-    $PIP_CMD install nvidia-cudnn-cu12==${NVIDIA_CUDNN_VERSION} $PIP_INSTALL_SUFFIX
 fi
 
 mark_step_done "Fix other dependencies"
