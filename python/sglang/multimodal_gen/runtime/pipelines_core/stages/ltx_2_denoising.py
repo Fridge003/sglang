@@ -46,6 +46,8 @@ logger = init_logger(__name__)
 
 @dataclass
 class LTX2DenoisingContext(DenoisingContext):
+    """Loop-scoped denoising state for joint LTX-2 video and audio generation."""
+
     audio_latents: torch.Tensor | None = None
     audio_scheduler: object | None = None
     is_ltx23_variant: bool = False
@@ -569,6 +571,7 @@ class LTX2DenoisingStage(DenoisingStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> LTX2DenoisingContext:
+        """Extend the base context with LTX-2 audio, SP, and TI2V state."""
         self._disable_cache_dit_for_request = batch.image_path is not None
         base_ctx = super()._prepare_denoising_loop(batch, server_args)
         ctx = LTX2DenoisingContext(**vars(base_ctx))
@@ -653,6 +656,7 @@ class LTX2DenoisingStage(DenoisingStage):
     def _before_denoising_loop(
         self, ctx: LTX2DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
+        """Reset the mirrored audio scheduler before the shared loop begins."""
         super()._before_denoising_loop(ctx, batch, server_args)
         if ctx.audio_scheduler is None:
             raise ValueError("LTX-2 audio scheduler was not prepared.")
@@ -667,6 +671,7 @@ class LTX2DenoisingStage(DenoisingStage):
         t_int: int,
         timesteps_cpu: torch.Tensor,
     ):
+        """Preserve the legacy LTX-2 attention-metadata contract."""
         # Legacy LTX-2 paths used the plain attention-metadata builder call here.
         del ctx, t_int, timesteps_cpu
         return self._build_attn_metadata(step_index, batch, server_args)
@@ -678,6 +683,7 @@ class LTX2DenoisingStage(DenoisingStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
+        """Run one joint video/audio denoising step with LTX-2-specific guidance."""
         if ctx.audio_latents is None:
             raise ValueError("LTX-2 requires audio latents for denoising.")
         if ctx.audio_scheduler is None:
@@ -1167,6 +1173,7 @@ class LTX2DenoisingStage(DenoisingStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
+        """Record audio trajectory alongside the base video trajectory."""
         super()._record_trajectory(ctx, step, batch, server_args)
         if batch.return_trajectory_latents and ctx.audio_latents is not None:
             ctx.trajectory_audio_latents.append(ctx.audio_latents)
@@ -1174,6 +1181,7 @@ class LTX2DenoisingStage(DenoisingStage):
     def _finalize_denoising_loop(
         self, ctx: LTX2DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
+        """Expose audio latents before delegating to AV-aware postprocessing."""
         batch.audio_latents = ctx.audio_latents
         self._post_denoising_loop(
             batch=batch,
@@ -1196,6 +1204,7 @@ class LTX2DenoisingStage(DenoisingStage):
         *args,
         **kwargs,
     ):
+        """Trim SP token padding before delegating to the base finalizer."""
         latents = self._truncate_sp_padded_token_latents(batch, latents)
         super()._post_denoising_loop(
             batch=batch,
@@ -1207,10 +1216,12 @@ class LTX2DenoisingStage(DenoisingStage):
         )
 
     def _get_prompt_embeds_validator(self, batch: Req):
+        """Allow either tensor or list prompt embeddings for LTX-2 prompts."""
         del batch
         return lambda x: V.is_tensor(x) or V.list_not_empty(x)
 
     def _get_negative_prompt_embeds_validator(self, batch: Req):
+        """Allow either tensor or list negative prompt embeddings for LTX-2 CFG."""
         return (
             lambda x: (not batch.do_classifier_free_guidance)
             or V.is_tensor(x)

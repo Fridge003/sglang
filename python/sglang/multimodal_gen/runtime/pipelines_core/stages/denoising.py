@@ -98,6 +98,8 @@ logger = init_logger(__name__)
 
 @dataclass
 class DenoisingContext:
+    """Loop-scoped state shared across the denoising skeleton and its hooks."""
+
     extra_step_kwargs: dict[str, Any]
     target_dtype: torch.dtype
     autocast_enabled: bool
@@ -127,6 +129,8 @@ class DenoisingContext:
 
 @dataclass(slots=True)
 class DenoisingStepState:
+    """Per-step hot-path state computed once and reused within a denoising step."""
+
     step_index: int
     t_host: torch.Tensor
     t_device: torch.Tensor
@@ -472,7 +476,7 @@ class DenoisingStage(PipelineStage):
         # return StageParallelismType.CFG_PARALLEL if get_global_server_args().enable_cfg_parallel else StageParallelismType.REPLICATED
         return StageParallelismType.REPLICATED
 
-    def _preprocess_latents_for_ti2v(
+    def _preprocess_latents_for_wan_ti2v(
         self, latents, target_dtype, batch, server_args: ServerArgs
     ):
         # FIXME: should probably move to latent preparation stage, to handle with offload
@@ -531,7 +535,7 @@ class DenoisingStage(PipelineStage):
         seq_len = int(math.ceil(seq_len / get_sp_world_size())) * get_sp_world_size()
         return seq_len, z, reserved_frames_masks
 
-    def _postprocess_latents_for_ti2v(self, z, reserved_frames_masks, batch):
+    def _postprocess_latents_for_wan_ti2v(self, z, reserved_frames_masks, batch):
         rank_in_sp_group = get_sp_parallel_rank()
         sp_world_size = get_sp_world_size()
 
@@ -692,7 +696,7 @@ class DenoisingStage(PipelineStage):
 
         # TI2V specific preparations - before SP sharding
         if should_preprocess_for_wan_ti2v:
-            seq_len, z, reserved_frames_masks = self._preprocess_latents_for_ti2v(
+            seq_len, z, reserved_frames_masks = self._preprocess_latents_for_wan_ti2v(
                 latents, target_dtype, batch, server_args
             )
         else:
@@ -708,7 +712,7 @@ class DenoisingStage(PipelineStage):
 
         # Shard z and reserved_frames_mask for TI2V if SP is enabled
         if should_preprocess_for_wan_ti2v:
-            reserved_frames_mask_sp, z_sp = self._postprocess_latents_for_ti2v(
+            reserved_frames_mask_sp, z_sp = self._postprocess_latents_for_wan_ti2v(
                 z, reserved_frames_masks, batch
             )
         else:
@@ -795,6 +799,7 @@ class DenoisingStage(PipelineStage):
     def _before_denoising_loop(
         self, ctx: DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
+        """Prepare scheduler state before entering the shared denoising loop."""
         self.scheduler.set_begin_index(0)
 
     def _prepare_step_state(
@@ -806,6 +811,7 @@ class DenoisingStage(PipelineStage):
         t_host: torch.Tensor,
         timesteps_cpu: torch.Tensor,
     ) -> DenoisingStepState:
+        """Build the per-step state shared by the loop and model-specific hooks."""
         t_int = int(t_host.item())
         t_device = ctx.timesteps[step_index]
         current_model, current_guidance_scale = self._select_and_manage_model(
@@ -841,6 +847,7 @@ class DenoisingStage(PipelineStage):
         t_int: int,
         timesteps_cpu: torch.Tensor,
     ) -> Any | None:
+        """Build attention metadata for the current denoising step."""
         # Keep attention metadata preparation overridable so model-specific stages
         # can preserve their original semantics without duplicating step state setup.
         return self._build_attn_metadata(
@@ -854,12 +861,14 @@ class DenoisingStage(PipelineStage):
     def _get_prompt_embeds_validator(
         self, batch: Req
     ) -> Callable[[Any], bool] | list[Callable[[Any], bool]]:
+        """Return the prompt-embedding validator used by verify_input."""
         del batch
         return V.list_not_empty
 
     def _get_negative_prompt_embeds_validator(
         self, batch: Req
     ) -> Callable[[Any], bool] | list[Callable[[Any], bool]]:
+        """Return the negative-prompt validator used by verify_input."""
         return lambda x: not batch.do_classifier_free_guidance or V.list_not_empty(x)
 
     def _run_denoising_step(
@@ -869,8 +878,10 @@ class DenoisingStage(PipelineStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
-        # Run a single denoising step. Model-specific stages should override this
-        # instead of the whole loop whenever possible.
+        """Run one scheduler-backed denoising step for the base implementation.
+            Model-specific stages should override this instead of the whole loop whenever possible to achieve better performance
+
+        """
         latent_model_input = ctx.latents.to(ctx.target_dtype)
         if batch.image_latent is not None:
             assert (
@@ -935,6 +946,7 @@ class DenoisingStage(PipelineStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> None:
+        """Append the current step to the returned latent trajectory, if requested."""
         if not batch.return_trajectory_latents:
             return
         ctx.trajectory_timesteps.append(step.t_host)
@@ -943,6 +955,7 @@ class DenoisingStage(PipelineStage):
     def _finalize_denoising_loop(
         self, ctx: DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
+        """Finalize the shared loop by handing state to post-denoising processing."""
         self._post_denoising_loop(
             batch=batch,
             latents=ctx.latents,
