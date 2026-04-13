@@ -783,6 +783,12 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
           bash scripts/ci/amd/amd_ci_exec.sh pip install git+https://github.com/huggingface/transformers.git@96f807a33b75
 
+      - name: Pre-download model weights
+        timeout-minutes: 120
+        run: |
+          bash scripts/ci/amd/amd_ci_exec.sh \
+            python3 -c "from huggingface_hub import snapshot_download; snapshot_download('amd/GLM-5.1-MXFP4', max_workers=8)"
+
       - name: Accuracy Test (8-GPU GLM-5.1-MXFP4 NSA MoE)
         timeout-minutes: 120
         run: |
@@ -1488,6 +1494,12 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
           bash scripts/ci/amd/amd_ci_exec.sh pip install tabulate
           bash scripts/ci/amd/amd_ci_exec.sh pip install git+https://github.com/huggingface/transformers.git@96f807a33b75
+
+      - name: Pre-download model weights
+        timeout-minutes: 120
+        run: |
+          bash scripts/ci/amd/amd_ci_exec.sh \
+            python3 -c "from huggingface_hub import snapshot_download; snapshot_download('amd/GLM-5.1-MXFP4', max_workers=8)"
 
       - name: Accuracy Test MI35x (8-GPU GLM-5.1-MXFP4 NSA MoE)
         timeout-minutes: 180

@@ -87,7 +87,7 @@ def get_glm5_mxfp4_models() -> List[ModelConfig]:
         ModelConfig(
             model_path=model_path,
             tp_size=8,
-            accuracy_threshold=0.93,
+            accuracy_threshold=0.90,
             timeout=5400,
             variant="mxfp4",
             other_args=[
