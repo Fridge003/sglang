@@ -100,7 +100,9 @@ fi
 retry_with_backoff() {
   local max_attempts=$1; shift
   local attempt=1
-  local wait_secs=15
+  local wait_secs=60
+  # Add jitter (0-30s) so concurrent jobs don't all retry at the same instant
+  local jitter=$(( RANDOM % 30 ))
   while true; do
     if "$@"; then
       return 0
@@ -109,10 +111,12 @@ retry_with_backoff() {
       echo "Error: '$*' failed after ${max_attempts} attempts" >&2
       return 1
     fi
-    echo "Attempt ${attempt}/${max_attempts} failed. Retrying in ${wait_secs}s…" >&2
-    sleep "${wait_secs}"
+    local sleep_time=$(( wait_secs + jitter ))
+    echo "Attempt ${attempt}/${max_attempts} failed. Retrying in ${sleep_time}s…" >&2
+    sleep "${sleep_time}"
     (( attempt++ ))
-    (( wait_secs = wait_secs < 180 ? wait_secs * 2 : 180 ))
+    (( wait_secs = wait_secs < 300 ? wait_secs * 2 : 300 ))
+    jitter=$(( RANDOM % 30 ))
   done
 }
 
