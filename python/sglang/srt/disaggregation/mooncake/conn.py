@@ -406,9 +406,13 @@ class MooncakeKVManager(CommonKVManager):
         """Notify decode that a non-last staging chunk RDMA is complete."""
         try:
             na = NetworkAddress(req.endpoint, req.dst_port)
+            decode_pub = (
+                req.curve_public_key.encode("ascii") if req.curve_public_key else None
+            )
             self._connect(
                 na.to_tcp(),
                 is_ipv6=na.is_ipv6,
+                server_public_key=decode_pub,
             ).send_multipart(
                 [
                     b"CHUNK_READY",
