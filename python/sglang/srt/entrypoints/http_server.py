@@ -385,8 +385,8 @@ async def lifespan(fast_api_app: FastAPI):
             _global_state.tokenizer_manager,
         )
         if (
-            server_args.disaggregation_mode == "decode"
-            and server_args.disaggregation_decode_enable_radix_cache
+            server_args.disaggregation_mode != "null"
+            and not server_args.disable_radix_cache
         ):
             await _global_state.tokenizer_manager.flush_cache()
         logger.info("Warmup ended")
@@ -1981,8 +1981,8 @@ def _execute_server_warmup(server_args: ServerArgs):
                     f"Disaggregation warmup request completed with status {res.status_code}, resp: {res.json()}"
                 )
                 if (
-                    server_args.disaggregation_mode == "decode"
-                    and server_args.disaggregation_decode_enable_radix_cache
+                    server_args.disaggregation_mode != "null"
+                    and not server_args.disable_radix_cache
                 ):
                     try:
                         flush_res = requests.post(
@@ -1992,7 +1992,7 @@ def _execute_server_warmup(server_args: ServerArgs):
                             verify=ssl_verify,
                         )
                         if flush_res.status_code == 200:
-                            logger.info("Flushed cache during decode radix warmup")
+                            logger.info("Flushed warmup cache")
                         else:
                             logger.warning(
                                 f"Warmup cache flush failed: {flush_res.status_code}"
