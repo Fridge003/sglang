@@ -89,26 +89,6 @@ case "${GPU_ARCH}" in
 esac
 
 
-# Authenticate to Docker Hub to avoid anonymous pull rate limits (100 pulls/6h).
-# Credentials are optional; when absent we fall back to unauthenticated pulls.
-if [[ -n "${DOCKERHUB_AMD_USERNAME:-}" && -n "${DOCKERHUB_AMD_TOKEN:-}" ]]; then
-  echo "Logging in to Docker Hub as ${DOCKERHUB_AMD_USERNAME}…"
-  echo "${DOCKERHUB_AMD_TOKEN}" | docker login -u "${DOCKERHUB_AMD_USERNAME}" --password-stdin 2>/dev/null \
-    && echo "Docker Hub login successful" \
-    || echo "Warning: Docker Hub login failed; continuing with unauthenticated pulls" >&2
-
-  # Print Docker Hub account info and rate limit status
-  echo "--- Docker Hub Rate Limit Info ---"
-  DKRH=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" \
-    -u "${DOCKERHUB_AMD_USERNAME}:${DOCKERHUB_AMD_TOKEN}" 2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
-  if [[ -n "$DKRH" ]]; then
-    HEADERS=$(curl -s --head -H "Authorization: Bearer $DKRH" \
-      "https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest" 2>/dev/null)
-    echo "$HEADERS" | grep -iE 'ratelimit-limit|ratelimit-remaining|docker-ratelimit' || echo "(no rate limit headers — likely unlimited / paid plan)"
-  fi
-  echo "--- End Rate Limit Info ---"
-fi
-
 # Set up DEVICE_FLAG based on Kubernetes pod info
 if [[ -f /etc/podinfo/gha-render-devices ]]; then
   DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)

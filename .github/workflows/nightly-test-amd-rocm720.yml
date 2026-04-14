@@ -120,8 +120,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -152,8 +150,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -183,8 +179,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -215,8 +209,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -248,8 +240,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -282,8 +272,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -315,8 +303,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -359,8 +345,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -406,8 +390,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -453,8 +435,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -500,8 +480,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -545,8 +523,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -590,8 +566,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -623,8 +597,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -656,8 +628,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -689,8 +659,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -737,8 +705,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -785,8 +751,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: |
@@ -833,8 +797,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh --skip-test-time-deps
@@ -881,8 +843,6 @@ jobs:
           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
         env:
           GITHUB_WORKSPACE: ${{ github.workspace }}
-          DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-          DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
@@ -924,8 +884,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -955,8 +913,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -989,8 +945,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1037,8 +991,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1085,8 +1037,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1131,8 +1081,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1177,8 +1125,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1223,8 +1169,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1258,8 +1202,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1293,8 +1235,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1328,8 +1268,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1363,8 +1301,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1398,8 +1334,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1445,8 +1379,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1481,8 +1413,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1527,8 +1457,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
@@ -1574,8 +1502,6 @@ jobs:
 #           bash scripts/ci/amd/amd_ci_start_container.sh --rocm-version rocm720
 #         env:
 #           GITHUB_WORKSPACE: ${{ github.workspace }}
-#           DOCKERHUB_AMD_USERNAME: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
-#           DOCKERHUB_AMD_TOKEN: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
 #
 #       - name: Install dependencies
 #         run: |
