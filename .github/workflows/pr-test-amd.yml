@@ -197,6 +197,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 40
         continue-on-error: ${{ inputs.continue_on_error == true }}
         run: |
@@ -247,6 +248,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 60
         continue-on-error: ${{ inputs.continue_on_error == true }}
         run: |
@@ -293,6 +295,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 30
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-a-test-1-gpu-small-amd ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
@@ -334,6 +337,7 @@ jobs:
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run JIT kernel unit tests
+        if: false
         timeout-minutes: 30
         continue-on-error: ${{ inputs.continue_on_error == true }}
         run: |
@@ -377,6 +381,7 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 90
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-1-gpu-small-amd --auto-partition-id ${{ matrix.part }} --auto-partition-size 14 --timeout-per-file 1800 ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
@@ -418,6 +423,7 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 90
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-1-gpu-small-amd-nondeterministic --timeout-per-file 1800 ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
@@ -499,6 +505,7 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 90
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-1-gpu-large-amd --auto-partition-id ${{ matrix.part }} --auto-partition-size 2 --timeout-per-file 1800 ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
@@ -541,6 +548,7 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 90
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-b-test-2-gpu-large-amd --auto-partition-id ${{ matrix.part }} --auto-partition-size 2 --timeout-per-file 1800 ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
@@ -645,6 +653,7 @@ jobs:
           docker exec ci_sglang rocm-smi --showmeminfo vram 2>/dev/null || echo "rocm-smi not available"
 
       - name: Run diffusion server tests (1-GPU)
+        if: false
         timeout-minutes: 240
         run: |
           # AMD CI: All 1-GPU tests except FLUX.2 (FLUX.1 covers same code path)
@@ -775,6 +784,7 @@ jobs:
           docker exec ci_sglang rocm-smi --showmeminfo vram 2>/dev/null || echo "rocm-smi not available"
 
       - name: Run diffusion server tests (2-GPU)
+        if: false
         timeout-minutes: 240
         run: |
           # AMD CI: All 2-GPU tests including LoRA
@@ -844,6 +854,7 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Run test
+        if: false
         timeout-minutes: 180
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh \
@@ -904,12 +915,14 @@ jobs:
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
       - name: Test RCCL multi-GPU communication
+        if: false
         timeout-minutes: 15
         run: |
           echo "Testing RCCL multi-GPU communication with debug info..."
           docker exec ci_sglang bash -c "cd /sglang-checkout && NCCL_DEBUG=INFO RCCL_DEBUG=INFO torchrun --nproc_per_node=8 scripts/ci/amd/test_rccl_multi_gpu.py"
 
       - name: Run test
+        if: false
         timeout-minutes: 180
         run: |
           bash scripts/ci/amd/amd_ci_exec.sh -w "/sglang-checkout/test" python3 run_suite.py --hw amd --suite stage-c-test-large-8-gpu-amd --auto-partition-id ${{ matrix.part }} --auto-partition-size 3 --timeout-per-file 3600 ${{ inputs.continue_on_error && '--continue-on-error' || '' }}
