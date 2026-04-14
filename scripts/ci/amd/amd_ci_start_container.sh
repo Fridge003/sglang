@@ -89,6 +89,26 @@ case "${GPU_ARCH}" in
 esac
 
 
+# Authenticate to Docker Hub to avoid anonymous pull rate limits (100 pulls/6h).
+# Credentials are optional; when absent we fall back to unauthenticated pulls.
+if [[ -n "${DOCKERHUB_AMD_USERNAME:-}" && -n "${DOCKERHUB_AMD_TOKEN:-}" ]]; then
+  echo "Logging in to Docker Hub as ${DOCKERHUB_AMD_USERNAME}…"
+  echo "${DOCKERHUB_AMD_TOKEN}" | docker login -u "${DOCKERHUB_AMD_USERNAME}" --password-stdin 2>/dev/null \
+    && echo "Docker Hub login successful" \
+    || echo "Warning: Docker Hub login failed; continuing with unauthenticated pulls" >&2
+
+  # Print Docker Hub account info and rate limit status
+  echo "--- Docker Hub Rate Limit Info ---"
+  DKRH=$(curl -s "https://auth.docker.io/token?service=registry.docker.io&scope=repository:ratelimitpreview/test:pull" \
+    -u "${DOCKERHUB_AMD_USERNAME}:${DOCKERHUB_AMD_TOKEN}" 2>/dev/null | grep -o '"token":"[^"]*"' | cut -d'"' -f4)
+  if [[ -n "$DKRH" ]]; then
+    HEADERS=$(curl -s --head -H "Authorization: Bearer $DKRH" \
+      "https://registry-1.docker.io/v2/ratelimitpreview/test/manifests/latest" 2>/dev/null)
+    echo "$HEADERS" | grep -iE 'ratelimit-limit|ratelimit-remaining|docker-ratelimit' || echo "(no rate limit headers — likely unlimited / paid plan)"
+  fi
+  echo "--- End Rate Limit Info ---"
+fi
+
 # Set up DEVICE_FLAG based on Kubernetes pod info
 if [[ -f /etc/podinfo/gha-render-devices ]]; then
   DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
@@ -96,6 +116,25 @@ else
   DEVICE_FLAG="--device /dev/dri"
 fi
 
+# Retry a command with exponential backoff. Usage: retry_with_backoff <max_attempts> <cmd...>
+retry_with_backoff() {
+  local max_attempts=$1; shift
+  local attempt=1
+  local wait_secs=10
+  while true; do
+    if "$@"; then
+      return 0
+    fi
+    if (( attempt >= max_attempts )); then
+      echo "Error: '$*' failed after ${max_attempts} attempts" >&2
+      return 1
+    fi
+    echo "Attempt ${attempt}/${max_attempts} failed. Retrying in ${wait_secs}s…" >&2
+    sleep "${wait_secs}"
+    (( attempt++ ))
+    (( wait_secs = wait_secs < 120 ? wait_secs * 2 : 120 ))
+  done
+}
 
 # Find the latest image
 find_latest_image() {
@@ -181,7 +220,7 @@ if [[ -n "${CUSTOM_IMAGE}" ]]; then
   # Use explicitly provided custom image
   IMAGE="${CUSTOM_IMAGE}"
   echo "Using custom image: ${IMAGE}"
-  docker pull "${IMAGE}"
+  retry_with_backoff 5 docker pull "${IMAGE}"
 elif [[ -n "${BUILD_FROM_DOCKERFILE}" ]]; then
   # Build image from Dockerfile
   if [[ -z "${GPU_ARCH_BUILD}" ]]; then
@@ -212,7 +251,7 @@ else
   # Find the latest pre-built image
   IMAGE=$(find_latest_image "${GPU_ARCH}")
   echo "Pulling Docker image: ${IMAGE}"
-  docker pull "${IMAGE}"
+  retry_with_backoff 5 docker pull "${IMAGE}"
 fi
 
 CACHE_HOST=/home/runner/sgl-data
