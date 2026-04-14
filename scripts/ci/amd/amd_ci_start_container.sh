@@ -100,7 +100,7 @@ fi
 retry_with_backoff() {
   local max_attempts=$1; shift
   local attempt=1
-  local wait_secs=60
+  local wait_secs=30
   # Add jitter (0-30s) so concurrent jobs don't all retry at the same instant
   local jitter=$(( RANDOM % 30 ))
   while true; do
@@ -124,7 +124,7 @@ retry_with_backoff() {
 # Credentials are optional; when absent we fall back to unauthenticated pulls.
 if [[ -n "${DOCKERHUB_AMD_USERNAME:-}" && -n "${DOCKERHUB_AMD_TOKEN:-}" ]]; then
   echo "Logging in to Docker Hub…"
-  if retry_with_backoff 5 sh -c 'echo "${DOCKERHUB_AMD_TOKEN}" | docker login -u "${DOCKERHUB_AMD_USERNAME}" --password-stdin >/dev/null 2>&1'; then
+  if retry_with_backoff 6 sh -c 'echo "${DOCKERHUB_AMD_TOKEN}" | docker login -u "${DOCKERHUB_AMD_USERNAME}" --password-stdin >/dev/null 2>&1'; then
     echo "Docker Hub login successful"
   else
     echo "Warning: Docker Hub login failed after retries; continuing with unauthenticated pulls" >&2
@@ -215,7 +215,7 @@ if [[ -n "${CUSTOM_IMAGE}" ]]; then
   # Use explicitly provided custom image
   IMAGE="${CUSTOM_IMAGE}"
   echo "Using custom image: ${IMAGE}"
-  retry_with_backoff 5 docker pull "${IMAGE}"
+  retry_with_backoff 6 docker pull "${IMAGE}"
 elif [[ -n "${BUILD_FROM_DOCKERFILE}" ]]; then
   # Build image from Dockerfile
   if [[ -z "${GPU_ARCH_BUILD}" ]]; then
@@ -246,7 +246,7 @@ else
   # Find the latest pre-built image
   IMAGE=$(find_latest_image "${GPU_ARCH}")
   echo "Pulling Docker image: ${IMAGE}"
-  retry_with_backoff 5 docker pull "${IMAGE}"
+  retry_with_backoff 6 docker pull "${IMAGE}"
 fi
 
 CACHE_HOST=/home/runner/sgl-data
