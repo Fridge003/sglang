@@ -355,6 +355,21 @@ if [ "${TORCH_CUDA_VER}" != "${CU_VERSION}" ]; then
     TORCHVISION_VER=$(pip show torchvision 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
     echo "Reinstalling torchaudio==${TORCHAUDIO_VER} torchvision==${TORCHVISION_VER} from ${TORCH_CUDA_VER} index to match torch..."
     $PIP_CMD install "torchaudio==${TORCHAUDIO_VER}" "torchvision==${TORCHVISION_VER}" --index-url "https://download.pytorch.org/whl/${TORCH_CUDA_VER}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
+
+    # Also reinstall flashinfer JIT cache from the matching CUDA index.
+    # The JIT cache was initially downloaded from flashinfer.ai/whl/${CU_VERSION} (e.g. cu130),
+    # so its .so files link against libcudart.so.13. Since torch is ${TORCH_CUDA_VER} (e.g. cu129),
+    # using libcudart.so.12, this causes one of two failures at test time:
+    #   - Runners that have both cu12 and cu13 in LD_LIBRARY_PATH: "Multiple libcudart libraries found"
+    #   - Runners with only cu12 runtime: "libcudart.so.13: cannot open shared object file"
+    echo "Reinstalling flashinfer-jit-cache from ${TORCH_CUDA_VER} index to match torch CUDA version..."
+    $PIP_UNINSTALL_CMD flashinfer-jit-cache $PIP_UNINSTALL_SUFFIX || true
+    UNINSTALL_JIT_CACHE=true \
+        FLASHINFER_PYTHON_REQUIRED="$FLASHINFER_PYTHON_REQUIRED" \
+        CU_VERSION="$TORCH_CUDA_VER" \
+        PIP_CMD="$PIP_CMD" \
+        PIP_INSTALL_SUFFIX="$PIP_INSTALL_SUFFIX" \
+        bash "${SCRIPT_DIR}/ci_download_flashinfer_jit_cache.sh"
 fi
 
 # Fix dependencies: DeepEP depends on nvshmem 3.4.5 — skip reinstall when already correct (avoids pip races / wasted work)
@@ -386,23 +401,6 @@ pip install -e . --no-build-isolation
 # ------------------------------------------------------------------------------
 # Prepare runner
 # ------------------------------------------------------------------------------
-# Expose NVIDIA cu13 libraries to the dynamic linker.
-# nvidia-cuda-runtime>=13.x installs libcudart.so.13 under site-packages/nvidia/cu13/lib/
-# but does not ship a .pth file, so dlopen() can't find it via LD_LIBRARY_PATH.
-# Flashinfer's pre-compiled JIT cache .so files link against libcudart.so.13 and fail
-# to load unless this path is added explicitly.
-NVIDIA_CU13_LIB=$(python3 -c "
-import glob, os
-paths = glob.glob('/usr/local/lib/python*/dist-packages/nvidia/cu13/lib')
-print(paths[0] if paths else '')
-" 2>/dev/null || true)
-if [ -n "${NVIDIA_CU13_LIB}" ] && [ -d "${NVIDIA_CU13_LIB}" ]; then
-    echo "Adding ${NVIDIA_CU13_LIB} to LD_LIBRARY_PATH"
-    export LD_LIBRARY_PATH="${NVIDIA_CU13_LIB}:${LD_LIBRARY_PATH:-}"
-    # Persist to subsequent GitHub Actions steps
-    [ -n "${GITHUB_ENV:-}" ] && echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
-fi
-
 # Prepare the CI runner (cleanup HuggingFace cache, etc.)
 bash "${SCRIPT_DIR}/prepare_runner.sh"
 
