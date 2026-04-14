@@ -116,6 +116,17 @@ retry_with_backoff() {
   done
 }
 
+# Authenticate to Docker Hub to avoid anonymous pull rate limits.
+# Credentials are optional; when absent we fall back to unauthenticated pulls.
+if [[ -n "${DOCKERHUB_AMD_USERNAME:-}" && -n "${DOCKERHUB_AMD_TOKEN:-}" ]]; then
+  echo "Logging in to Docker Hub…"
+  if retry_with_backoff 5 sh -c 'echo "${DOCKERHUB_AMD_TOKEN}" | docker login -u "${DOCKERHUB_AMD_USERNAME}" --password-stdin >/dev/null 2>&1'; then
+    echo "Docker Hub login successful"
+  else
+    echo "Warning: Docker Hub login failed after retries; continuing with unauthenticated pulls" >&2
+  fi
+fi
+
 # Find the latest image
 find_latest_image() {
   local gpu_arch=$1
