@@ -409,6 +409,9 @@ class SchedulerDisaggregationPrefillMixin:
             self.waiting_queue.extend(
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
+            if self._engine_paused:
+                self.process_disagg_prefill_inflight_queue()
+                continue
 
             # Get the next batch to run
             batch = self.get_next_disagg_prefill_batch_to_run()
@@ -421,7 +424,7 @@ class SchedulerDisaggregationPrefillMixin:
                 result = self.run_batch(batch)
                 self.process_batch_result(batch, result)
             else:
-                self.self_check_during_idle()
+                self.on_idle()
 
             self.process_disagg_prefill_inflight_queue()
 
@@ -440,6 +443,9 @@ class SchedulerDisaggregationPrefillMixin:
             self.waiting_queue.extend(
                 self.disagg_prefill_bootstrap_queue.pop_bootstrapped()
             )
+            if self._engine_paused:
+                self.process_disagg_prefill_inflight_queue()
+                continue
 
             # Get the next batch to run
             batch = self.get_next_disagg_prefill_batch_to_run()
@@ -460,7 +466,7 @@ class SchedulerDisaggregationPrefillMixin:
                 self.process_batch_result(tmp_batch, tmp_result)
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
-                self.self_check_during_idle()
+                self.on_idle()
 
             self.process_disagg_prefill_inflight_queue()
 
@@ -774,17 +780,14 @@ class SchedulerDisaggregationPrefillMixin:
             # if not the last chunk and the last page is partial, delay the last partial page to the next send
             end_idx = end_idx - end_idx % page_size
 
-        # Keep the transfer cursor monotonic. With decode-side radix cache,
-        # start_idx may already be ahead of the current prefill chunk boundary.
-        # In that case we should send an empty chunk instead of rewinding.
         if end_idx < start_idx:
             logger.debug(
-                "send_kv_chunk clamp: rid=%s start_send_idx=%s end_idx=%s",
+                "send_kv_chunk skip: rid=%s start_send_idx=%s end_idx=%s",
                 req.rid,
                 start_idx,
                 end_idx,
             )
-            end_idx = start_idx
+            return
 
         kv_indices = (
             self.req_to_token_pool.req_to_token[req.req_pool_idx, start_idx:end_idx]

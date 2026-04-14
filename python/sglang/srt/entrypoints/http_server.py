@@ -384,10 +384,12 @@ async def lifespan(fast_api_app: FastAPI):
             server_args.warmups.split(","),
             _global_state.tokenizer_manager,
         )
-        logger.info("Warmup ended")
-        # Flush garbage KV inserted by fake-bootstrap warmup requests.
-        if server_args.disaggregation_mode != "null":
+        if (
+            server_args.disaggregation_mode == "decode"
+            and server_args.disaggregation_decode_enable_radix_cache
+        ):
             await _global_state.tokenizer_manager.flush_cache()
+        logger.info("Warmup ended")
 
     # Execute the general warmup
     warmup_thread = threading.Thread(
@@ -639,10 +641,7 @@ async def server_info():
         await _global_state.tokenizer_manager.get_internal_state()
     )
 
-    # This field is not serializable.
-    if hasattr(_global_state.tokenizer_manager.server_args, "model_config"):
-        del _global_state.tokenizer_manager.server_args.model_config
-
+    # server_args.model_config is not serializable but should be excluded by asdict.
     return {
         **dataclasses.asdict(_global_state.tokenizer_manager.server_args),
         **_global_state.scheduler_info,
@@ -817,7 +816,7 @@ async def list_external_corpora():
     return ORJSONResponse(
         {
             "success": result.success,
-            "corpus_ids": result.corpus_ids,
+            "corpus_token_counts": result.corpus_token_counts,
             "message": result.message,
         },
         status_code=200 if result.success else HTTPStatus.BAD_REQUEST,
@@ -1979,26 +1978,28 @@ def _execute_server_warmup(server_args: ServerArgs):
             )
             if res.status_code == 200:
                 logger.info(
-                    f"End of prefill disaggregation mode warmup with status {res.status_code}, resp: {res.json()}"
+                    f"Disaggregation warmup request completed with status {res.status_code}, resp: {res.json()}"
                 )
-                # Warmup with fake bootstrap produces garbage KV that must
-                # not persist in the radix cache.  Flush before serving real
-                # traffic so no future request matches stale/corrupted data.
-                try:
-                    flush_res = requests.post(
-                        url + "/flush_cache",
-                        headers=headers,
-                        timeout=30,
-                        verify=ssl_verify,
-                    )
-                    if flush_res.status_code == 200:
-                        logger.info("Flushed cache after disagg warmup")
-                    else:
-                        logger.warning(
-                            f"Post-warmup cache flush failed: {flush_res.status_code}"
+                if (
+                    server_args.disaggregation_mode == "decode"
+                    and server_args.disaggregation_decode_enable_radix_cache
+                ):
+                    try:
+                        flush_res = requests.post(
+                            url + "/flush_cache",
+                            headers=headers,
+                            timeout=30,
+                            verify=ssl_verify,
                         )
-                except Exception as e:
-                    logger.warning(f"Post-warmup cache flush request failed: {e}")
+                        if flush_res.status_code == 200:
+                            logger.info("Flushed cache during decode radix warmup")
+                        else:
+                            logger.warning(
+                                f"Warmup cache flush failed: {flush_res.status_code}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Warmup cache flush request failed: {e}")
+                logger.info("End of disaggregation warmup")
                 _global_state.tokenizer_manager.server_status = ServerStatus.Up
             else:
                 logger.info(

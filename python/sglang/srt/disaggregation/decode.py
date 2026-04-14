@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams
@@ -552,21 +551,10 @@ class DecodePreallocQueue:
     def _update_handshake_waiters(
         self, rids_to_check: Optional[List[str]] = None
     ) -> None:
-        need_poll = len(self.queue) > 0 and not all(
-            decode_req.waiting_for_input for decode_req in self.queue
-        )
-        # All TPs must agree on whether to poll and on queue size, otherwise
-        # poll_and_all_reduce (which sizes its tensor by queue length) hangs.
-        if dist.get_world_size(self.gloo_group) > 1:
-            n = len(self.queue)
-            local = torch.tensor(
-                [int(need_poll), n, -n], dtype=torch.int64, device="cpu"
-            )
-            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            if local[0].item() == 0 or local[1].item() != -local[2].item():
-                return
+        if not self.queue:
+            return
 
-        if not need_poll:
+        if all(decode_req.waiting_for_input for decode_req in self.queue):
             return
 
         polls = poll_and_all_reduce(
@@ -716,6 +704,21 @@ class DecodePreallocQueue:
                 failed_reqs.append(decode_req)
                 indices_to_remove.add(i)
 
+        # HiSparse physical constraint: max requests by device buffer capacity.
+        # Each admitted req needs padded_buffer_size from hisparse device pool.
+        # waiting_queue reqs already have device buffers (allocated in admit_request_direct),
+        # only transfer_queue reqs are pending device buffer allocation.
+        hisparse_req_budget = float("inf")
+        if self.scheduler.enable_hisparse:
+            hisparse_avail = (
+                self.token_to_kv_pool_allocator.hisparse_attn_allocator.available_size()
+            )
+            hisparse_req_budget = max(
+                0,
+                hisparse_avail // self.scheduler.hisparse_coordinator.padded_buffer_size
+                - len(self.transfer_queue.queue),
+            )
+
         # Then, preallocate the remaining requests if possible
         for i, decode_req in enumerate(self.queue):
             if rids_to_check is not None and decode_req.req.rid not in rids_to_check:
@@ -733,24 +736,33 @@ class DecodePreallocQueue:
             if self.req_to_metadata_buffer_idx_allocator.available_size() <= 0:
                 break
 
-            # Match prefix against decode's radix cache.
-            # When radix cache is disabled (ChunkCache), this returns
-            # prefix_len=0 and lock/unlock are no-ops.
-            prefix_indices, prefix_len = self._match_prefix_and_lock(decode_req.req)
-            # Align prefix_len down to page boundary so both prefill and
-            # decode agree on the page-aligned split point for KV transfer.
-            page_size = self.token_to_kv_pool_allocator.page_size
-            if page_size > 1 and prefix_len % page_size != 0:
-                prefix_len = page_align_floor(prefix_len, page_size)
-                prefix_indices = prefix_indices[:prefix_len]
+            if hisparse_req_budget <= 0:
+                break
 
             # Memory estimation: don't add if the projected memory cannot be met
             # TODO: add new_token ratio
             origin_input_len = len(decode_req.req.origin_input_ids)
-            fill_len = origin_input_len + max(len(decode_req.req.output_ids) - 1, 0)
-            required_alloc_tokens = self._required_alloc_tokens(
-                fill_len=fill_len, prefix_len=prefix_len
-            )
+            if self.scheduler.server_args.disaggregation_decode_enable_radix_cache:
+                # Match prefix against decode's radix cache.
+                prefix_indices, prefix_len = self._match_prefix_and_lock(decode_req.req)
+                # Align prefix_len down to page boundary so both prefill and
+                # decode agree on the page-aligned split point for KV transfer.
+                page_size = self.token_to_kv_pool_allocator.page_size
+                if page_size > 1 and prefix_len % page_size != 0:
+                    prefix_len = page_align_floor(prefix_len, page_size)
+                    prefix_indices = prefix_indices[:prefix_len]
+
+                fill_len = origin_input_len + max(
+                    len(decode_req.req.output_ids) - 1, 0
+                )
+                required_alloc_tokens = self._required_alloc_tokens(
+                    fill_len=fill_len, prefix_len=prefix_len
+                )
+            else:
+                prefix_indices = None
+                prefix_len = 0
+                required_alloc_tokens = origin_input_len
+
             required_tokens_for_request = (
                 required_alloc_tokens + self.num_reserved_decode_tokens
             )
@@ -777,11 +789,9 @@ class DecodePreallocQueue:
                 break
 
             dst_kv_indices = self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
-            # Recompute from actual pool state instead of manual subtraction.
-            # _pre_alloc consumed pages (with rounding) and
-            # _match_prefix_and_lock locked tree nodes -- both are now
-            # reflected in available_size() and evictable_size(), so the
-            # budget is exact with no page-rounding drift.
+            hisparse_req_budget -= 1
+            # Recompute from actual pool state for the next queue entry.
+            # This accounts for page rounding and newly locked evictable cache.
             allocatable_tokens = self._allocatable_tokens(
                 retractable_tokens=retractable_tokens,
                 count_retracted=True,
@@ -904,11 +914,18 @@ class DecodePreallocQueue:
             and len(self.scheduler.running_batch.reqs) > 0
             else 0
         )
-        available_size = self.token_to_kv_pool_allocator.available_size()
-        # Include evictable cache entries in the budget — they can be
-        # freed on demand before allocation.
-        if not self.scheduler.server_args.disable_radix_cache:
-            available_size += self.tree_cache.evictable_size()
+        if self.scheduler.enable_hisparse:
+            # HiSparse pre-alloc only allocates logical indices (alloc_logical_only),
+            # so the logical pool is the binding constraint for admission control.
+            available_size = (
+                self.token_to_kv_pool_allocator.logical_attn_allocator.available_size()
+            )
+        else:
+            available_size = self.token_to_kv_pool_allocator.available_size()
+            # Include evictable decode-radix cache entries in the budget -- they
+            # can be freed on demand before allocation.
+            if self.scheduler.server_args.disaggregation_decode_enable_radix_cache:
+                available_size += self.tree_cache.evictable_size()
         allocatable_tokens = available_size - max(
             # preserve some space for future decode
             self.num_reserved_decode_tokens
@@ -990,7 +1007,7 @@ class DecodePreallocQueue:
 
         # Evict cached entries if the pool doesn't have enough free pages.
         if (
-            not self.scheduler.server_args.disable_radix_cache
+            self.scheduler.server_args.disaggregation_decode_enable_radix_cache
             and self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens
         ):
             num_to_evict = (
@@ -1233,18 +1250,7 @@ class DecodeTransferQueue:
         kv_manager._staging_handler = self.staging_handler
 
     def pop_transferred(self, rids_to_check: Optional[List[str]] = None) -> List[Req]:
-        # All TPs must agree on queue size before poll_and_all_reduce.
-        # _resolve_pending_reqs does independent HTTP calls per TP, so queue
-        # sizes can transiently diverge; a mismatched all_reduce corrupts gloo.
-        if dist.get_world_size(self.gloo_group) > 1:
-            n = len(self.queue)
-            local = torch.tensor([n, -n], dtype=torch.int64, device="cpu")
-            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            if local[0].item() != -local[1].item():
-                return []
-            if local[0].item() == 0:
-                return []
-        elif not self.queue:
+        if not self.queue:
             return []
 
         if self.enable_staging:
@@ -1340,8 +1346,9 @@ class SchedulerDisaggregationDecodeMixin:
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            # polling and allocating kv cache
             self.process_decode_queue()
+            if self._engine_paused:
+                continue
 
             # Get the next batch to run
             batch = self.get_next_disagg_decode_batch_to_run()
@@ -1353,7 +1360,7 @@ class SchedulerDisaggregationDecodeMixin:
                 self.process_batch_result(batch, result)
             else:
                 # When the server is idle, do self-check and re-init some states
-                self.self_check_during_idle()
+                self.on_idle()
 
             # Update last_batch
             self.last_batch = batch
@@ -1367,8 +1374,9 @@ class SchedulerDisaggregationDecodeMixin:
             # Receive requests
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
-            # polling and allocating kv cache
             self.process_decode_queue()
+            if self._engine_paused:
+                continue
 
             # Get the next batch to run
             batch = self.get_next_disagg_decode_batch_to_run()
@@ -1386,7 +1394,7 @@ class SchedulerDisaggregationDecodeMixin:
                 tmp_batch, tmp_result = self.result_queue.popleft()
                 self.process_batch_result(tmp_batch, tmp_result)
             elif batch is None:
-                self.self_check_during_idle()
+                self.on_idle()
 
             # Run sample of the current batch
             # It depends on the result of the last batch (e.g., grammar), so we run it after the last batch is processed.
@@ -1473,7 +1481,7 @@ class SchedulerDisaggregationDecodeMixin:
                 # Non-radix decode keeps the original behavior.
                 tree_cache = (
                     None
-                    if not self.server_args.disable_radix_cache
+                    if self.server_args.disaggregation_decode_enable_radix_cache
                     else self.tree_cache
                 )
                 req.init_next_round_input(tree_cache)
@@ -1481,6 +1489,7 @@ class SchedulerDisaggregationDecodeMixin:
                 # only sees committed KV (fill_ids includes one uncommitted token).
                 if req.kv_committed_len is not None:
                     req.fill_ids = req.fill_ids[: req.kv_committed_len]
+                    req.set_extend_input_len(len(req.fill_ids) - len(req.prefix_indices))
             else:
                 waiting_queue.append(req)
 

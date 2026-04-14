@@ -84,17 +84,22 @@ class SchedulerOutputProcessorMixin:
 
     def process_batch_result_prebuilt(self: Scheduler, batch: ScheduleBatch):
         assert self.disaggregation_mode == DisaggregationMode.DECODE
-        self.token_to_kv_pool_allocator.free_group_begin()
-        for req in batch.reqs:
-            req.time_stats.set_decode_prebuilt_finish_time()
-            req.check_finished()
-            if req.finished():
-                req.time_stats.set_quick_finish_time()
-                release_kv_cache(req, self.tree_cache)
+        use_free_group = self.server_args.disaggregation_decode_enable_radix_cache
+        if use_free_group:
+            self.token_to_kv_pool_allocator.free_group_begin()
+        try:
+            for req in batch.reqs:
+                req.time_stats.set_decode_prebuilt_finish_time()
+                req.check_finished()
+                if req.finished():
+                    req.time_stats.set_quick_finish_time()
+                    release_kv_cache(req, self.tree_cache)
 
-        # Note: Logprobs should be handled on the prefill engine.
-        self.stream_output(batch.reqs, batch.return_logprob)
-        self.token_to_kv_pool_allocator.free_group_end()
+            # Note: Logprobs should be handled on the prefill engine.
+            self.stream_output(batch.reqs, batch.return_logprob)
+        finally:
+            if use_free_group:
+                self.token_to_kv_pool_allocator.free_group_end()
 
     def maybe_collect_routed_experts(self: Scheduler, req: Req):
         """Collect routed experts for a finished request."""
@@ -590,7 +595,7 @@ class SchedulerOutputProcessorMixin:
                 actual_seq_len = req.seqlen - 1
                 if (
                     actual_seq_len // mamba_track_interval
-                    != (actual_seq_len - result.accept_length_per_req_cpu[i])
+                    != (actual_seq_len - result.accept_length_per_req_cpu[i] - 1)
                     // mamba_track_interval
                 ):
                     req.mamba_next_track_idx = (
