@@ -115,7 +115,7 @@ retry_with_backoff() {
     echo "Attempt ${attempt}/${max_attempts} failed. Retrying in ${sleep_time}s…" >&2
     sleep "${sleep_time}"
     (( attempt++ ))
-    (( wait_secs = wait_secs < 300 ? wait_secs * 2 : 300 ))
+    (( wait_secs = wait_secs * 2 > 300 ? 300 : wait_secs * 2 ))
     jitter=$(( RANDOM % 30 ))
   done
 }
