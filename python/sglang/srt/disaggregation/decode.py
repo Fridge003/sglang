@@ -29,7 +29,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 from sglang.srt.configs.mamba_utils import Mamba2CacheParams
@@ -552,21 +551,10 @@ class DecodePreallocQueue:
     def _update_handshake_waiters(
         self, rids_to_check: Optional[List[str]] = None
     ) -> None:
-        need_poll = len(self.queue) > 0 and not all(
-            decode_req.waiting_for_input for decode_req in self.queue
-        )
-        # All TPs must agree on whether to poll and on queue size, otherwise
-        # poll_and_all_reduce (which sizes its tensor by queue length) hangs.
-        if dist.get_world_size(self.gloo_group) > 1:
-            n = len(self.queue)
-            local = torch.tensor(
-                [int(need_poll), n, -n], dtype=torch.int64, device="cpu"
-            )
-            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            if local[0].item() == 0 or local[1].item() != -local[2].item():
-                return
+        if not self.queue:
+            return
 
-        if not need_poll:
+        if all(decode_req.waiting_for_input for decode_req in self.queue):
             return
 
         polls = poll_and_all_reduce(
@@ -1262,18 +1250,7 @@ class DecodeTransferQueue:
         kv_manager._staging_handler = self.staging_handler
 
     def pop_transferred(self, rids_to_check: Optional[List[str]] = None) -> List[Req]:
-        # All TPs must agree on queue size before poll_and_all_reduce.
-        # _resolve_pending_reqs does independent HTTP calls per TP, so queue
-        # sizes can transiently diverge; a mismatched all_reduce corrupts gloo.
-        if dist.get_world_size(self.gloo_group) > 1:
-            n = len(self.queue)
-            local = torch.tensor([n, -n], dtype=torch.int64, device="cpu")
-            dist.all_reduce(local, op=dist.ReduceOp.MIN, group=self.gloo_group)
-            if local[0].item() != -local[1].item():
-                return []
-            if local[0].item() == 0:
-                return []
-        elif not self.queue:
+        if not self.queue:
             return []
 
         if self.enable_staging:
