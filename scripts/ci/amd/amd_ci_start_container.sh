@@ -100,7 +100,7 @@ fi
 retry_with_backoff() {
   local max_attempts=$1; shift
   local attempt=1
-  local wait_secs=10
+  local wait_secs=30
   while true; do
     if "$@"; then
       return 0
@@ -112,7 +112,7 @@ retry_with_backoff() {
     echo "Attempt ${attempt}/${max_attempts} failed. Retrying in ${wait_secs}s…" >&2
     sleep "${wait_secs}"
     (( attempt++ ))
-    (( wait_secs = wait_secs < 120 ? wait_secs * 2 : 120 ))
+    (( wait_secs = wait_secs < 300 ? wait_secs * 2 : 300 ))
   done
 }
 
