@@ -338,6 +338,14 @@ class TestGrpcServer(CustomTestCase):
         result = response.json()
         self.assertIn("model_path", result)
 
+    def test_http_server_info(self):
+        response = requests.get(self.base_url + "/server_info")
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertIn("internal_states", result)
+        self.assertIn("version", result)
+        self.assertNotIn("model_config", result)
+
     def test_grpc_health_check(self):
         response_bytes = self._make_unary_call("HealthCheck", b"")
         self.assertIn(b"\x08\x01", response_bytes)
@@ -569,12 +577,12 @@ class TestGrpcServer(CustomTestCase):
             # gRPC tokenize
             request = _encode_string_field(1, text)
             grpc_response = self._make_unary_call("Tokenize", request)
-            grpc_count = _decode_int32_field(grpc_response, field_number=2)
+            grpc_count = _decode_int32_field(grpc_response, field_number=2) or 0
 
             # HTTP tokenize
             http_response = requests.post(
                 self.base_url + "/tokenize",
-                json={"text": text},
+                json={"prompt": text},
             )
             self.assertEqual(
                 http_response.status_code, 200, f"HTTP tokenize failed for: {text!r}"
@@ -613,7 +621,7 @@ class TestGrpcServer(CustomTestCase):
         # Tokenize via HTTP to get reliable token IDs
         http_response = requests.post(
             self.base_url + "/tokenize",
-            json={"text": text},
+            json={"prompt": text},
         )
         self.assertEqual(http_response.status_code, 200)
         token_ids = http_response.json()["tokens"]

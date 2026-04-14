@@ -73,15 +73,16 @@ fn extract_tokenizer_info(runtime_handle: &PyObject) -> (Option<String>, i32) {
 /// Returns:
 ///     GrpcServerHandle that can be used to shut down the server.
 #[pyfunction]
-#[pyo3(signature = (host, port, runtime_handle))]
+#[pyo3(signature = (host, port, runtime_handle, worker_threads=4))]
 fn start_server(
     host: String,
     port: u16,
     runtime_handle: PyObject,
+    worker_threads: usize,
 ) -> PyResult<GrpcServerHandle> {
-    let addr: SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e)))?;
+    let addr: SocketAddr = format!("{}:{}", host, port).parse().map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e))
+    })?;
 
     // Extract tokenizer info from Python (one-time GIL acquisition)
     let (model_path, context_len) = extract_tokenizer_info(&runtime_handle);
@@ -99,7 +100,7 @@ fn start_server(
         .name("sglang-grpc".to_string())
         .spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(4)
+                .worker_threads(worker_threads)
                 .enable_all()
                 .thread_name("sglang-grpc-tokio")
                 .build()
@@ -109,7 +110,12 @@ fn start_server(
                 eprintln!("gRPC server error: {}", e);
             }
         })
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to spawn gRPC thread: {}", e)))?;
+        .map_err(|e| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(
+                "Failed to spawn gRPC thread: {}",
+                e
+            ))
+        })?;
 
     Ok(GrpcServerHandle {
         shutdown,

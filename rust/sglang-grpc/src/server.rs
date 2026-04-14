@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tokio::sync::Notify;
+use tokio::sync::{mpsc::Receiver, Notify};
+use tokio::time::{timeout, Duration};
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
@@ -70,9 +71,7 @@ fn sampling_params_to_map(params: &Option<proto::SamplingParams>) -> serde_json:
     }
 }
 
-fn trace_headers_to_json(
-    headers: &HashMap<String, String>,
-) -> Option<serde_json::Value> {
+fn trace_headers_to_json(headers: &HashMap<String, String>) -> Option<serde_json::Value> {
     if headers.is_empty() {
         None
     } else {
@@ -81,6 +80,24 @@ fn trace_headers_to_json(
 }
 
 type StreamResult<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(300);
+
+async fn recv_chunk_with_timeout(
+    receiver: &mut Receiver<ResponseChunk>,
+    timeout_message: &'static str,
+) -> Result<Option<ResponseChunk>, Status> {
+    timeout(RESPONSE_TIMEOUT, receiver.recv())
+        .await
+        .map_err(|_| Status::deadline_exceeded(timeout_message))
+}
+
+async fn recv_required_chunk(
+    receiver: &mut Receiver<ResponseChunk>,
+) -> Result<ResponseChunk, Status> {
+    recv_chunk_with_timeout(receiver, "Request timed out after 300s")
+        .await?
+        .ok_or_else(|| Status::internal("Channel closed before response"))
+}
 
 /// Build a request dict for GenerateReqInput from proto TextGenerateRequest fields.
 fn build_text_generate_dict(
@@ -90,12 +107,30 @@ fn build_text_generate_dict(
     let mut d = HashMap::new();
     d.insert("rid".into(), serde_json::json!(rid));
     d.insert("text".into(), serde_json::json!(req.text));
-    d.insert("sampling_params".into(), sampling_params_to_map(&req.sampling_params));
-    d.insert("stream".into(), serde_json::json!(req.stream.unwrap_or(false)));
-    d.insert("return_logprob".into(), serde_json::json!(req.return_logprob.unwrap_or(false)));
-    d.insert("top_logprobs_num".into(), serde_json::json!(req.top_logprobs_num.unwrap_or(0)));
-    d.insert("logprob_start_len".into(), serde_json::json!(req.logprob_start_len.unwrap_or(-1)));
-    d.insert("return_text_in_logprobs".into(), serde_json::json!(req.return_text_in_logprobs.unwrap_or(false)));
+    d.insert(
+        "sampling_params".into(),
+        sampling_params_to_map(&req.sampling_params),
+    );
+    d.insert(
+        "stream".into(),
+        serde_json::json!(req.stream.unwrap_or(false)),
+    );
+    d.insert(
+        "return_logprob".into(),
+        serde_json::json!(req.return_logprob.unwrap_or(false)),
+    );
+    d.insert(
+        "top_logprobs_num".into(),
+        serde_json::json!(req.top_logprobs_num.unwrap_or(0)),
+    );
+    d.insert(
+        "logprob_start_len".into(),
+        serde_json::json!(req.logprob_start_len.unwrap_or(-1)),
+    );
+    d.insert(
+        "return_text_in_logprobs".into(),
+        serde_json::json!(req.return_text_in_logprobs.unwrap_or(false)),
+    );
     if let Some(ref lp) = req.lora_path {
         d.insert("lora_path".into(), serde_json::json!(lp));
     }
@@ -120,11 +155,26 @@ fn build_generate_dict(
     let mut d = HashMap::new();
     d.insert("rid".into(), serde_json::json!(rid));
     d.insert("input_ids".into(), serde_json::json!(req.input_ids));
-    d.insert("sampling_params".into(), sampling_params_to_map(&req.sampling_params));
-    d.insert("stream".into(), serde_json::json!(req.stream.unwrap_or(false)));
-    d.insert("return_logprob".into(), serde_json::json!(req.return_logprob.unwrap_or(false)));
-    d.insert("top_logprobs_num".into(), serde_json::json!(req.top_logprobs_num.unwrap_or(0)));
-    d.insert("logprob_start_len".into(), serde_json::json!(req.logprob_start_len.unwrap_or(-1)));
+    d.insert(
+        "sampling_params".into(),
+        sampling_params_to_map(&req.sampling_params),
+    );
+    d.insert(
+        "stream".into(),
+        serde_json::json!(req.stream.unwrap_or(false)),
+    );
+    d.insert(
+        "return_logprob".into(),
+        serde_json::json!(req.return_logprob.unwrap_or(false)),
+    );
+    d.insert(
+        "top_logprobs_num".into(),
+        serde_json::json!(req.top_logprobs_num.unwrap_or(0)),
+    );
+    d.insert(
+        "logprob_start_len".into(),
+        serde_json::json!(req.logprob_start_len.unwrap_or(-1)),
+    );
     if let Some(ref lp) = req.lora_path {
         d.insert("lora_path".into(), serde_json::json!(lp));
     }
@@ -160,10 +210,7 @@ fn build_text_embed_dict(
 }
 
 /// Build a request dict for EmbeddingReqInput from proto EmbedRequest (tokenized).
-fn build_embed_dict(
-    rid: &str,
-    req: &proto::EmbedRequest,
-) -> HashMap<String, serde_json::Value> {
+fn build_embed_dict(rid: &str, req: &proto::EmbedRequest) -> HashMap<String, serde_json::Value> {
     let mut d = HashMap::new();
     d.insert("rid".into(), serde_json::json!(rid));
     d.insert("input_ids".into(), serde_json::json!(req.input_ids));
@@ -220,10 +267,13 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::TextGenerateRequest>,
     ) -> Result<Response<Self::TextGenerateStream>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rid = req
+            .rid
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let req_dict = build_text_generate_dict(&rid, &req);
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_request(&rid, "generate", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
@@ -233,22 +283,15 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
 
         let stream = async_stream::stream! {
             loop {
-                let chunk = tokio::task::spawn_blocking({
-                    let receiver = receiver.clone();
-                    move || receiver.recv()
-                })
-                .await
-                .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
-
-                match chunk {
-                    Ok(ResponseChunk::Data(data)) => {
+                match recv_chunk_with_timeout(&mut receiver, "Stream chunk timed out").await {
+                    Ok(Some(ResponseChunk::Data(data))) => {
                         yield Ok(proto::TextGenerateResponse {
                             text: data.text.unwrap_or_default(),
                             meta_info: data.meta_info,
                             finished: false,
                         });
                     }
-                    Ok(ResponseChunk::Finished(data)) => {
+                    Ok(Some(ResponseChunk::Finished(data))) => {
                         yield Ok(proto::TextGenerateResponse {
                             text: data.text.unwrap_or_default(),
                             meta_info: data.meta_info,
@@ -256,12 +299,17 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
                         });
                         break;
                     }
-                    Ok(ResponseChunk::Error(msg)) => {
+                    Ok(Some(ResponseChunk::Error(msg))) => {
                         yield Err(Status::internal(msg));
                         break;
                     }
-                    Err(_) => {
+                    Ok(None) => {
                         let _ = bridge.abort(&rid_clone);
+                        break;
+                    }
+                    Err(status) => {
+                        let _ = bridge.abort(&rid_clone);
+                        yield Err(status);
                         break;
                     }
                 }
@@ -278,10 +326,13 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rid = req
+            .rid
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let req_dict = build_generate_dict(&rid, &req);
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_request(&rid, "generate", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
@@ -291,22 +342,15 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
 
         let stream = async_stream::stream! {
             loop {
-                let chunk = tokio::task::spawn_blocking({
-                    let receiver = receiver.clone();
-                    move || receiver.recv()
-                })
-                .await
-                .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
-
-                match chunk {
-                    Ok(ResponseChunk::Data(data)) => {
+                match recv_chunk_with_timeout(&mut receiver, "Stream chunk timed out").await {
+                    Ok(Some(ResponseChunk::Data(data))) => {
                         yield Ok(proto::GenerateResponse {
                             output_ids: data.output_ids.unwrap_or_default(),
                             meta_info: data.meta_info,
                             finished: false,
                         });
                     }
-                    Ok(ResponseChunk::Finished(data)) => {
+                    Ok(Some(ResponseChunk::Finished(data))) => {
                         yield Ok(proto::GenerateResponse {
                             output_ids: data.output_ids.unwrap_or_default(),
                             meta_info: data.meta_info,
@@ -314,12 +358,17 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
                         });
                         break;
                     }
-                    Ok(ResponseChunk::Error(msg)) => {
+                    Ok(Some(ResponseChunk::Error(msg))) => {
                         yield Err(Status::internal(msg));
                         break;
                     }
-                    Err(_) => {
+                    Ok(None) => {
                         let _ = bridge.abort(&rid_clone);
+                        break;
+                    }
+                    Err(status) => {
+                        let _ = bridge.abort(&rid_clone);
+                        yield Err(status);
                         break;
                     }
                 }
@@ -338,18 +387,18 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::TextEmbedRequest>,
     ) -> Result<Response<proto::TextEmbedResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rid = req
+            .rid
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let req_dict = build_text_embed_dict(&rid, &req);
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
-        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
-            .await
-            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
-            .map_err(|_| Status::internal("Channel closed before response"))?;
+        let chunk = recv_required_chunk(&mut receiver).await?;
 
         match chunk {
             ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
@@ -367,18 +416,18 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::EmbedRequest>,
     ) -> Result<Response<proto::EmbedResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rid = req
+            .rid
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let req_dict = build_embed_dict(&rid, &req);
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
-        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
-            .await
-            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
-            .map_err(|_| Status::internal("Channel closed before response"))?;
+        let chunk = recv_required_chunk(&mut receiver).await?;
 
         match chunk {
             ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
@@ -400,18 +449,18 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::ClassifyRequest>,
     ) -> Result<Response<proto::ClassifyResponse>, Status> {
         let req = request.into_inner();
-        let rid = req.rid.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let rid = req
+            .rid
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let req_dict = build_classify_dict(&rid, &req);
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_request(&rid, "embed", req_dict)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
-        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
-            .await
-            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
-            .map_err(|_| Status::internal("Channel closed before response"))?;
+        let chunk = recv_required_chunk(&mut receiver).await?;
 
         match chunk {
             ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
@@ -464,7 +513,11 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         Ok(Response::new(proto::TokenizeResponse {
             tokens: v["tokens"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|x| x.as_i64().map(|n| n as i32)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_i64().map(|n| n as i32))
+                        .collect()
+                })
                 .unwrap_or_default(),
             count: v["count"].as_i64().unwrap_or(0) as i32,
             max_model_len: v["max_model_len"].as_i64().unwrap_or(0) as i32,
@@ -481,9 +534,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         // Try Rust-native tokenizer first (no GIL)
         if let Some(tok) = self.bridge.rust_tokenizer() {
             let ids: Vec<u32> = req.tokens.iter().map(|&t| t as u32).collect();
-            let text = tok
-                .decode(&ids, true)
-                .map_err(|e| Status::internal(e))?;
+            let text = tok.decode(&ids, true).map_err(|e| Status::internal(e))?;
             return Ok(Response::new(proto::DetokenizeResponse { text }));
         }
 
@@ -670,7 +721,8 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::OpenAiRequest>,
     ) -> Result<Response<Self::ChatCompleteStream>, Status> {
-        self.openai_streaming_rpc(request, "submit_openai_chat").await
+        self.openai_streaming_rpc(request, "submit_openai_chat")
+            .await
     }
 
     type CompleteStream = StreamResult<proto::OpenAiStreamChunk>;
@@ -787,7 +839,7 @@ impl SglangServiceImpl {
         let req = request.into_inner();
         let rid = uuid::Uuid::new_v4().to_string();
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_openai(&rid, method_name, &req.json_body)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
@@ -797,21 +849,14 @@ impl SglangServiceImpl {
 
         let stream = async_stream::stream! {
             loop {
-                let chunk = tokio::task::spawn_blocking({
-                    let receiver = receiver.clone();
-                    move || receiver.recv()
-                })
-                .await
-                .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
-
-                match chunk {
-                    Ok(ResponseChunk::Data(data)) => {
+                match recv_chunk_with_timeout(&mut receiver, "Stream chunk timed out").await {
+                    Ok(Some(ResponseChunk::Data(data))) => {
                         yield Ok(proto::OpenAiStreamChunk {
                             json_chunk: data.json_bytes.unwrap_or_default(),
                             finished: false,
                         });
                     }
-                    Ok(ResponseChunk::Finished(data)) => {
+                    Ok(Some(ResponseChunk::Finished(data))) => {
                         let bytes = data.json_bytes.unwrap_or_default();
                         if !bytes.is_empty() {
                             yield Ok(proto::OpenAiStreamChunk {
@@ -821,12 +866,17 @@ impl SglangServiceImpl {
                         }
                         break;
                     }
-                    Ok(ResponseChunk::Error(msg)) => {
+                    Ok(Some(ResponseChunk::Error(msg))) => {
                         yield Err(Status::internal(msg));
                         break;
                     }
-                    Err(_) => {
+                    Ok(None) => {
                         let _ = bridge.abort(&rid_clone);
+                        break;
+                    }
+                    Err(status) => {
+                        let _ = bridge.abort(&rid_clone);
+                        yield Err(status);
                         break;
                     }
                 }
@@ -844,15 +894,12 @@ impl SglangServiceImpl {
         let req = request.into_inner();
         let rid = uuid::Uuid::new_v4().to_string();
 
-        let receiver = self
+        let mut receiver = self
             .bridge
             .submit_openai(&rid, method_name, &req.json_body)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
-        let chunk = tokio::task::spawn_blocking(move || receiver.recv())
-            .await
-            .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
-            .map_err(|_| Status::internal("Channel closed before response"))?;
+        let chunk = recv_required_chunk(&mut receiver).await?;
 
         match chunk {
             ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
@@ -872,14 +919,9 @@ impl SglangServiceImpl {
     }
 }
 
-/// Receive a single JSON response from a crossbeam channel (used for async-bridged RPCs).
-async fn recv_json_response(
-    receiver: crossbeam_channel::Receiver<ResponseChunk>,
-) -> Result<String, Status> {
-    let chunk = tokio::task::spawn_blocking(move || receiver.recv())
-        .await
-        .map_err(|e| Status::internal(format!("Task join error: {}", e)))?
-        .map_err(|_| Status::internal("Channel closed before response"))?;
+/// Receive a single JSON response from the bridge channel.
+async fn recv_json_response(mut receiver: Receiver<ResponseChunk>) -> Result<String, Status> {
+    let chunk = recv_required_chunk(&mut receiver).await?;
 
     match chunk {
         ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {

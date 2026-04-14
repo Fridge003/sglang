@@ -315,6 +315,7 @@ class ServerArgs:
     fastapi_root_path: str = ""
     grpc_mode: bool = False
     grpc_port: Optional[int] = None
+    grpc_worker_threads: int = 4
     disable_grpc: bool = False
     smg_grpc: bool = False
     skip_server_warmup: bool = False
@@ -1015,6 +1016,8 @@ class ServerArgs:
 
         if self.grpc_port is None:
             self.grpc_port = self.port + 10000
+        if self.grpc_worker_threads < 1:
+            raise ValueError("--grpc-worker-threads must be >= 1")
 
     def _handle_prefill_delayer_env_compat(self):
         if envs.SGLANG_SCHEDULER_DECREASE_PREFILL_IDLE.get():
@@ -4081,6 +4084,12 @@ class ServerArgs:
             type=int,
             default=None,
             help="Port for the native gRPC server. Defaults to --port + 10000 (e.g., 30000 → 40000).",
+        )
+        parser.add_argument(
+            "--grpc-worker-threads",
+            type=int,
+            default=4,
+            help="Number of Tokio worker threads for the native gRPC server.",
         )
         parser.add_argument(
             "--disable-grpc",

@@ -1,16 +1,15 @@
 """Python-side bridge between the Rust gRPC server and TokenizerManager.
 
-The RuntimeHandle runs an asyncio event loop in a dedicated thread and exposes
-synchronous methods that Rust can call via PyO3 (with a brief GIL acquisition).
-Response chunks are pushed into per-request crossbeam channels on the Rust side
-via a callback object, keeping the GIL hold time minimal.
+The RuntimeHandle exposes synchronous methods that Rust can call via PyO3
+(with a brief GIL acquisition). Response chunks are pushed into Rust-side
+channels via callback objects while all async work stays on the
+TokenizerManager's event loop.
 """
 
 import asyncio
 import dataclasses
 import json
 import logging
-import threading
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -55,17 +54,7 @@ class RuntimeHandle:
         self.server_args = server_args
         self.scheduler_info = scheduler_info or {}
 
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run_loop, name="grpc-bridge-loop", daemon=True
-        )
-        self._thread.start()
-
         self._openai_serving_classes = None
-
-    def _run_loop(self):
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_forever()
 
     @property
     def _tm_loop(self):
@@ -73,10 +62,31 @@ class RuntimeHandle:
 
         Communicator-based async methods (flush_cache, get_load, etc.) use
         asyncio.Event internally, which only works within a single event
-        loop.  These must run on the same loop as handle_loop(), i.e. the
-        tokenizer_manager's event_loop, NOT our grpc-bridge-loop.
+        loop. These must run on the same loop as handle_loop(), i.e. the
+        tokenizer_manager's event_loop.
         """
-        return getattr(self.tokenizer_manager, "event_loop", None) or self._loop
+        loop = getattr(self.tokenizer_manager, "event_loop", None)
+        if loop is None:
+            raise RuntimeError(
+                "TokenizerManager event loop not ready - server still starting"
+            )
+        return loop
+
+    def _safe_callback(self, chunk_callback, payload, *, finished: bool, error=None):
+        try:
+            chunk_callback(payload, finished=finished, error=error)
+        except Exception:
+            pass
+
+    def _submit_on_tm_loop(self, coro_factory, chunk_callback, *, empty_response):
+        try:
+            loop = self._tm_loop
+        except RuntimeError as e:
+            self._safe_callback(
+                chunk_callback, empty_response, finished=True, error=str(e)
+            )
+            return
+        asyncio.run_coroutine_threadsafe(coro_factory(), loop)
 
     def _get_openai_serving(self):
         """Lazily initialize OpenAI serving classes."""
@@ -123,7 +133,7 @@ class RuntimeHandle:
 
         The Rust gRPC server builds ``req_dict`` directly from proto fields,
         mapping them to GenerateReqInput / EmbeddingReqInput field names.
-        Python just does ``**dict`` unpacking — no JSON parsing needed.
+        Python just does ``**dict`` unpacking - no JSON parsing needed.
 
         Args:
             req_type: "generate" or "embed" (classify uses "embed").
@@ -135,15 +145,19 @@ class RuntimeHandle:
 
             obj = GenerateReqInput(**req_dict)
             stream = req_dict.get("stream", False)
-            asyncio.run_coroutine_threadsafe(
-                self._run_generate(obj, chunk_callback, stream), self._tm_loop
+            self._submit_on_tm_loop(
+                lambda: self._run_generate(obj, chunk_callback, stream),
+                chunk_callback,
+                empty_response={},
             )
         else:
             from sglang.srt.managers.io_struct import EmbeddingReqInput
 
             obj = EmbeddingReqInput(**req_dict)
-            asyncio.run_coroutine_threadsafe(
-                self._run_embed(obj, chunk_callback), self._tm_loop
+            self._submit_on_tm_loop(
+                lambda: self._run_embed(obj, chunk_callback),
+                chunk_callback,
+                empty_response={},
             )
 
     async def _run_generate(self, obj, chunk_callback, stream: bool):
@@ -161,10 +175,10 @@ class RuntimeHandle:
                 result = await gen.__anext__()
                 chunk_callback(result, finished=True)
         except StopAsyncIteration:
-            chunk_callback({}, finished=True)
+            self._safe_callback(chunk_callback, {}, finished=True)
         except Exception as e:
             logger.error("gRPC generate error for rid=%s: %s", obj.rid, e)
-            chunk_callback({}, finished=True, error=str(e))
+            self._safe_callback(chunk_callback, {}, finished=True, error=str(e))
 
     async def _run_embed(self, obj, chunk_callback):
         try:
@@ -172,10 +186,10 @@ class RuntimeHandle:
             result = await gen.__anext__()
             chunk_callback(result, finished=True)
         except StopAsyncIteration:
-            chunk_callback({}, finished=True)
+            self._safe_callback(chunk_callback, {}, finished=True)
         except Exception as e:
             logger.error("gRPC embed error for rid=%s: %s", obj.rid, e)
-            chunk_callback({}, finished=True, error=str(e))
+            self._safe_callback(chunk_callback, {}, finished=True, error=str(e))
 
     # ------------------------------------------------------------------
     # Abort
@@ -283,8 +297,10 @@ class RuntimeHandle:
 
     def get_load(self, chunk_callback) -> None:
         """Return load info via chunk_callback."""
-        asyncio.run_coroutine_threadsafe(
-            self._get_load_async(chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._get_load_async(chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _get_load_async(self, chunk_callback) -> None:
@@ -303,8 +319,10 @@ class RuntimeHandle:
 
     def flush_cache(self, chunk_callback) -> None:
         """Flush the radix cache. Sends result through chunk_callback."""
-        asyncio.run_coroutine_threadsafe(
-            self._flush_cache_async(chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._flush_cache_async(chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _flush_cache_async(self, chunk_callback) -> None:
@@ -326,8 +344,10 @@ class RuntimeHandle:
         from sglang.srt.managers.io_struct import PauseGenerationReqInput
 
         obj = PauseGenerationReqInput(mode=mode)
-        asyncio.run_coroutine_threadsafe(
-            self._pause_generation_async(obj, chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._pause_generation_async(obj, chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _pause_generation_async(self, obj, chunk_callback) -> None:
@@ -345,8 +365,10 @@ class RuntimeHandle:
         from sglang.srt.managers.io_struct import ContinueGenerationReqInput
 
         obj = ContinueGenerationReqInput()
-        asyncio.run_coroutine_threadsafe(
-            self._continue_generation_async(obj, chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._continue_generation_async(obj, chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _continue_generation_async(self, obj, chunk_callback) -> None:
@@ -365,8 +387,10 @@ class RuntimeHandle:
 
     def start_profile(self, output_dir: Optional[str], chunk_callback) -> None:
         """Start profiling. Sends result through chunk_callback."""
-        asyncio.run_coroutine_threadsafe(
-            self._start_profile_async(output_dir, chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._start_profile_async(output_dir, chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _start_profile_async(self, output_dir, chunk_callback) -> None:
@@ -384,8 +408,10 @@ class RuntimeHandle:
 
     def stop_profile(self, chunk_callback) -> None:
         """Stop profiling. Sends result through chunk_callback."""
-        asyncio.run_coroutine_threadsafe(
-            self._stop_profile_async(chunk_callback), self._tm_loop
+        self._submit_on_tm_loop(
+            lambda: self._stop_profile_async(chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _stop_profile_async(self, chunk_callback) -> None:
@@ -406,9 +432,10 @@ class RuntimeHandle:
         self, model_path: str, load_format: Optional[str], chunk_callback
     ) -> None:
         """Update weights from disk. Sends result through chunk_callback."""
-        asyncio.run_coroutine_threadsafe(
-            self._update_weights_async(model_path, load_format, chunk_callback),
-            self._tm_loop,
+        self._submit_on_tm_loop(
+            lambda: self._update_weights_async(model_path, load_format, chunk_callback),
+            chunk_callback,
+            empty_response=b"",
         )
 
     async def _update_weights_async(
@@ -443,54 +470,62 @@ class RuntimeHandle:
 
     def submit_openai_chat(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI chat completion (JSON pass-through)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request("chat", json_body, chunk_callback, streaming=True),
-            self._tm_loop,
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
+                "chat", json_body, chunk_callback, streaming=True
+            ),
+            chunk_callback,
+            empty_response=b"",
         )
 
     def submit_openai_complete(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI completion (JSON pass-through)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request(
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
                 "completion", json_body, chunk_callback, streaming=True
             ),
-            self._tm_loop,
+            chunk_callback,
+            empty_response=b"",
         )
 
     def submit_openai_embed(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI embedding (JSON pass-through, unary)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request(
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
                 "embedding", json_body, chunk_callback, streaming=False
             ),
-            self._tm_loop,
+            chunk_callback,
+            empty_response=b"",
         )
 
     def submit_openai_classify(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI classify (JSON pass-through, unary)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request(
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
                 "classify", json_body, chunk_callback, streaming=False
             ),
-            self._tm_loop,
+            chunk_callback,
+            empty_response=b"",
         )
 
     def submit_openai_score(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI score (JSON pass-through, unary)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request(
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
                 "score", json_body, chunk_callback, streaming=False
             ),
-            self._tm_loop,
+            chunk_callback,
+            empty_response=b"",
         )
 
     def submit_openai_rerank(self, *, json_body: bytes, chunk_callback):
         """Submit OpenAI rerank (JSON pass-through, unary)."""
-        asyncio.run_coroutine_threadsafe(
-            self._run_openai_request(
+        self._submit_on_tm_loop(
+            lambda: self._run_openai_request(
                 "rerank", json_body, chunk_callback, streaming=False
             ),
-            self._tm_loop,
+            chunk_callback,
+            empty_response=b"",
         )
 
     def _get_openai_request_class(self, serving_key: str):
@@ -561,4 +596,6 @@ class RuntimeHandle:
         except Exception as e:
             logger.error("gRPC OpenAI %s error: %s", serving_key, e)
             error_body = json.dumps({"error": {"message": str(e)}}).encode("utf-8")
-            chunk_callback(error_body, finished=True, error=str(e))
+            self._safe_callback(
+                chunk_callback, error_body, finished=True, error=str(e)
+            )

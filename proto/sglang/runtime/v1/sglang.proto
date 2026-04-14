@@ -5,54 +5,91 @@ option java_multiple_files = true;
 option java_package = "io.sglang.runtime.v1";
 
 service SglangService {
-  // SGLang-native RPCs (typed proto)
+  // Generate text from a raw prompt string.
   rpc TextGenerate(TextGenerateRequest) returns (stream TextGenerateResponse);
+  // Generate token IDs from pre-tokenized input IDs.
   rpc Generate(GenerateRequest) returns (stream GenerateResponse);
+  // Compute an embedding from raw text.
   rpc TextEmbed(TextEmbedRequest) returns (TextEmbedResponse);
+  // Compute an embedding from pre-tokenized input IDs.
   rpc Embed(EmbedRequest) returns (EmbedResponse);
+  // Run the classification / reward-model path.
   rpc Classify(ClassifyRequest) returns (ClassifyResponse);
+  // Tokenize text locally without running inference.
   rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
+  // Detokenize token IDs locally without running inference.
   rpc Detokenize(DetokenizeRequest) returns (DetokenizeResponse);
+  // Report whether the server is ready to accept traffic.
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  // Return model metadata for the currently loaded model.
   rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  // Return server configuration and runtime metadata.
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+  // List the base model and any loaded adapters exposed by the server.
   rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  // Return current server load metrics.
   rpc GetLoad(GetLoadRequest) returns (GetLoadResponse);
+  // Abort an in-flight request by request ID.
   rpc Abort(AbortRequest) returns (AbortResponse);
+  // Flush the runtime cache when the server is idle.
   rpc FlushCache(FlushCacheRequest) returns (FlushCacheResponse);
+  // Pause scheduler-side generation.
   rpc PauseGeneration(PauseGenerationRequest) returns (PauseGenerationResponse);
+  // Resume scheduler-side generation after a pause.
   rpc ContinueGeneration(ContinueGenerationRequest) returns (ContinueGenerationResponse);
 
-  // OpenAI-compatible RPCs (JSON pass-through)
+  // Forward an OpenAI-compatible chat completion request.
   rpc ChatComplete(OpenAIRequest) returns (stream OpenAIStreamChunk);
+  // Forward an OpenAI-compatible completion request.
   rpc Complete(OpenAIRequest) returns (stream OpenAIStreamChunk);
+  // Forward an OpenAI-compatible embedding request.
   rpc OpenAIEmbed(OpenAIRequest) returns (OpenAIResponse);
+  // Forward an OpenAI-compatible classification request.
   rpc OpenAIClassify(OpenAIRequest) returns (OpenAIResponse);
+  // Forward an OpenAI-compatible scoring request.
   rpc Score(OpenAIRequest) returns (OpenAIResponse);
+  // Forward an OpenAI-compatible rerank request.
   rpc Rerank(OpenAIRequest) returns (OpenAIResponse);
 
-  // Admin/Ops RPCs
+  // Start runtime profiling.
   rpc StartProfile(StartProfileRequest) returns (StartProfileResponse);
+  // Stop runtime profiling.
   rpc StopProfile(StopProfileRequest) returns (StopProfileResponse);
+  // Reload model weights from disk.
   rpc UpdateWeightsFromDisk(UpdateWeightsRequest) returns (UpdateWeightsResponse);
 }
 
 // Sampling parameters shared across text and tokenized RPCs.
 message SamplingParams {
+  // Sampling temperature. Defaults to 1.0.
   optional float temperature = 1;
+  // Nucleus sampling cutoff. Defaults to 1.0.
   optional float top_p = 2;
+  // Top-k cutoff. Defaults to backend/model defaults when unset.
   optional int32 top_k = 3;
+  // Minimum probability cutoff. Defaults to backend/model defaults when unset.
   optional float min_p = 4;
+  // Frequency penalty. Defaults to 0.0.
   optional float frequency_penalty = 5;
+  // Presence penalty. Defaults to 0.0.
   optional float presence_penalty = 6;
+  // Repetition penalty. Defaults to 1.0.
   optional float repetition_penalty = 7;
+  // Maximum number of new tokens to generate. Defaults to backend/model defaults.
   optional int32 max_new_tokens = 8;
+  // Minimum number of new tokens to generate. Defaults to backend/model defaults.
   optional int32 min_new_tokens = 9;
+  // Stop strings. Defaults to none.
   repeated string stop = 10;
+  // Stop token IDs. Defaults to none.
   repeated int32 stop_token_ids = 11;
+  // Ignore EOS when generating. Defaults to false.
   optional bool ignore_eos = 12;
+  // Number of candidates to generate. Defaults to 1.
   optional int32 n = 13;
+  // JSON schema constraint. Defaults to none.
   optional string json_schema = 14;
+  // Regex constraint. Defaults to none.
   optional string regex = 15;
 }
 
@@ -61,6 +98,7 @@ message SamplingParams {
 message TextGenerateRequest {
   string text = 1;
   optional SamplingParams sampling_params = 2;
+  // This RPC always returns a server stream. When false, only the terminal chunk is emitted.
   optional bool stream = 3;
   optional bool return_logprob = 4;
   optional int32 top_logprobs_num = 5;
@@ -74,6 +112,8 @@ message TextGenerateRequest {
 }
 
 message TextGenerateResponse {
+  // Full accumulated text for non-streaming; incremental delta when streaming with
+  // incremental_streaming_output enabled.
   string text = 1;
   map<string, string> meta_info = 2;
   bool finished = 3;
@@ -84,6 +124,7 @@ message TextGenerateResponse {
 message GenerateRequest {
   repeated int32 input_ids = 1;
   optional SamplingParams sampling_params = 2;
+  // This RPC always returns a server stream. When false, only the terminal chunk is emitted.
   optional bool stream = 3;
   optional bool return_logprob = 4;
   optional int32 top_logprobs_num = 5;
@@ -255,6 +296,7 @@ message ContinueGenerationResponse {
 // ---- OpenAI-compatible pass-through messages ----
 
 message OpenAIRequest {
+  // JSON-serialized request body matching the corresponding OpenAI API schema.
   bytes json_body = 1;
   map<string, string> trace_headers = 2;
 }
