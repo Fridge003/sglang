@@ -1028,8 +1028,19 @@ class ServerArgs:
             )
             self.smg_grpc = True
 
+        # Env var fallbacks for gRPC flags (backwards compat with env-only phase).
+        if not self.disable_grpc and envs.SGLANG_DISABLE_GRPC.get():
+            self.disable_grpc = True
+        grpc_port_env = envs.SGLANG_GRPC_PORT.get()
+        if self.grpc_port is None and grpc_port_env is not None:
+            self.grpc_port = grpc_port_env
+
         if self.grpc_port is None:
             self.grpc_port = self.port + 10000
+        if not (1 <= self.grpc_port <= 65535):
+            raise ValueError(
+                f"--grpc-port / SGLANG_GRPC_PORT ({self.grpc_port}) must be between 1 and 65535"
+            )
         if self.grpc_worker_threads < 1:
             raise ValueError("--grpc-worker-threads must be >= 1")
 
