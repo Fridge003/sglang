@@ -156,6 +156,8 @@ def _encode_float_field(field_number: int, value: float) -> bytes:
 
 def _encode_int32_field(field_number: int, value: int) -> bytes:
     tag = (field_number << 3) | 0
+    if value < 0:
+        value = (1 << 64) + value
     return _encode_varint(tag) + _encode_varint(value)
 
 
@@ -513,6 +515,15 @@ class TestGrpcServer(GrpcEnabledServerBase):
         self.assertIsNotNone(text)
         self.assertGreater(len(text), 0)
 
+    def test_grpc_detokenize_rejects_negative_token_ids(self):
+        """Detokenize rejects invalid negative token IDs."""
+        request = _encode_int32_field(1, -1)
+        with self.assertRaises(grpc.RpcError) as ctx:
+            self._make_unary_call("Detokenize", request)
+
+        self.assertEqual(ctx.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        self.assertIn("non-negative", ctx.exception.details())
+
     # ------------------------------------------------------------------
     # New Part 1 RPCs: ListModels
     # ------------------------------------------------------------------
@@ -539,6 +550,14 @@ class TestGrpcServer(GrpcEnabledServerBase):
         self.assertIsNotNone(json_info)
         data = json.loads(json_info)
         self.assertIsInstance(data, list)
+
+    def test_grpc_get_load_respects_dp_rank(self):
+        """GetLoad filters results when dp_rank is specified."""
+        request = _encode_int32_field(1, 999)
+        response_bytes = self._make_unary_call("GetLoad", request)
+        json_info = _decode_string_field(response_bytes, field_number=1)
+        self.assertIsNotNone(json_info)
+        self.assertEqual(json.loads(json_info), [])
 
     # ------------------------------------------------------------------
     # New Part 1 RPCs: FlushCache
@@ -825,10 +844,34 @@ class TestGrpcServerArgs(CustomTestCase):
         self.assertTrue(server_args.disable_grpc)
         self.assertEqual(server_args.tokenizer_worker_num, 2)
 
+    def test_deprecated_grpc_mode_skips_native_multi_tokenizer_validation(self):
+        from sglang.srt.server_args import prepare_server_args
+
+        with patch("importlib.util.find_spec", return_value=object()):
+            server_args = prepare_server_args(
+                [
+                    "--model-path",
+                    DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                    "--grpc-mode",
+                    "--tokenizer-worker-num",
+                    "2",
+                ]
+            )
+
+        self.assertTrue(server_args.grpc_mode)
+        self.assertTrue(server_args.smg_grpc)
+        self.assertEqual(server_args.tokenizer_worker_num, 2)
+
 
 class DummyOpenAIRequest:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+
+
+class DummyOpenAIResponse:
+    def __init__(self, body: bytes, status_code: int):
+        self.body = body
+        self.status_code = status_code
 
 
 class TestGrpcBridgeHelpers(CustomTestCase):
@@ -881,6 +924,46 @@ class TestGrpcBridgeHelpers(CustomTestCase):
         raw_request = serving.handle_request.await_args.args[1]
         self.assertEqual(raw_request.headers, trace_headers)
         callback.assert_called_once()
+
+    def test_runtime_handle_openai_unary_forwards_status_code(self):
+        from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
+
+        tokenizer_manager = MagicMock()
+        tokenizer_manager.event_loop = None
+        serving = MagicMock()
+        serving.handle_request = AsyncMock(
+            return_value=DummyOpenAIResponse(
+                body=b'{"error":{"message":"rate limited"}}',
+                status_code=429,
+            )
+        )
+        handle = RuntimeHandle(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=MagicMock(),
+            server_args=MagicMock(),
+        )
+        handle._openai_serving_classes = {"embedding": serving}
+
+        with patch.object(
+            handle,
+            "_get_openai_request_class",
+            return_value=DummyOpenAIRequest,
+        ):
+            callback = MagicMock()
+            asyncio.run(
+                handle._run_openai_request(
+                    "embedding",
+                    json.dumps({"model": "dummy", "input": "hello"}).encode("utf-8"),
+                    callback,
+                    streaming=False,
+                )
+            )
+
+        callback.assert_called_once_with(
+            b'{"error":{"message":"rate limited"}}',
+            finished=True,
+            status_code=429,
+        )
 
 
 if __name__ == "__main__":

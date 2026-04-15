@@ -288,7 +288,11 @@ impl PyBridge {
         })
     }
 
-    pub fn submit_get_load(&self, rid: &str) -> PyResult<Receiver<ResponseChunk>> {
+    pub fn submit_get_load(
+        &self,
+        rid: &str,
+        dp_rank: Option<i32>,
+    ) -> PyResult<Receiver<ResponseChunk>> {
         let receiver = self.create_channel(rid);
         let channels_ref = self.channels.clone();
         let terminal_errors_ref = self.terminal_errors.clone();
@@ -303,7 +307,7 @@ impl PyBridge {
                 self.runtime_handle.clone_ref(py),
             )?;
             self.runtime_handle
-                .call_method1(py, "get_load", (callback,))?;
+                .call_method1(py, "get_load", (callback, dp_rank))?;
             Ok(())
         });
 
@@ -771,12 +775,13 @@ struct JsonChunkCallback {
 
 #[pymethods]
 impl JsonChunkCallback {
-    #[pyo3(signature = (chunk_bytes, finished=false, error=None))]
+    #[pyo3(signature = (chunk_bytes, finished=false, error=None, status_code=None))]
     fn __call__(
         &self,
         chunk_bytes: &Bound<'_, pyo3::PyAny>,
         finished: bool,
         error: Option<String>,
+        status_code: Option<i32>,
     ) -> PyResult<()> {
         let py = chunk_bytes.py();
         let channels = self.channels.lock().unwrap();
@@ -809,12 +814,17 @@ impl JsonChunkCallback {
             vec![]
         };
 
+        let mut meta_info = HashMap::new();
+        if let Some(code) = status_code {
+            meta_info.insert("status_code".to_string(), code.to_string());
+        }
+
         let data = ResponseData {
             text: None,
             output_ids: None,
             embedding: None,
             json_bytes: Some(bytes_data),
-            meta_info: HashMap::new(),
+            meta_info,
         };
 
         let msg = if finished {

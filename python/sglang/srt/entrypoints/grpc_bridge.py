@@ -317,17 +317,21 @@ class RuntimeHandle:
     # Get load
     # ------------------------------------------------------------------
 
-    def get_load(self, chunk_callback) -> None:
+    def get_load(self, chunk_callback, dp_rank: Optional[int] = None) -> None:
         """Return load info via chunk_callback."""
         self._submit_on_tm_loop(
-            lambda: self._get_load_async(chunk_callback),
+            lambda: self._get_load_async(chunk_callback, dp_rank),
             chunk_callback,
             empty_response=b"",
         )
 
-    async def _get_load_async(self, chunk_callback) -> None:
+    async def _get_load_async(
+        self, chunk_callback, dp_rank: Optional[int] = None
+    ) -> None:
         try:
             result = await self.tokenizer_manager.get_load()
+            if dp_rank is not None:
+                result = [r for r in result if r.dp_rank == dp_rank]
             data = json.dumps([dataclasses.asdict(r) for r in result], default=str)
             chunk_callback(data.encode("utf-8"), finished=True)
         except Exception as e:
@@ -674,9 +678,20 @@ class RuntimeHandle:
                     resp_bytes = json.dumps(result).encode("utf-8")
                 else:
                     resp_bytes = str(result).encode("utf-8")
-                chunk_callback(resp_bytes, finished=True)
+                status_code = int(getattr(result, "status_code", 200))
+                chunk_callback(resp_bytes, finished=True, status_code=status_code)
 
         except Exception as e:
             logger.error("gRPC OpenAI %s error: %s", serving_key, e)
             error_body = json.dumps({"error": {"message": str(e)}}).encode("utf-8")
-            self._safe_callback(chunk_callback, error_body, finished=True, error=str(e))
+            if streaming:
+                self._safe_callback(chunk_callback, error_body, finished=True, error=str(e))
+            else:
+                try:
+                    chunk_callback(
+                        error_body,
+                        finished=True,
+                        status_code=int(getattr(e, "status_code", 500)),
+                    )
+                except Exception:
+                    pass

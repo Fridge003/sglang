@@ -140,6 +140,13 @@ fn closed_stream_status(bridge: &Arc<PyBridge>, rid: &str) -> Status {
     }
 }
 
+fn openai_status_code(meta_info: &HashMap<String, String>, default: i32) -> i32 {
+    meta_info
+        .get("status_code")
+        .and_then(|value| value.parse::<i32>().ok())
+        .unwrap_or(default)
+}
+
 fn extract_model_path(json_info: &str) -> String {
     serde_json::from_str::<serde_json::Value>(json_info)
         .ok()
@@ -618,6 +625,11 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         request: Request<proto::DetokenizeRequest>,
     ) -> Result<Response<proto::DetokenizeResponse>, Status> {
         let req = request.into_inner();
+        if req.tokens.iter().any(|&token| token < 0) {
+            return Err(Status::invalid_argument(
+                "Detokenize tokens must be non-negative",
+            ));
+        }
 
         // Try Rust-native tokenizer first (no GIL)
         if let Some(tok) = self.bridge.rust_tokenizer() {
@@ -719,12 +731,13 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
 
     async fn get_load(
         &self,
-        _request: Request<proto::GetLoadRequest>,
+        request: Request<proto::GetLoadRequest>,
     ) -> Result<Response<proto::GetLoadResponse>, Status> {
+        let req = request.into_inner();
         let rid = uuid::Uuid::new_v4().to_string();
         let receiver = self
             .bridge
-            .submit_get_load(&rid)
+            .submit_get_load(&rid, req.dp_rank)
             .map_err(|e| Status::internal(format!("Failed to get load: {}", e)))?;
 
         let json_info = recv_json_response(receiver).await?;
@@ -1006,7 +1019,7 @@ impl SglangServiceImpl {
             ResponseChunk::Data(data) | ResponseChunk::Finished(data) => {
                 Ok(Response::new(proto::OpenAiResponse {
                     json_body: data.json_bytes.unwrap_or_default(),
-                    status_code: 200,
+                    status_code: openai_status_code(&data.meta_info, 200),
                 }))
             }
             ResponseChunk::Error(msg) => {
@@ -1078,4 +1091,26 @@ pub async fn run_grpc_server(
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::openai_status_code;
+    use std::collections::HashMap;
+
+    #[test]
+    fn openai_status_code_uses_forwarded_status_when_present() {
+        let meta_info =
+            HashMap::from([(String::from("status_code"), String::from("429"))]);
+        assert_eq!(openai_status_code(&meta_info, 200), 429);
+    }
+
+    #[test]
+    fn openai_status_code_falls_back_when_missing_or_invalid() {
+        assert_eq!(openai_status_code(&HashMap::new(), 200), 200);
+
+        let meta_info =
+            HashMap::from([(String::from("status_code"), String::from("not-an-int"))]);
+        assert_eq!(openai_status_code(&meta_info, 200), 200);
+    }
 }

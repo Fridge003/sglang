@@ -969,9 +969,10 @@ class ServerArgs:
                     "Multi-worker HTTP/2 support will be added in a future release."
                 )
 
+        legacy_grpc_requested = self.smg_grpc or self.grpc_mode
         native_grpc_requested = (
             not self.disable_grpc
-            and not self.smg_grpc
+            and not legacy_grpc_requested
             and not self.use_ray
             and not self.encoder_only
             and importlib.util.find_spec("sglang_grpc") is not None
