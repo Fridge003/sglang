@@ -183,7 +183,8 @@ if [[ "${IMAGE}" == "${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:"* ]]; then
     IMAGE="${IMAGE#${LOCAL_DOCKER_REGISTRY}/}"
 fi
 
-CACHE_HOST=/home/runner/sgl-data
+# CACHE_HOST=/home/runner/sgl-data
+CACHE_HOST=/home/runner/sglang-data
 if [[ -d "$CACHE_HOST" ]]; then
     CACHE_VOLUME="-v $CACHE_HOST:/sgl-data"
 else
