@@ -123,21 +123,18 @@ fn start_server(
     //   None     → auto-detect from scheduler's KV cache capacity
     //
     // Known limitation — this semaphore is a *concurrency* limiter, not a
-    // *rate* limiter.  It bounds how many token-worth of requests can be in
-    // prefill simultaneously, but does not smooth the submission rate to match
-    // the scheduler's throughput.  Under heavy overload (arriving rate >>
-    // serving rate) the prefill queue still builds inside the Python scheduler,
-    // inflating TTFT regardless of the budget size.  Benchmarks show that
-    // halving the budget (e.g. 10 % of KV) produces the same TTFT as using
-    // the full capacity — the bottleneck is rate, not concurrency.
+    // *rate* limiter. It provides a coarse weighted bound on prefill admission,
+    // but because permits may be released on the first output token it is not a
+    // true KV-occupancy limiter. Under heavy overload (arriving rate >> serving
+    // rate) the queue can still build inside the Python scheduler, inflating
+    // TTFT regardless of the budget size.
     //
-    // The legacy sgl-model-gateway achieves low TTFT (~200 ms) because its
-    // worker connection pool acts as an implicit token bucket, drip-feeding
-    // requests at exactly the rate the backend can absorb.  Reaching parity
-    // requires a proper token-bucket rate limiter in front of the scheduler
-    // submission path (e.g. the `governor` crate).  That is left as a
-    // follow-up; the semaphore still provides a hard ceiling against KV-cache
-    // OOM when individual requests carry very large max_new_tokens values.
+    // The legacy sgl-model-gateway can achieve lower overload TTFT because it
+    // has a paced ingress queue. Reaching parity likely requires a proper
+    // token-bucket rate limiter in front of the scheduler submission path
+    // (e.g. the `governor` crate). That is left as a follow-up; this semaphore
+    // remains a coarse guard against admitting too many large-prefill requests
+    // at once.
     let budget: Option<usize> = match max_prefill_tokens {
         Some(0) => None,
         Some(n) => Some(n),
@@ -158,7 +155,14 @@ fn start_server(
     };
 
     let semaphore = budget.map(|n| Arc::new(Semaphore::new(n)));
-    let bridge = Arc::new(PyBridge::new(runtime_handle, rust_tokenizer, context_len, semaphore));
+    let semaphore_capacity = budget.map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+    let bridge = Arc::new(PyBridge::new(
+        runtime_handle,
+        rust_tokenizer,
+        context_len,
+        semaphore,
+        semaphore_capacity,
+    ));
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = shutdown.clone();
 

@@ -4110,12 +4110,13 @@ class ServerArgs:
             type=int,
             default=None,
             help=(
-                "Token budget for concurrent prefill in the native gRPC server. "
-                "Each request acquires max_new_tokens permits before prefill and "
-                "releases them on the first response token (prefill done), so the "
-                "budget bounds total tokens queued for prefill to the KV cache "
-                "capacity. Default (None) auto-detects from the scheduler's "
-                "max_total_num_tokens. Set to 0 to disable admission control."
+                "Coarse token budget for concurrent prefill admission in the "
+                "native gRPC server. Each request currently acquires "
+                "max_new_tokens permits before prefill and releases them on the "
+                "first response token, so this bounds weighted prefill admission "
+                "rather than true KV occupancy. Default (None) auto-detects "
+                "from the scheduler's max_total_num_tokens. Set to 0 to disable "
+                "admission control."
             ),
         )
         parser.add_argument(

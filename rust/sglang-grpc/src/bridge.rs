@@ -32,11 +32,12 @@ pub struct PyBridge {
     terminal_errors: Arc<Mutex<HashMap<String, String>>>,
     rust_tokenizer: Option<RustTokenizer>,
     context_len: i32,
-    /// Token-budget semaphore: each inference RPC acquires `max_new_tokens` permits
-    /// before prefill and releases them on the first response token (prefill done).
-    /// This bounds the total tokens queued for prefill to the KV cache capacity,
-    /// preventing scheduler saturation regardless of individual request length.
+    /// Coarse prefill-admission semaphore: each inference RPC acquires a weighted
+    /// cost before submission and may release it on the first response token.
+    /// This is not a true KV-occupancy limiter because decode can continue after
+    /// the permit is dropped.
     semaphore: Option<Arc<Semaphore>>,
+    semaphore_capacity: Option<u32>,
 }
 
 impl PyBridge {
@@ -45,6 +46,7 @@ impl PyBridge {
         rust_tokenizer: Option<RustTokenizer>,
         context_len: i32,
         semaphore: Option<Arc<Semaphore>>,
+        semaphore_capacity: Option<u32>,
     ) -> Self {
         Self {
             runtime_handle,
@@ -53,6 +55,7 @@ impl PyBridge {
             rust_tokenizer,
             context_len,
             semaphore,
+            semaphore_capacity,
         }
     }
 
@@ -70,15 +73,14 @@ impl PyBridge {
     ///
     /// - `Ok(None)`         — no limit configured; caller proceeds unconditionally.
     /// - `Ok(Some(permit))` — limit configured and slot acquired; caller must hold
-    ///                        the permit for the lifetime of the request so the slot
-    ///                        is released exactly when the request finishes.
+    ///                        the permit until its chosen release point.
     /// - `Err(())`          — limit configured but `deadline` elapsed before a slot
     ///                        was free; caller should return `RESOURCE_EXHAUSTED`.
     /// Acquire `n_tokens` permits from the prefill-budget semaphore.
     ///
-    /// `n_tokens` should be the request's `max_new_tokens` (capped to `context_len`).
-    /// The semaphore is sized to `max_total_num_tokens` so that the total tokens
-    /// queued for prefill never exceeds the KV cache capacity.
+    /// `n_tokens` is a caller-defined weight. The semaphore capacity is derived from
+    /// the configured budget, and oversized requests are clamped to that total
+    /// capacity so they can still make forward progress.
     pub async fn acquire_slot(
         &self,
         n_tokens: u32,
@@ -89,7 +91,9 @@ impl PyBridge {
             Some(sem) => {
                 // Clamp to semaphore capacity so a single over-sized request
                 // can always make progress (rather than deadlocking).
-                let n = n_tokens.min(sem.available_permits() as u32).max(1);
+                let n = n_tokens
+                    .min(self.semaphore_capacity.unwrap_or(u32::MAX))
+                    .max(1);
                 tokio::time::timeout(deadline, Arc::clone(sem).acquire_many_owned(n))
                     .await
                     .map(|r| Some(r.expect("inference semaphore was unexpectedly closed")))

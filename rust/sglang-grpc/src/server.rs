@@ -97,10 +97,10 @@ async fn recv_chunk_with_timeout(
 
 /// Acquire `n_tokens` permits from the prefill token-budget semaphore.
 ///
-/// `n_tokens` should be the request's `max_new_tokens`.  The semaphore is sized
-/// to `max_total_num_tokens` so the total tokens in-flight for prefill never
-/// exceeds KV cache capacity.  Permits are released on the first response token
-/// (prefill done) — callers must use `Option::take()` inside the stream.
+/// `n_tokens` is currently derived from the request's `max_new_tokens`. The
+/// semaphore capacity is derived from `max_total_num_tokens`, but because
+/// permits are released on the first response token this is only a coarse
+/// weighted prefill-admission guard, not a true KV-occupancy limit.
 ///
 /// Returns `Err(Status::resource_exhausted(...))` when `ADMIT_TIMEOUT` elapses
 /// before enough permits are available; the client should retry with backoff.
@@ -108,11 +108,14 @@ async fn acquire_inference_slot(
     bridge: &Arc<PyBridge>,
     n_tokens: u32,
 ) -> Result<Option<OwnedSemaphorePermit>, Status> {
-    bridge.acquire_slot(n_tokens, ADMIT_TIMEOUT).await.map_err(|_| {
-        Status::resource_exhausted(
-            "prefill token budget exhausted; server is at KV-cache capacity — retry after backoff",
-        )
-    })
+    bridge
+        .acquire_slot(n_tokens, ADMIT_TIMEOUT)
+        .await
+        .map_err(|_| {
+            Status::resource_exhausted(
+                "prefill admission budget exhausted; server is overloaded — retry after backoff",
+            )
+        })
 }
 
 async fn recv_required_chunk(
@@ -140,7 +143,12 @@ fn closed_stream_status(bridge: &Arc<PyBridge>, rid: &str) -> Status {
 fn extract_model_path(json_info: &str) -> String {
     serde_json::from_str::<serde_json::Value>(json_info)
         .ok()
-        .and_then(|value| value.get("model_path").and_then(|v| v.as_str()).map(str::to_owned))
+        .and_then(|value| {
+            value
+                .get("model_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+        })
         .unwrap_or_default()
 }
 
