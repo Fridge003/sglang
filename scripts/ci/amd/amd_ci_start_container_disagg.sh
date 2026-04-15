@@ -23,6 +23,7 @@ fi
 ROCM_VERSION="rocm700"
 DEFAULT_MI30X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi30x"
 DEFAULT_MI35X_BASE_TAG="${SGLANG_VERSION}-${ROCM_VERSION}-mi35x"
+LOCAL_DOCKER_REGISTRY="172.29.8.23:5000"
 
 # Parse command line arguments
 MI30X_BASE_TAG="${DEFAULT_MI30X_BASE_TAG}"
@@ -87,7 +88,7 @@ fi
 # Find the latest image
 find_latest_image() {
   local gpu_arch=$1
-  local base_tag days_back image_tag
+  local base_tag days_back image_tag image_id remote_tags
 
   case "${gpu_arch}" in
       mi30x) base_tag="${MI30X_BASE_TAG}" ;;
@@ -95,19 +96,29 @@ find_latest_image() {
       *)     echo "Error: unsupported GPU architecture '${gpu_arch}'" >&2; return 1 ;;
   esac
 
-  # First, check local cache
+  # First, check local cache on the runner.
   for days_back in {0..6}; do
     image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
-    local local_image="rocm/sgl-dev:${image_tag}"
-    image_id=$(docker images -q "${local_image}")
+    image_id=$(docker images -q "rocm/sgl-dev:${image_tag}")
     if [[ -n "$image_id" ]]; then
-        echo "Found cached image locally: ${local_image}" >&2
-        echo "${local_image}"
-        return 0
+      echo "Found cached image locally: rocm/sgl-dev:${image_tag}" >&2
+      echo "rocm/sgl-dev:${image_tag}"
+      return 0
     fi
   done
 
-  # If not found locally, fall back to pulling from public registry
+  # Then try the local registry.
+  for days_back in {0..6}; do
+    image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
+    echo "Checking for image: ${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:${image_tag}" >&2
+    if docker manifest inspect --insecure "${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:${image_tag}" >/dev/null 2>&1; then
+      echo "Found available image: ${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:${image_tag}" >&2
+      echo "${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:${image_tag}"
+      return 0
+    fi
+  done
+
+  # Finally, try the public registry.
   for days_back in {0..6}; do
     image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
     echo "Checking for image: rocm/sgl-dev:${image_tag}" >&2
@@ -122,7 +133,7 @@ find_latest_image() {
   echo "Exact version not found. Searching remote registry for any ${ROCM_VERSION}-${gpu_arch} image…" >&2
   for days_back in {0..6}; do
     local target_date=$(date -d "${days_back} days ago" +%Y%m%d)
-    local remote_tags=$(curl -s "https://registry.hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&name=${ROCM_VERSION}-${gpu_arch}-${target_date}" 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | head -n 1)
+    remote_tags=$(curl -s "https://registry.hub.docker.com/v2/repositories/rocm/sgl-dev/tags?page_size=100&name=${ROCM_VERSION}-${gpu_arch}-${target_date}" 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | head -n 1 || true)
     if [[ -n "$remote_tags" ]]; then
       echo "Found available image: rocm/sgl-dev:${remote_tags}" >&2
       echo "rocm/sgl-dev:${remote_tags}"
@@ -134,9 +145,9 @@ find_latest_image() {
   local any_local
   any_local=$(docker images --format '{{.Repository}}:{{.Tag}}' --filter "reference=rocm/sgl-dev:*${ROCM_VERSION}*${gpu_arch}*" | sort -r | head -n 1)
   if [[ -n "$any_local" ]]; then
-      echo "Using cached fallback image: ${any_local}" >&2
-      echo "${any_local}"
-      return 0
+    echo "Using cached fallback image: ${any_local}" >&2
+    echo "${any_local}"
+    return 0
   fi
 
   echo "Error: no ${gpu_arch} image found in the last 7 days for base ${base_tag}" >&2
@@ -167,6 +178,10 @@ find_latest_image() {
 IMAGE=$(find_latest_image "${GPU_ARCH}")
 echo "Pulling Docker image: ${IMAGE}"
 docker pull "${IMAGE}"
+if [[ "${IMAGE}" == "${LOCAL_DOCKER_REGISTRY}/rocm/sgl-dev:"* ]]; then
+    docker tag "${IMAGE}" "${IMAGE#${LOCAL_DOCKER_REGISTRY}/}"
+    IMAGE="${IMAGE#${LOCAL_DOCKER_REGISTRY}/}"
+fi
 
 CACHE_HOST=/home/runner/sgl-data
 if [[ -d "$CACHE_HOST" ]]; then
