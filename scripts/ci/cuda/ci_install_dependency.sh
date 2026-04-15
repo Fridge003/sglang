@@ -323,13 +323,41 @@ mark_step_done "Install extra dependency"
 # ------------------------------------------------------------------------------
 # Fix other dependencies
 # ------------------------------------------------------------------------------
+# Fix torch CUDA major version mismatch with system CUDA toolkit.
+# After PR #21441 (cu130 upgrade), uv may resolve torch to a different CUDA version than the
+# container's base image (e.g. cu128 torch on CUDA 13.0 base, or cu130 torch on CUDA 12.8 base).
+# This causes dual-runtime conflicts: deep_gemm SIGFPE (multiProcessorCount=0), nvrtc builtins
+# not found, or libcublas.so.12 missing. Fix: if torch's CUDA major version doesn't match the
+# system toolkit, reinstall torch from the correct PyTorch index.
+SYSTEM_CUDA_VER=$(nvcc --version 2>/dev/null | grep -oP 'V\K[0-9]+\.[0-9]+' || echo "")
+TORCH_CUDA_VER=$(python3 -c "import torch; v=torch.version.cuda; parts=v.split('.'); print(f'cu{parts[0]}{parts[1]}')")
+echo "Detected torch CUDA version: ${TORCH_CUDA_VER}, system CUDA: ${SYSTEM_CUDA_VER}"
+
+if [ -n "$SYSTEM_CUDA_VER" ]; then
+    SYSTEM_CUDA_MAJOR=$(echo "$SYSTEM_CUDA_VER" | cut -d. -f1)
+    TORCH_CUDA_MAJOR=$(python3 -c "import torch; print(torch.version.cuda.split('.')[0])")
+    if [ "$SYSTEM_CUDA_MAJOR" != "$TORCH_CUDA_MAJOR" ]; then
+        # Derive target CU_VERSION from system CUDA (e.g. 13.0 → cu130, 12.8 → cu128)
+        TARGET_CU="cu$(echo "$SYSTEM_CUDA_VER" | tr -d '.')"
+        TORCH_VER=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
+        echo "System CUDA major ($SYSTEM_CUDA_MAJOR) != torch CUDA major ($TORCH_CUDA_MAJOR). Reinstalling torch==${TORCH_VER} from ${TARGET_CU} index..."
+        $PIP_CMD install "torch==${TORCH_VER}+${TARGET_CU}" "torchaudio==${TORCH_VER}+${TARGET_CU}" \
+            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
+        TORCHVISION_VER=$(pip show torchvision 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
+        $PIP_CMD install "torchvision==${TORCHVISION_VER}+${TARGET_CU}" \
+            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
+        # Re-detect after reinstall
+        TORCH_CUDA_VER=$(python3 -c "import torch; v=torch.version.cuda; parts=v.split('.'); print(f'cu{parts[0]}{parts[1]}')")
+        echo "After fix: torch CUDA version: ${TORCH_CUDA_VER}"
+    fi
+fi
+
 # Fix CUDA version mismatch between torch and torchaudio.
-# PyPI's torch 2.9.1 bundles cu128 but torchaudio from pytorch.org/cu129 uses cu129.
+# PyPI's torch bundles a specific CUDA version but torchaudio from pytorch.org/cu130 may use a different one.
 # This mismatch causes torchaudio's C extension to fail loading, producing:
 #   "partially initialized module 'torchaudio' has no attribute 'lib'"
-# We cannot replace torch with cu129 (breaks sgl_kernel ABI), so instead we reinstall
-# torchaudio/torchvision from an index matching torch's CUDA version.
-TORCH_CUDA_VER=$(python3 -c "import torch; v=torch.version.cuda; parts=v.split('.'); print(f'cu{parts[0]}{parts[1]}')")
+# After the system CUDA major version fix above, this handles remaining minor version mismatches
+# (e.g. torch cu129 vs CU_VERSION cu130 — same major version, different minor).
 echo "Detected torch CUDA version: ${TORCH_CUDA_VER}"
 if [ "${TORCH_CUDA_VER}" != "${CU_VERSION}" ]; then
     # Pin versions to match what was installed by pyproject.toml (strip +cuXYZ suffix)
