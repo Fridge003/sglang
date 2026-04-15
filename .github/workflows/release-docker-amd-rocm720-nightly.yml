@@ -14,7 +14,8 @@ concurrency:
 
 jobs:
   publish:
-    if: github.repository == 'sgl-project/sglang'
+    if: false
+    # if: github.repository == 'sgl-project/sglang'
     runs-on: amd-docker-scale
     environment: 'prod'
     strategy:
@@ -92,3 +93,93 @@ jobs:
         run: |
           docker tag rocm/sgl-dev:${{ env.IMAGE_TAG }} lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
           docker push lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
+
+  cache:
+    if: always() && github.repository == 'sgl-project/sglang'
+    runs-on: linux-mi300-1gpu-sglang.test
+    environment: 'prod'
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        gpu_arch: ['gfx942-rocm720', 'gfx950-rocm720']
+        build_type: ['all']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Required for git describe to find tags
+
+      - name: "Set Date"
+        run: |
+          echo "DATE=$(date +%Y%m%d)" >> $GITHUB_ENV
+
+      - name: Get version from latest tag
+        id: version
+        run: |
+          # Get the latest version tag sorted by version number (e.g., v0.5.7 -> 0.5.7)
+          VERSION=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
+
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not determine version from git tags"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "Detected version: ${VERSION}"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
+
+      - name: Pull and Save Docker Image to Cache
+        run: |
+          set -euxo pipefail
+
+          version=${{ steps.version.outputs.version }}
+          echo "Version: ${version}"
+
+          if [ "${{ matrix.gpu_arch }}" = "gfx942-rocm720" ]; then
+            rocm_tag="rocm720-mi30x"
+            final_path="/home/runner/sgl-data/docker/image-720-mi30x.tar"
+          elif [ "${{ matrix.gpu_arch }}" = "gfx950-rocm720" ]; then
+            rocm_tag="rocm720-mi35x"
+            final_path="/home/runner/sgl-data/docker/image-720-mi35x.tar"
+          else
+            echo "Unsupported gfx arch"
+            exit 1
+          fi
+
+          tag=v${version}-${rocm_tag}
+
+          if [ "${{ matrix.build_type }}" = "all" ]; then
+            tag_suffix=""
+          else
+            echo "Unsupported build type"
+            exit 1
+          fi
+
+          image="rocm/sgl-dev:${tag}-${{ env.DATE }}${tag_suffix}"
+
+          mkdir -p "$(dirname "${final_path}")"
+          tmp_path="${final_path}.tmp"
+          rm -f "${tmp_path}"
+
+          echo "Checking today's published image exists: ${image}"
+          if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
+            echo "Today's image was not published. Keeping existing cache and skipping: ${final_path}"
+            exit 0
+          fi
+
+          echo "Pulling image: ${image}"
+          docker pull "${image}"
+
+          echo "Saving to temp file: ${tmp_path}"
+          docker save "${image}" -o "${tmp_path}"
+
+          echo "Moving to final path: ${final_path}"
+          mv -f "${tmp_path}" "${final_path}"
+
+          echo "Cache populated successfully at ${final_path}"
