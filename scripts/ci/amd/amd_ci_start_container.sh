@@ -100,7 +100,7 @@ fi
 # Find the latest image
 find_latest_image() {
   local gpu_arch=$1
-  local base_tag days_back image_tag
+  local base_tag days_back image_tag local_image image_id
 
   case "${gpu_arch}" in
       mi30x) base_tag="${MI30X_BASE_TAG}" ;;
@@ -108,17 +108,18 @@ find_latest_image() {
       *)     echo "Error: unsupported GPU architecture '${gpu_arch}'" >&2; return 1 ;;
   esac
 
-  # First, check local cache
-  for days_back in {0..6}; do
+  # First, check recent local cache (today, then yesterday).
+  for days_back in {0..1}; do
     image_tag="${base_tag}-$(date -d "${days_back} days ago" +%Y%m%d)"
-    local local_image="rocm/sgl-dev:${image_tag}"
+    local_image="rocm/sgl-dev:${image_tag}"
     image_id=$(docker images -q "${local_image}")
     if [[ -n "$image_id" ]]; then
-        echo "Found cached image locally: ${local_image}" >&2
+        echo "Found recent cached image locally: ${local_image}" >&2
         echo "${local_image}"
         return 0
     fi
   done
+  echo "No local cache found for the last 2 days for base ${base_tag}" >&2
 
   # If not found locally, fall back to pulling from public registry
   for days_back in {0..6}; do
