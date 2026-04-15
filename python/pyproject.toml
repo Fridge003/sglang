@@ -95,6 +95,8 @@ torch = [
   { index = "pypi", marker = "platform_machine == 'x86_64'"},
   { index = "torch-cu129", marker = "platform_machine == 'aarch64'"},
 ]
+# sglang-grpc is built from rust/sglang-grpc (maturin); not published on PyPI.
+sglang-grpc = { path = "../rust/sglang-grpc", editable = true }
 
 [project.optional-dependencies]
 grpc = ["sglang-grpc>=0.1.0"]
