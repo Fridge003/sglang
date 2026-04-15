@@ -273,6 +273,17 @@ else
     fi
 fi
 
+# If system CUDA is 13.x, reinstall sgl-kernel from the cu130 index.
+# The default PyPI sgl-kernel is compiled for cu12 (links against libcublas.so.12).
+# On CUDA 13.0 base images, libcublas.so.12 isn't in the system path, so sgl-kernel
+# can't load. The cu130 sgl-kernel links against libcublas.so.13 which the system provides.
+if [ -n "${SYSTEM_CUDA_MAJOR:-}" ] && [ "$SYSTEM_CUDA_MAJOR" = "13" ]; then
+    echo "System CUDA is 13.x — reinstalling sgl-kernel from cu130 index..."
+    $PIP_CMD install sglang-kernel==${SGL_KERNEL_VERSION_FROM_SRT} \
+        --index-url https://docs.sglang.ai/whl/cu130/ --force-reinstall $PIP_INSTALL_SUFFIX || \
+        echo "Warning: cu130 sgl-kernel not available, keeping cu12 version"
+fi
+
 mark_step_done "Install sglang-kernel"
 
 # ------------------------------------------------------------------------------
@@ -337,14 +348,13 @@ if [ -n "$SYSTEM_CUDA_VER" ]; then
     SYSTEM_CUDA_MAJOR=$(echo "$SYSTEM_CUDA_VER" | cut -d. -f1)
     TORCH_CUDA_MAJOR=$(python3 -c "import torch; print(torch.version.cuda.split('.')[0])")
     if [ "$SYSTEM_CUDA_MAJOR" != "$TORCH_CUDA_MAJOR" ]; then
-        # Derive target CU_VERSION from system CUDA (e.g. 13.0 → cu130, 12.8 → cu128)
-        TARGET_CU="cu$(echo "$SYSTEM_CUDA_VER" | tr -d '.')"
         TORCH_VER=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
-        echo "System CUDA major ($SYSTEM_CUDA_MAJOR) != torch CUDA major ($TORCH_CUDA_MAJOR). Reinstalling torch==${TORCH_VER} from ${TARGET_CU} index..."
-        TORCHVISION_VER=$(pip show torchvision 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
-        TORCHAUDIO_VER=$(pip show torchaudio 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
-        $PIP_CMD install "torch==${TORCH_VER}+${TARGET_CU}" "torchaudio==${TORCHAUDIO_VER}+${TARGET_CU}" "torchvision==${TORCHVISION_VER}+${TARGET_CU}" \
-            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall $PIP_INSTALL_SUFFIX
+        # Install plain PyPI torch (cu12 RPATH layout) so sgl-kernel can find libcublas.so.12.
+        # The +cu130 wheel from pytorch.org has cu13 RPATH that breaks sgl-kernel (compiled for cu12).
+        # Plain PyPI torch reports cuda=12.8 regardless of system CUDA, which is fine for all tests
+        # except DeepEP (which needs nvcc==torch.cuda — handled by running DeepEP on CUDA 12.8 base).
+        echo "System CUDA major ($SYSTEM_CUDA_MAJOR) != torch CUDA major ($TORCH_CUDA_MAJOR). Reinstalling torch==${TORCH_VER} from PyPI (cu12 RPATH)..."
+        $PIP_CMD install "torch==${TORCH_VER}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
         # Re-detect after reinstall
         TORCH_CUDA_VER=$(python3 -c "import torch; v=torch.version.cuda; parts=v.split('.'); print(f'cu{parts[0]}{parts[1]}')")
         echo "After fix: torch CUDA version: ${TORCH_CUDA_VER}"
