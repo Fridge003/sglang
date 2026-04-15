@@ -678,6 +678,34 @@ class TestGemma4Detector(CustomTestCase):
         self.assertFalse(self.detector._in_reasoning)
         self.assertIn("final answer", result2.normal_text)
 
+    def test_streaming_partial_start_after_prefix_text(self):
+        """Test buffering a partial Gemma4 start token after normal text."""
+        chunks = ["\n<|channel>", "thought\nreasoning", "<channel|>final answer"]
+
+        all_reasoning = ""
+        all_normal = ""
+        for chunk in chunks:
+            result = self.detector.parse_streaming_increment(chunk)
+            all_reasoning += result.reasoning_text
+            all_normal += result.normal_text
+
+        self.assertEqual(all_reasoning, "reasoning")
+        self.assertEqual(all_normal, "\nfinal answer")
+
+    def test_streaming_partial_end_after_reasoning_text(self):
+        """Test buffering a partial Gemma4 end token after reasoning text."""
+        chunks = ["<|channel>thought\nhello<chan", "nel|>final answer"]
+
+        all_reasoning = ""
+        all_normal = ""
+        for chunk in chunks:
+            result = self.detector.parse_streaming_increment(chunk)
+            all_reasoning += result.reasoning_text
+            all_normal += result.normal_text
+
+        self.assertEqual(all_reasoning, "hello")
+        self.assertEqual(all_normal, "final answer")
+
     def test_streaming_self_label_split_across_chunks(self):
         """Test self_label ('thought\\n') arriving separately from start token."""
         result1 = self.detector.parse_streaming_increment("<|channel>")

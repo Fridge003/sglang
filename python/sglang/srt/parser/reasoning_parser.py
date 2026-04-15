@@ -101,6 +101,28 @@ class BaseReasoningFormatDetector:
             # think_end_token is in self.previous_content for continue_final_message=True case
             return StreamingParseResult(normal_text=processed_text)
 
+    @staticmethod
+    def _split_trailing_partial_token(text: str, tokens: list[str]) -> tuple[str, str]:
+        """Split text into processable content and a trailing partial token.
+
+        Streaming chunks can end with the beginning of a control token, e.g.
+        ``"...<chan"`` before the rest of ``"<channel|>"`` arrives. We must keep
+        that suffix buffered instead of leaking it to the caller.
+        """
+        longest_partial = ""
+        for token in tokens:
+            max_prefix_len = min(len(text), len(token) - 1)
+            for prefix_len in range(max_prefix_len, 0, -1):
+                suffix = text[-prefix_len:]
+                if token.startswith(suffix):
+                    if prefix_len > len(longest_partial):
+                        longest_partial = suffix
+                    break
+
+        if not longest_partial:
+            return text, ""
+        return text[: -len(longest_partial)], longest_partial
+
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
         """
         Streaming incremental parsing for reasoning content.
@@ -120,10 +142,11 @@ class BaseReasoningFormatDetector:
         tokens_to_check = [think_start_text, self.think_end_token]
         if self.tool_start_token:
             tokens_to_check.append(self.tool_start_token)
-        if any(
-            token.startswith(current_text) and token != current_text
-            for token in tokens_to_check
-        ):
+
+        current_text, trailing_partial = self._split_trailing_partial_token(
+            current_text, tokens_to_check
+        )
+        if not current_text and trailing_partial:
             return StreamingParseResult()
 
         # Strip `<think>` token if present
@@ -138,7 +161,7 @@ class BaseReasoningFormatDetector:
 
             reasoning_text = current_text[:end_idx]
 
-            self._buffer = ""
+            self._buffer = trailing_partial
             self._in_reasoning = False
             normal_text = current_text[end_idx + len(self.think_end_token) :]
 
@@ -154,21 +177,21 @@ class BaseReasoningFormatDetector:
                 reasoning_text = current_text[:tool_idx]
                 # Preserve tool_start_token in normal text
                 normal_text = current_text[tool_idx:]
-                self._buffer = ""
+                self._buffer = trailing_partial
                 self._in_reasoning = False
                 return StreamingParseResult(
                     normal_text=normal_text, reasoning_text=reasoning_text
                 )
             if self.stream_reasoning:
                 # Stream the content immediately
-                self._buffer = ""
+                self._buffer = trailing_partial
                 return StreamingParseResult(reasoning_text=current_text)
             else:
                 return StreamingParseResult()
 
         # If we're not in a reasoning block return as normal text
         if not self._in_reasoning:
-            self._buffer = ""
+            self._buffer = trailing_partial
             return StreamingParseResult(normal_text=current_text)
 
         return StreamingParseResult()
