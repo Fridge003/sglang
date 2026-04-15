@@ -161,15 +161,16 @@ jobs:
             exit 1
           fi
 
-          image="rocm/sgl-dev:${tag}-${{ env.DATE }}${tag_suffix}"
+          cache_date="20260414"
+          image="rocm/sgl-dev:${tag}-${cache_date}${tag_suffix}"
 
           mkdir -p "$(dirname "${final_path}")"
           tmp_path="${final_path}.tmp"
           rm -f "${tmp_path}"
 
-          echo "Checking today's published image exists: ${image}"
+          echo "Checking published image exists: ${image}"
           if ! docker manifest inspect "${image}" >/dev/null 2>&1; then
-            echo "Today's image was not published. Keeping existing cache and skipping: ${final_path}"
+            echo "Requested image was not published. Keeping existing cache and skipping: ${final_path}"
             exit 0
           fi
 
