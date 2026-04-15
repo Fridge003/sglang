@@ -341,11 +341,10 @@ if [ -n "$SYSTEM_CUDA_VER" ]; then
         TARGET_CU="cu$(echo "$SYSTEM_CUDA_VER" | tr -d '.')"
         TORCH_VER=$(pip show torch 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
         echo "System CUDA major ($SYSTEM_CUDA_MAJOR) != torch CUDA major ($TORCH_CUDA_MAJOR). Reinstalling torch==${TORCH_VER} from ${TARGET_CU} index..."
-        $PIP_CMD install "torch==${TORCH_VER}+${TARGET_CU}" "torchaudio==${TORCH_VER}+${TARGET_CU}" \
-            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
         TORCHVISION_VER=$(pip show torchvision 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
-        $PIP_CMD install "torchvision==${TORCHVISION_VER}+${TARGET_CU}" \
-            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall --no-deps $PIP_INSTALL_SUFFIX
+        TORCHAUDIO_VER=$(pip show torchaudio 2>/dev/null | grep "^Version:" | awk '{print $2}' | sed 's/+.*//')
+        $PIP_CMD install "torch==${TORCH_VER}+${TARGET_CU}" "torchaudio==${TORCHAUDIO_VER}+${TARGET_CU}" "torchvision==${TORCHVISION_VER}+${TARGET_CU}" \
+            --index-url "https://download.pytorch.org/whl/${TARGET_CU}" --force-reinstall $PIP_INSTALL_SUFFIX
         # Re-detect after reinstall
         TORCH_CUDA_VER=$(python3 -c "import torch; v=torch.version.cuda; parts=v.split('.'); print(f'cu{parts[0]}{parts[1]}')")
         echo "After fix: torch CUDA version: ${TORCH_CUDA_VER}"
