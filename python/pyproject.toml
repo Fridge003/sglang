@@ -98,7 +98,6 @@ torch = [
 
 [project.optional-dependencies]
 grpc = ["sglang-grpc>=0.1.0"]
-smg-grpc = ["smg-grpc-servicer>=0.5.0"]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
 runai = ["runai-model-streamer[s3,gcs,azure]>=0.15.7"]
 diffusion = [
