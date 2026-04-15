@@ -195,9 +195,31 @@ class RuntimeHandle:
     # Abort
     # ------------------------------------------------------------------
 
-    def abort(self, rid: str):
-        """Abort a request by its request ID."""
-        self.tokenizer_manager.abort_request(rid=rid)
+    def abort(self, rid: str = "", abort_all: bool = False):
+        """Abort a request by request ID or abort all active requests."""
+        try:
+            loop = self._tm_loop
+        except RuntimeError:
+            self.tokenizer_manager.abort_request(rid=rid, abort_all=abort_all)
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is loop:
+            self.tokenizer_manager.abort_request(rid=rid, abort_all=abort_all)
+            return
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._abort_async(rid, abort_all),
+            loop,
+        )
+        future.result()
+
+    async def _abort_async(self, rid: str, abort_all: bool) -> None:
+        self.tokenizer_manager.abort_request(rid=rid, abort_all=abort_all)
 
     # ------------------------------------------------------------------
     # Info RPCs (synchronous, small data)
@@ -468,61 +490,121 @@ class RuntimeHandle:
     # OpenAI-compatible RPCs (JSON pass-through)
     # ------------------------------------------------------------------
 
-    def submit_openai_chat(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_chat(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI chat completion (JSON pass-through)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "chat", json_body, chunk_callback, streaming=True
+                "chat",
+                json_body,
+                chunk_callback,
+                streaming=True,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
         )
 
-    def submit_openai_complete(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_complete(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI completion (JSON pass-through)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "completion", json_body, chunk_callback, streaming=True
+                "completion",
+                json_body,
+                chunk_callback,
+                streaming=True,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
         )
 
-    def submit_openai_embed(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_embed(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI embedding (JSON pass-through, unary)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "embedding", json_body, chunk_callback, streaming=False
+                "embedding",
+                json_body,
+                chunk_callback,
+                streaming=False,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
         )
 
-    def submit_openai_classify(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_classify(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI classify (JSON pass-through, unary)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "classify", json_body, chunk_callback, streaming=False
+                "classify",
+                json_body,
+                chunk_callback,
+                streaming=False,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
         )
 
-    def submit_openai_score(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_score(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI score (JSON pass-through, unary)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "score", json_body, chunk_callback, streaming=False
+                "score",
+                json_body,
+                chunk_callback,
+                streaming=False,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
         )
 
-    def submit_openai_rerank(self, *, json_body: bytes, chunk_callback):
+    def submit_openai_rerank(
+        self,
+        *,
+        json_body: bytes,
+        chunk_callback,
+        trace_headers: Optional[Dict[str, str]] = None,
+    ):
         """Submit OpenAI rerank (JSON pass-through, unary)."""
         self._submit_on_tm_loop(
             lambda: self._run_openai_request(
-                "rerank", json_body, chunk_callback, streaming=False
+                "rerank",
+                json_body,
+                chunk_callback,
+                streaming=False,
+                trace_headers=trace_headers,
             ),
             chunk_callback,
             empty_response=b"",
@@ -554,6 +636,7 @@ class RuntimeHandle:
         json_body: bytes,
         chunk_callback,
         streaming: bool,
+        trace_headers: Optional[Dict[str, str]] = None,
     ):
         """Generic OpenAI pass-through handler.
 
@@ -563,7 +646,7 @@ class RuntimeHandle:
         try:
             serving = self._get_openai_serving()[serving_key]
             request_dict = json.loads(json_body)
-            mock_request = MockRequest()
+            mock_request = MockRequest(headers=trace_headers)
 
             request_cls = self._get_openai_request_class(serving_key)
             request_obj = request_cls(**request_dict)
@@ -596,6 +679,4 @@ class RuntimeHandle:
         except Exception as e:
             logger.error("gRPC OpenAI %s error: %s", serving_key, e)
             error_body = json.dumps({"error": {"message": str(e)}}).encode("utf-8")
-            self._safe_callback(
-                chunk_callback, error_body, finished=True, error=str(e)
-            )
+            self._safe_callback(chunk_callback, error_body, finished=True, error=str(e))

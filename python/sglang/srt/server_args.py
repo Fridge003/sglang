@@ -968,6 +968,19 @@ class ServerArgs:
                     "Multi-worker HTTP/2 support will be added in a future release."
                 )
 
+        native_grpc_requested = (
+            not self.disable_grpc
+            and not self.smg_grpc
+            and not self.use_ray
+            and not self.encoder_only
+            and importlib.util.find_spec("sglang_grpc") is not None
+        )
+        if native_grpc_requested and self.tokenizer_worker_num > 1:
+            raise ValueError(
+                "Native gRPC does not yet support --tokenizer-worker-num > 1. "
+                "Use --disable-grpc or set --tokenizer-worker-num 1."
+            )
+
     def _handle_multimodal(self):
         """Validate mm_process_config structure before model loading."""
         if self.mm_process_config is not None:

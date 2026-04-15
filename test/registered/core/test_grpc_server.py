@@ -10,10 +10,14 @@ Usage:
     python3 -m pytest test_grpc_server.py -v
 """
 
+import asyncio
+import importlib.util
 import json
+import socket
 import struct
 import unittest
 from typing import Optional
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import requests
 
@@ -24,8 +28,26 @@ from sglang.test.test_utils import (
     DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
+    find_available_port,
     popen_launch_server,
 )
+
+try:
+    import grpc
+
+    _HAS_GRPCIO = True
+except ImportError:
+    grpc = None
+    _HAS_GRPCIO = False
+
+try:
+    import granian  # noqa: F401
+
+    _HAS_GRANIAN = True
+except ImportError:
+    _HAS_GRANIAN = False
+
+_HAS_SGLANG_GRPC = importlib.util.find_spec("sglang_grpc") is not None
 
 register_cuda_ci(est_time=300, suite="stage-b-test-small-1-gpu")
 
@@ -43,6 +65,55 @@ def _grpc_host_from_http_url(http_url: str) -> str:
 
     parsed = urlparse(http_url)
     return parsed.hostname
+
+
+def _make_test_base_url() -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(DEFAULT_URL_FOR_TEST)
+    while True:
+        port = find_available_port(parsed.port)
+        grpc_port = port + 10000
+        try:
+            with socket.create_server((parsed.hostname, grpc_port)):
+                return f"http://{parsed.hostname}:{port}"
+        except OSError:
+            continue
+
+
+def _create_grpc_channel(host: str, port: int):
+    if not _HAS_GRPCIO:
+        raise unittest.SkipTest("grpcio not installed")
+    target = f"{host}:{port}"
+    channel = grpc.insecure_channel(target)
+    try:
+        grpc.channel_ready_future(channel).result(timeout=30)
+    except grpc.FutureTimeoutError as exc:
+        channel.close()
+        raise RuntimeError(
+            f"gRPC channel to {target} did not become ready within 30s"
+        ) from exc
+    return channel
+
+
+def _make_unary_call(
+    channel, method: str, request_bytes: bytes, timeout: float = 30
+) -> bytes:
+    return channel.unary_unary(
+        f"/sglang.runtime.v1.SglangService/{method}",
+        request_serializer=lambda x: x,
+        response_deserializer=lambda x: x,
+    )(request_bytes, timeout=timeout)
+
+
+def _make_server_stream_call(
+    channel, method: str, request_bytes: bytes, timeout: float = 30
+):
+    return channel.unary_stream(
+        f"/sglang.runtime.v1.SglangService/{method}",
+        request_serializer=lambda x: x,
+        response_deserializer=lambda x: x,
+    )(request_bytes, timeout=timeout)
 
 
 # ======================================================================
@@ -249,15 +320,16 @@ def _build_text_generate_request(
 # ======================================================================
 
 
-class TestGrpcServer(CustomTestCase):
-    """Test the native gRPC server running alongside HTTP."""
-
+@unittest.skipUnless(_HAS_GRPCIO, "grpcio not installed")
+@unittest.skipUnless(_HAS_SGLANG_GRPC, "sglang_grpc package not installed")
+class GrpcEnabledServerBase(CustomTestCase):
     grpc_channel = None
+    other_args = ("--mem-fraction-static", "0.7")
 
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN
-        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.base_url = _make_test_base_url()
         cls.grpc_port = _grpc_port_from_http_url(cls.base_url)
         cls.grpc_host = _grpc_host_from_http_url(cls.base_url)
 
@@ -265,50 +337,27 @@ class TestGrpcServer(CustomTestCase):
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=(
-                "--mem-fraction-static",
-                "0.7",
-            ),
+            other_args=cls.other_args,
         )
 
-        cls._setup_grpc_client()
-
-    @classmethod
-    def _setup_grpc_client(cls):
-        try:
-            import grpc
-
-            target = f"{cls.grpc_host}:{cls.grpc_port}"
-            cls.grpc_channel = grpc.insecure_channel(target)
-
-            try:
-                grpc.channel_ready_future(cls.grpc_channel).result(timeout=30)
-            except grpc.FutureTimeoutError:
-                raise RuntimeError(
-                    f"gRPC channel to {target} did not become ready within 30s"
-                )
-        except ImportError:
-            raise unittest.SkipTest("grpcio not installed")
+        cls.grpc_channel = _create_grpc_channel(cls.grpc_host, cls.grpc_port)
 
     @classmethod
     def tearDownClass(cls):
-        if cls.grpc_channel is not None:
+        if hasattr(cls, "grpc_channel") and cls.grpc_channel is not None:
             cls.grpc_channel.close()
-        kill_process_tree(cls.process.pid)
+        if hasattr(cls, "process") and cls.process:
+            kill_process_tree(cls.process.pid)
 
     def _make_unary_call(self, method: str, request_bytes: bytes) -> bytes:
-        return self.grpc_channel.unary_unary(
-            f"/sglang.runtime.v1.SglangService/{method}",
-            request_serializer=lambda x: x,
-            response_deserializer=lambda x: x,
-        )(request_bytes)
+        return _make_unary_call(self.grpc_channel, method, request_bytes)
 
     def _make_server_stream_call(self, method: str, request_bytes: bytes):
-        return self.grpc_channel.unary_stream(
-            f"/sglang.runtime.v1.SglangService/{method}",
-            request_serializer=lambda x: x,
-            response_deserializer=lambda x: x,
-        )(request_bytes)
+        return _make_server_stream_call(self.grpc_channel, method, request_bytes)
+
+
+class TestGrpcServer(GrpcEnabledServerBase):
+    """Test the native gRPC server running alongside HTTP."""
 
     # ------------------------------------------------------------------
     # Existing Phase 1 RPCs
@@ -353,6 +402,9 @@ class TestGrpcServer(CustomTestCase):
     def test_grpc_get_model_info(self):
         response_bytes = self._make_unary_call("GetModelInfo", b"")
         self.assertGreater(len(response_bytes), 0)
+        model_path = _decode_string_field(response_bytes, field_number=1)
+        self.assertIsNotNone(model_path)
+        self.assertGreater(len(model_path), 0)
         decoded = _decode_string_field(response_bytes, field_number=2)
         if decoded:
             info = json.loads(decoded)
@@ -398,6 +450,25 @@ class TestGrpcServer(CustomTestCase):
         request = _encode_string_field(1, rid)
         response_bytes = self._make_unary_call("Abort", request)
         self.assertIn(b"\x08\x01", response_bytes)
+
+    def test_grpc_abort_all_interrupts_stream(self):
+        request = _encode_string_field(1, "Count forever, one number at a time.")
+        sampling = b""
+        sampling += _encode_float_field(1, 0.0)
+        sampling += _encode_int32_field(8, 1024)
+        sampling += _encode_bool_field(12, True)
+        request += _encode_submessage_field(2, sampling)
+        request += _encode_bool_field(3, True)
+        responses = self._make_server_stream_call("TextGenerate", request)
+        first = next(responses)
+        self.assertIsNotNone(first)
+
+        abort_all_request = _encode_bool_field(2, True)
+        response_bytes = self._make_unary_call("Abort", abort_all_request)
+        self.assertIn(b"\x08\x01", response_bytes)
+
+        with self.assertRaises(grpc.RpcError):
+            list(responses)
 
     # ------------------------------------------------------------------
     # New Part 1 RPCs: Tokenize / Detokenize
@@ -531,6 +602,7 @@ class TestGrpcServer(CustomTestCase):
         self.assertGreater(
             len(responses), 1, "Streaming should produce multiple chunks"
         )
+        self.assertTrue(_decode_bool_field(responses[-1], field_number=2))
 
     # ------------------------------------------------------------------
     # New Part 2: OpenAI Complete (JSON pass-through)
@@ -662,73 +734,153 @@ class TestGrpcServer(CustomTestCase):
         self.assertGreater(len(text), 0)
 
 
-class TestGrpcHttpCoexist(CustomTestCase):
-    """Regression test: HTTP /generate still works correctly when gRPC is enabled."""
+@unittest.skipUnless(_HAS_GRANIAN, "granian not installed (pip install sglang[http2])")
+class TestGrpcHttp2Server(GrpcEnabledServerBase):
+    other_args = ("--mem-fraction-static", "0.7", "--enable-http2")
 
+    def test_http2_health_with_grpc_enabled(self):
+        response = requests.get(self.base_url + "/health")
+        self.assertEqual(response.status_code, 200)
+
+        response_bytes = self._make_unary_call("HealthCheck", b"")
+        self.assertIn(b"\x08\x01", response_bytes)
+
+    def test_http2_grpc_text_generate(self):
+        request = _build_text_generate_request(
+            text="Explain why HTTP/2 matters in one sentence.",
+            max_new_tokens=16,
+            temperature=0.0,
+            stream=False,
+        )
+        responses = list(self._make_server_stream_call("TextGenerate", request))
+        self.assertGreater(len(responses), 0)
+        self.assertTrue(_decode_bool_field(responses[-1], field_number=3))
+
+
+class TestGrpcDisabledServer(CustomTestCase):
     @classmethod
     def setUpClass(cls):
         cls.model = DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN
-        cls.base_url = DEFAULT_URL_FOR_TEST
+        cls.base_url = _make_test_base_url()
+        cls.grpc_port = _grpc_port_from_http_url(cls.base_url)
+        cls.grpc_host = _grpc_host_from_http_url(cls.base_url)
         cls.process = popen_launch_server(
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=(
-                "--mem-fraction-static",
-                "0.7",
-            ),
+            other_args=("--mem-fraction-static", "0.7", "--disable-grpc"),
         )
 
     @classmethod
     def tearDownClass(cls):
-        kill_process_tree(cls.process.pid)
+        if hasattr(cls, "process") and cls.process:
+            kill_process_tree(cls.process.pid)
 
-    def test_http_generate_with_grpc_enabled(self):
+    def test_http_works_when_native_grpc_disabled(self):
         response = requests.post(
             self.base_url + "/generate",
             json={
-                "text": "What is 2+2?",
-                "sampling_params": {"temperature": 0, "max_new_tokens": 16},
+                "text": "Answer with the word hello.",
+                "sampling_params": {"temperature": 0, "max_new_tokens": 8},
             },
         )
         self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertIn("text", result)
-        self.assertGreater(len(result["text"]), 0)
+        self.assertIn("text", response.json())
 
-    def test_http_generate_streaming_with_grpc_enabled(self):
-        response = requests.post(
-            self.base_url + "/generate",
-            json={
-                "text": "Tell me a joke",
-                "sampling_params": {"temperature": 0, "max_new_tokens": 32},
-                "stream": True,
-            },
-            stream=True,
+    def test_grpc_port_does_not_bind_when_disabled(self):
+        with self.assertRaises(OSError):
+            socket.create_connection((self.grpc_host, self.grpc_port), timeout=5)
+
+
+@unittest.skipUnless(_HAS_SGLANG_GRPC, "sglang_grpc package not installed")
+class TestGrpcServerArgs(CustomTestCase):
+    def test_multi_tokenizer_requires_disabling_native_grpc(self):
+        from sglang.srt.server_args import prepare_server_args
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Native gRPC does not yet support --tokenizer-worker-num > 1",
+        ):
+            prepare_server_args(
+                [
+                    "--model-path",
+                    DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                    "--tokenizer-worker-num",
+                    "2",
+                ]
+            )
+
+    def test_multi_tokenizer_is_allowed_when_native_grpc_disabled(self):
+        from sglang.srt.server_args import prepare_server_args
+
+        server_args = prepare_server_args(
+            [
+                "--model-path",
+                DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
+                "--tokenizer-worker-num",
+                "2",
+                "--disable-grpc",
+            ]
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertTrue(server_args.disable_grpc)
+        self.assertEqual(server_args.tokenizer_worker_num, 2)
 
-        chunks = []
-        for line in response.iter_lines():
-            if line:
-                decoded = line.decode("utf-8")
-                if decoded.startswith("data:"):
-                    data = decoded[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    chunks.append(json.loads(data))
 
-        self.assertGreater(len(chunks), 0)
+class DummyOpenAIRequest:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
 
-    def test_http_model_info_with_grpc_enabled(self):
-        response = requests.get(self.base_url + "/model_info")
-        self.assertEqual(response.status_code, 200)
-        result = response.json()
-        self.assertIn("model_path", result)
 
-    def test_http_health_with_grpc_enabled(self):
-        response = requests.get(self.base_url + "/health")
-        self.assertEqual(response.status_code, 200)
+class TestGrpcBridgeHelpers(CustomTestCase):
+    def test_runtime_handle_abort_forwards_abort_all(self):
+        from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
+
+        tokenizer_manager = MagicMock()
+        tokenizer_manager.event_loop = None
+        handle = RuntimeHandle(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=MagicMock(),
+            server_args=MagicMock(),
+        )
+
+        handle.abort(abort_all=True)
+
+        tokenizer_manager.abort_request.assert_called_once_with(rid="", abort_all=True)
+
+    def test_runtime_handle_openai_trace_headers_reach_mock_request(self):
+        from sglang.srt.entrypoints.grpc_bridge import RuntimeHandle
+
+        tokenizer_manager = MagicMock()
+        tokenizer_manager.event_loop = None
+        serving = MagicMock()
+        serving.handle_request = AsyncMock(return_value={"ok": True})
+        handle = RuntimeHandle(
+            tokenizer_manager=tokenizer_manager,
+            template_manager=MagicMock(),
+            server_args=MagicMock(),
+        )
+        handle._openai_serving_classes = {"chat": serving}
+
+        with patch.object(
+            handle,
+            "_get_openai_request_class",
+            return_value=DummyOpenAIRequest,
+        ):
+            callback = MagicMock()
+            trace_headers = {"traceparent": "00-abc-123-01"}
+            asyncio.run(
+                handle._run_openai_request(
+                    "chat",
+                    json.dumps({"model": "dummy", "messages": []}).encode("utf-8"),
+                    callback,
+                    streaming=False,
+                    trace_headers=trace_headers,
+                )
+            )
+
+        raw_request = serving.handle_request.await_args.args[1]
+        self.assertEqual(raw_request.headers, trace_headers)
+        callback.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -99,6 +99,27 @@ async fn recv_required_chunk(
         .ok_or_else(|| Status::internal("Channel closed before response"))
 }
 
+fn closed_stream_status(bridge: &Arc<PyBridge>, rid: &str) -> Status {
+    if let Some(message) = bridge.take_terminal_error(rid) {
+        if message == "gRPC response channel full: client not consuming" {
+            Status::resource_exhausted(message)
+        } else if message == "gRPC client disconnected" || message == "Request aborted" {
+            Status::cancelled(message)
+        } else {
+            Status::internal(message)
+        }
+    } else {
+        Status::internal("gRPC response stream closed before a terminal response")
+    }
+}
+
+fn extract_model_path(json_info: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(json_info)
+        .ok()
+        .and_then(|value| value.get("model_path").and_then(|v| v.as_str()).map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// Build a request dict for GenerateReqInput from proto TextGenerateRequest fields.
 fn build_text_generate_dict(
     rid: &str,
@@ -304,11 +325,11 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
                         break;
                     }
                     Ok(None) => {
-                        let _ = bridge.abort(&rid_clone);
+                        yield Err(closed_stream_status(&bridge, &rid_clone));
                         break;
                     }
                     Err(status) => {
-                        let _ = bridge.abort(&rid_clone);
+                        let _ = bridge.abort(&rid_clone, false);
                         yield Err(status);
                         break;
                     }
@@ -363,11 +384,11 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
                         break;
                     }
                     Ok(None) => {
-                        let _ = bridge.abort(&rid_clone);
+                        yield Err(closed_stream_status(&bridge, &rid_clone));
                         break;
                     }
                     Err(status) => {
-                        let _ = bridge.abort(&rid_clone);
+                        let _ = bridge.abort(&rid_clone, false);
                         yield Err(status);
                         break;
                     }
@@ -581,7 +602,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
             .map_err(|e| Status::internal(format!("Failed to get model info: {}", e)))?;
 
         Ok(Response::new(proto::GetModelInfoResponse {
-            model_path: String::new(),
+            model_path: extract_model_path(&json_info),
             json_info,
         }))
     }
@@ -649,7 +670,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
     ) -> Result<Response<proto::AbortResponse>, Status> {
         let req = request.into_inner();
         self.bridge
-            .abort(&req.rid)
+            .abort(&req.rid, req.abort_all)
             .map_err(|e| Status::internal(format!("Failed to abort: {}", e)))?;
 
         Ok(Response::new(proto::AbortResponse { success: true }))
@@ -841,7 +862,7 @@ impl SglangServiceImpl {
 
         let mut receiver = self
             .bridge
-            .submit_openai(&rid, method_name, &req.json_body)
+            .submit_openai(&rid, method_name, &req.json_body, &req.trace_headers)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let bridge = self.bridge.clone();
@@ -858,12 +879,10 @@ impl SglangServiceImpl {
                     }
                     Ok(Some(ResponseChunk::Finished(data))) => {
                         let bytes = data.json_bytes.unwrap_or_default();
-                        if !bytes.is_empty() {
-                            yield Ok(proto::OpenAiStreamChunk {
-                                json_chunk: bytes,
-                                finished: true,
-                            });
-                        }
+                        yield Ok(proto::OpenAiStreamChunk {
+                            json_chunk: bytes,
+                            finished: true,
+                        });
                         break;
                     }
                     Ok(Some(ResponseChunk::Error(msg))) => {
@@ -871,11 +890,11 @@ impl SglangServiceImpl {
                         break;
                     }
                     Ok(None) => {
-                        let _ = bridge.abort(&rid_clone);
+                        yield Err(closed_stream_status(&bridge, &rid_clone));
                         break;
                     }
                     Err(status) => {
-                        let _ = bridge.abort(&rid_clone);
+                        let _ = bridge.abort(&rid_clone, false);
                         yield Err(status);
                         break;
                     }
@@ -896,7 +915,7 @@ impl SglangServiceImpl {
 
         let mut receiver = self
             .bridge
-            .submit_openai(&rid, method_name, &req.json_body)
+            .submit_openai(&rid, method_name, &req.json_body, &req.trace_headers)
             .map_err(|e| Status::internal(format!("Failed to submit request: {}", e)))?;
 
         let chunk = recv_required_chunk(&mut receiver).await?;
