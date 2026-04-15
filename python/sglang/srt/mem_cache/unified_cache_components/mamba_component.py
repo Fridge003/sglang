@@ -13,8 +13,10 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
+from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentType,
+    HiCachePhase,
     TreeComponent,
     get_and_increase_time_counter,
 )
@@ -44,10 +46,16 @@ class MambaComponent(TreeComponent):
             ), f"MambaComponent requires page_size=1 when mamba_extra_buffer is disabled, got {cache.page_size}"
         super().__init__(cache, params)
         self.enable_mamba_extra_buffer = params.enable_mamba_extra_buffer
+        # HiCache state
+        self._mamba_pool_host = None  # set to host mamba pool when HiCache enabled
 
     def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         ct = self.component_type
-        return lambda node: node.component_data[ct].value is not None
+        # HiCache: evicted + backuped (host_value present) is also a valid match
+        return lambda node: (
+            node.component_data[ct].value is not None
+            or node.component_data[ct].host_value is not None
+        )
 
     def finalize_match_result(
         self,
@@ -90,6 +98,13 @@ class MambaComponent(TreeComponent):
                     mamba_value, dst_index
                 )
 
+        # HiCache: if mamba was evicted from device but has host backup,
+        # ensure host_hit_length >= 1 so load_back is triggered.
+        host_node = result.last_host_node
+        cd = host_node.component_data[self.component_type]
+        if cd.value is None and cd.host_value is not None:
+            result = result._replace(host_hit_length=max(result.host_hit_length, 1))
+
         return result._replace(mamba_branching_seqlen=branching_seqlen)
 
     def commit_insert_component_data(
@@ -109,6 +124,10 @@ class MambaComponent(TreeComponent):
             return
         if node.component_data[self.component_type].value is None:
             node.component_data[self.component_type].value = params.mamba_value
+            # move from host LRU to device LRU
+            host_lru = self.cache.host_lru_lists[self.component_type]
+            if host_lru.in_list(node):
+                host_lru.remove_node(node)
             self.cache.lru_lists[self.component_type].insert_mru(node)
             self.cache.component_evictable_size_[self.component_type] += len(
                 params.mamba_value
@@ -122,16 +141,30 @@ class MambaComponent(TreeComponent):
     def redistribute_on_node_split(
         self, new_parent: UnifiedTreeNode, child: UnifiedTreeNode
     ):
-        new_parent.component_data[self.component_type].value = None
-        new_parent.component_data[self.component_type].lock_ref = 0
+        ct = self.component_type
+        new_parent.component_data[ct].value = None
+        new_parent.component_data[ct].lock_ref = 0
+        # HiCache: mamba host_value stays on child (mamba = leaf-only data)
+        new_parent.component_data[ct].host_value = None
+        new_parent.component_data[ct].host_lock_ref = 0
 
     def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
-        value = node.component_data[self.component_type].value
-        self.cache.req_to_token_pool.mamba_pool.free(value)
-        freed = len(value)
-        self.cache.component_evictable_size_[self.component_type] -= freed
-        if not is_leaf:
-            node.component_data[self.component_type].value = None
+        cd = node.component_data[self.component_type]
+        freed = 0
+        if cd.value is not None:
+            self.cache.req_to_token_pool.mamba_pool.free(cd.value)
+            freed = len(cd.value)
+            self.cache.component_evictable_size_[self.component_type] -= freed
+            if not is_leaf:
+                cd.value = None  # tombstone
+        if is_leaf and cd.host_value is not None:
+            # HiCache: free host mamba resources
+            if self._mamba_pool_host is not None:
+                self._mamba_pool_host.free(cd.host_value)
+            cd.host_value = None
+            host_lru = self.cache.host_lru_lists[self.component_type]
+            if host_lru.in_list(node):
+                host_lru.remove_node(node)
         return freed
 
     def drive_eviction(
@@ -144,19 +177,23 @@ class MambaComponent(TreeComponent):
             tracker[self.component_type] < request and x is not None and lru.in_list(x)
         ):
             assert x.component_data[self.component_type].value is not None
-            if len(x.children) > 0:
+            if x in self.cache.evictable_device_leaves:
+                # D-leaf: atomic eviction of all components
+                x_next = lru.get_prev_no_lock(x)
+                mamba_freed = len(x.component_data[self.component_type].value)
+                self.cache._evict_device_leaf(x)
+                tracker[self.component_type] += mamba_freed
+                if not lru.in_list(x_next):
+                    x_next = lru.get_lru_no_lock()
+                x = x_next
+            else:
+                # Internal: tombstone Mamba + cascade
                 x_next = lru.get_prev_no_lock(x)
                 self.cache._evict_component_and_detach_lru(
                     x, self, is_leaf=False, tracker=tracker
                 )
                 self.cache._cascade_evict(x, self, tracker)
                 x = x_next
-            else:
-                self.cache._evict_component_and_detach_lru(
-                    x, self, is_leaf=True, tracker=tracker
-                )
-                self.cache._cascade_evict(x, self, tracker)
-                x = lru.get_lru_no_lock()
 
     def acquire_component_lock(
         self, node: UnifiedTreeNode, result: IncLockRefResult
@@ -178,8 +215,7 @@ class MambaComponent(TreeComponent):
         ct = self.component_type
         cd = node.component_data[ct]
         value = cd.value
-        if value is not None:
-            assert cd.lock_ref > 0
+        if value is not None and cd.lock_ref > 0:
             if cd.lock_ref == 1:
                 vlen = len(value)
                 self.cache.component_evictable_size_[ct] += vlen
@@ -268,3 +304,120 @@ class MambaComponent(TreeComponent):
             ):
                 self.cache.req_to_token_pool.mamba_pool.free(insert_params.mamba_value)
             req.mamba_last_track_seqlen = None
+
+    # ---- HiCache Hooks ----
+
+    def build_hicache_transfers(
+        self, node: UnifiedTreeNode, phase: HiCachePhase, **kw
+    ) -> Optional[list[PoolTransfer]]:
+        ct = self.component_type
+
+        if phase == HiCachePhase.BACKUP:
+            cd = node.component_data[ct]
+            if cd.value is None:
+                return None
+            return [
+                PoolTransfer(
+                    name=PoolName.MAMBA,
+                    device_indices=cd.value,
+                )
+            ]
+
+        if phase == HiCachePhase.RESTORE:
+            req = kw.get("req")
+            transfers: list[PoolTransfer] = []
+
+            cd = node.component_data[ct]
+            if cd.value is not None:
+                return None
+
+            # restore single node if host_value exists and
+            if cd.host_value is not None and cd.value is None:
+                transfers.append(
+                    PoolTransfer(
+                        name=PoolName.MAMBA,
+                        host_indices=cd.host_value,
+                        nodes_to_load=[node],
+                    )
+                )
+
+            # Per-request mamba CoW (H→D copy into request's device slot)
+            cd = node.component_data[ct]
+            if req is not None and cd.host_value is not None:
+                if req.mamba_pool_idx is None:
+                    dst = self.cache.req_to_token_pool.mamba_pool.alloc(1)
+                    if dst is None:
+                        self.cache.evict(EvictParams(num_tokens=0, mamba_num=1))
+                        dst = self.cache.req_to_token_pool.mamba_pool.alloc(1)
+                        assert dst is not None, "Cannot alloc mamba for load_back"
+                    req.mamba_pool_idx = dst[0]
+                transfers.append(
+                    PoolTransfer(
+                        name=PoolName.MAMBA,
+                        host_indices=cd.host_value,
+                        device_indices=req.mamba_pool_idx.unsqueeze(0),
+                    )
+                )
+
+            return transfers if transfers else None
+
+        return None
+
+    def commit_hicache_transfer(
+        self,
+        node: UnifiedTreeNode,
+        phase: HiCachePhase,
+        transfers: list[PoolTransfer] = (),
+    ) -> None:
+        ct = self.component_type
+
+        if phase == HiCachePhase.BACKUP:
+            if transfers and transfers[0].host_indices is not None:
+                cd = node.component_data[ct]
+                if cd.host_value is None:
+                    cd.host_value = transfers[0].host_indices.clone()
+
+        elif phase == HiCachePhase.RESTORE:
+            if not transfers:
+                return
+            transfer = transfers[0]
+            if transfer.device_indices is not None:
+                cd = node.component_data[ct]
+                cd.value = transfer.device_indices.clone()
+                count = len(cd.value)
+                # Move from host LRU to device LRU
+                host_lru = self.cache.host_lru_lists[ct]
+                if host_lru.in_list(node):
+                    host_lru.remove_node(node)
+                self.cache.lru_lists[ct].insert_mru(node)
+                self.cache.component_evictable_size_[ct] += count
+
+    def drive_host_eviction(
+        self, num_tokens: int, tracker: dict[ComponentType, int]
+    ) -> None:
+        """Evict mamba host resources.
+        Internal nodes: private tombstone (free host mamba only).
+        Host leaves: atomic eviction via _evict_host_leaf."""
+        ct = self.component_type
+        host_lru = self.cache.host_lru_lists[ct]
+        x = host_lru.get_lru_no_lock()
+        num_evicted = 0
+        while num_evicted < num_tokens and x is not None and host_lru.in_list(x):
+            x_next = host_lru.get_prev_no_lock(x)
+            cd = x.component_data[ct]
+            if x in self.cache.evictable_host_leaves:
+                # Host leaf: atomic eviction (all components host + delete)
+                self.cache._evict_host_leaf(x, tracker)
+                num_evicted += 1
+            else:
+                # Internal or non-evicted: private tombstone
+                if cd.host_value is not None:
+                    if self._mamba_pool_host is not None:
+                        self._mamba_pool_host.free(cd.host_value)
+                    cd.host_value = None
+                    host_lru.remove_node(x)
+                    num_evicted += 1
+                    self.cache._update_evictable_leaf_sets(x)
+                    if x.parent is not None:
+                        self.cache._update_evictable_leaf_sets(x.parent)
+            x = x_next

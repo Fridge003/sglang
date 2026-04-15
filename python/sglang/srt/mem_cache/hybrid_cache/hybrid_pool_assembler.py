@@ -20,9 +20,142 @@ if TYPE_CHECKING:
     from sglang.srt.mem_cache.cache_init_params import CacheInitParams
     from sglang.srt.mem_cache.hi_mamba_radix_cache import HiMambaRadixCache
     from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
+    from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
     from sglang.srt.server_args import ServerArgs
 
 logger = logging.getLogger(__name__)
+
+
+def build_unified_hybrid_stack(
+    cache: "UnifiedRadixCache",
+    params: "CacheInitParams",
+    server_args: "ServerArgs",
+    *,
+    load_cache_event,
+) -> None:
+    """HostPoolGroup + HybridCacheController for UnifiedRadixCache.
+
+    Only Supports FULL-only and FULL + MAMBA component layouts.
+    """
+    from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+    from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, MLATokenToKVPool
+    from sglang.srt.mem_cache.unified_cache_components import ComponentType
+
+    try:
+        kvcache = params.token_to_kv_pool_allocator.get_kvcache()
+
+        # Resolve full_kv_pool and MLA flag
+        if isinstance(kvcache, HybridLinearKVPool):
+            full_kv_pool = kvcache.full_kv_pool
+            use_mla = kvcache.use_mla
+        else:
+            full_kv_pool = kvcache
+            use_mla = isinstance(full_kv_pool, MLATokenToKVPool)
+
+        has_mamba = ComponentType.MAMBA in cache.components
+
+        # 1. Host pools
+        kv_host_pool_cls = MLATokenToKVPoolHost if use_mla else MHATokenToKVPoolHost
+        full_kv_pool_host = kv_host_pool_cls(
+            full_kv_pool,
+            server_args.hicache_ratio,
+            server_args.hicache_size,
+            cache.page_size,
+            server_args.hicache_mem_layout,
+            allocator_type=server_args.hicache_storage_backend,
+        )
+
+        # 2. Layer mapping
+        full_layer_mapping = dict(kvcache.full_attention_layer_id_mapping)
+        all_layer_ids = set(full_layer_mapping)
+
+        if has_mamba:
+            mamba_pool_host = MambaPoolHost(
+                params.req_to_token_pool.mamba_pool,
+                server_args.hicache_ratio,
+                server_args.hicache_size,
+                allocator_type=server_args.hicache_storage_backend,
+                layout=server_args.hicache_mem_layout,
+            )
+            mamba_layer_mapping = dict(params.req_to_token_pool.mamba_map)
+            all_layer_ids |= set(mamba_layer_mapping)
+
+        transfer_layer_num = len(all_layer_ids)
+
+        def kv_layer_mapper(layer_id: int) -> Optional[int]:
+            if not 0 <= layer_id < transfer_layer_num:
+                return None
+            return full_layer_mapping.get(layer_id)
+
+        # 3. HostPoolGroup
+        entries: list[PoolEntry] = [
+            PoolEntry(
+                name=PoolName.KV,
+                host_pool=full_kv_pool_host,
+                device_pool=full_kv_pool,
+                layer_mapper=kv_layer_mapper,
+                is_primary_index_anchor=True,
+            ),
+        ]
+        if has_mamba:
+            def mamba_layer_mapper(layer_id: int) -> Optional[int]:
+                if not 0 <= layer_id < transfer_layer_num:
+                    return None
+                return mamba_layer_mapping.get(layer_id)
+
+            entries.append(
+                PoolEntry(
+                    name=PoolName.MAMBA,
+                    host_pool=mamba_pool_host,
+                    device_pool=params.req_to_token_pool.mamba_pool,
+                    layer_mapper=mamba_layer_mapper,
+                    host_evict_fn=lambda n: cache._evict_host(n, ComponentType.MAMBA),
+                    device_evict_fn=lambda n: cache.evict(EvictParams(mamba_num=n)),
+                )
+            )
+        host_pool_group = HostPoolGroup(entries)
+
+        # 4. HybridCacheController
+        cache_controller = HybridCacheController(
+            params.token_to_kv_pool_allocator,
+            host_pool_group,
+            cache.page_size,
+            params.tp_cache_group,
+            load_cache_event=load_cache_event,
+            write_policy=server_args.hicache_write_policy,
+            io_backend=server_args.hicache_io_backend,
+            storage_backend=None,
+            pp_rank=params.pp_rank,
+            pp_size=params.pp_size,
+            transfer_layer_num=transfer_layer_num,
+        )
+
+        cache.full_kv_pool_host = full_kv_pool_host
+        cache.host_pool_group = host_pool_group
+        cache.cache_controller = cache_controller
+
+        if has_mamba:
+            cache.mamba_pool_host = mamba_pool_host
+            mamba_comp = cache.components[ComponentType.MAMBA]
+            mamba_comp._mamba_pool_host = mamba_pool_host
+            params.req_to_token_pool.register_layer_transfer_counter(
+                cache_controller.layer_done_counter
+            )
+
+        kvcache.register_layer_transfer_counter(
+            cache_controller.layer_done_counter
+        )
+
+        pool_names = "KV + MAMBA" if has_mamba else "KV"
+        logger.info(
+            "Unified hybrid stack: HostPoolGroup(%s), "
+            "transfer_layer_num=%s",
+            pool_names,
+            transfer_layer_num,
+        )
+    except Exception:
+        logger.exception("build_unified_hybrid_stack failed")
+        raise
 
 
 def build_nsa_hybrid_stack(
