@@ -9,7 +9,7 @@ pub mod proto {
 use pyo3::prelude::*;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 
 use bridge::PyBridge;
 use tokenizer::RustTokenizer;
@@ -73,12 +73,13 @@ fn extract_tokenizer_info(runtime_handle: &PyObject) -> (Option<String>, i32) {
 /// Returns:
 ///     GrpcServerHandle that can be used to shut down the server.
 #[pyfunction]
-#[pyo3(signature = (host, port, runtime_handle, worker_threads=4))]
+#[pyo3(signature = (host, port, runtime_handle, worker_threads=4, max_concurrent_requests=None))]
 fn start_server(
     host: String,
     port: u16,
     runtime_handle: PyObject,
     worker_threads: usize,
+    max_concurrent_requests: Option<usize>,
 ) -> PyResult<GrpcServerHandle> {
     let addr: SocketAddr = format!("{}:{}", host, port).parse().map_err(|e| {
         PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid address: {}", e))
@@ -92,7 +93,8 @@ fn start_server(
         .as_deref()
         .and_then(|p| RustTokenizer::from_model_path(p, context_len));
 
-    let bridge = Arc::new(PyBridge::new(runtime_handle, rust_tokenizer, context_len));
+    let semaphore = max_concurrent_requests.map(|n| Arc::new(Semaphore::new(n)));
+    let bridge = Arc::new(PyBridge::new(runtime_handle, rust_tokenizer, context_len, semaphore));
     let shutdown = Arc::new(Notify::new());
     let shutdown_clone = shutdown.clone();
 

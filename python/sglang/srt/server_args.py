@@ -316,6 +316,7 @@ class ServerArgs:
     grpc_mode: bool = False
     grpc_port: Optional[int] = None
     grpc_worker_threads: int = 4
+    grpc_max_concurrent_requests: Optional[int] = 512
     disable_grpc: bool = False
     smg_grpc: bool = False
     skip_server_warmup: bool = False
@@ -4103,6 +4104,18 @@ class ServerArgs:
             type=int,
             default=4,
             help="Number of Tokio worker threads for the native gRPC server.",
+        )
+        parser.add_argument(
+            "--grpc-max-concurrent-requests",
+            type=int,
+            default=512,
+            help=(
+                "Maximum number of inference requests the native gRPC server will "
+                "admit concurrently. Excess requests receive RESOURCE_EXHAUSTED and "
+                "should be retried by the client. Bounds prefill-queue depth and "
+                "keeps TTFT predictable under overload. Set to 0 to disable the "
+                "limit entirely."
+            ),
         )
         parser.add_argument(
             "--disable-grpc",

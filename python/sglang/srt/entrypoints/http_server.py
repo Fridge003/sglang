@@ -2328,11 +2328,13 @@ def _start_native_grpc_server_for_runtime(
             scheduler_info=scheduler_info or {},
         )
 
+        max_concurrent = server_args.grpc_max_concurrent_requests
         grpc_handle = sglang_grpc.start_server(
             host=server_args.host,
             port=server_args.grpc_port,
             runtime_handle=runtime_handle,
             worker_threads=server_args.grpc_worker_threads,
+            max_concurrent_requests=None if max_concurrent == 0 else max_concurrent,
         )
         logger.info(
             f"Native gRPC server started on {server_args.host}:{server_args.grpc_port}"

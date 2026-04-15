@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::time::Duration;
 
 use crate::tokenizer::RustTokenizer;
 
@@ -30,6 +32,11 @@ pub struct PyBridge {
     terminal_errors: Arc<Mutex<HashMap<String, String>>>,
     rust_tokenizer: Option<RustTokenizer>,
     context_len: i32,
+    /// Optional semaphore that caps the number of inference requests simultaneously
+    /// in-flight to the Python scheduler. Each inference RPC acquires a permit before
+    /// submitting to Python and holds it for the request's lifetime; the permit is
+    /// released automatically (RAII) when the response stream or unary handler returns.
+    semaphore: Option<Arc<Semaphore>>,
 }
 
 impl PyBridge {
@@ -37,6 +44,7 @@ impl PyBridge {
         runtime_handle: PyObject,
         rust_tokenizer: Option<RustTokenizer>,
         context_len: i32,
+        semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             runtime_handle,
@@ -44,6 +52,7 @@ impl PyBridge {
             terminal_errors: Arc::new(Mutex::new(HashMap::new())),
             rust_tokenizer,
             context_len,
+            semaphore,
         }
     }
 
@@ -55,6 +64,27 @@ impl PyBridge {
     /// Return the model's context length.
     pub fn context_len(&self) -> i32 {
         self.context_len
+    }
+
+    /// Attempt to acquire an inference concurrency slot before submitting to Python.
+    ///
+    /// - `Ok(None)`         — no limit configured; caller proceeds unconditionally.
+    /// - `Ok(Some(permit))` — limit configured and slot acquired; caller must hold
+    ///                        the permit for the lifetime of the request so the slot
+    ///                        is released exactly when the request finishes.
+    /// - `Err(())`          — limit configured but `deadline` elapsed before a slot
+    ///                        was free; caller should return `RESOURCE_EXHAUSTED`.
+    pub async fn acquire_slot(
+        &self,
+        deadline: Duration,
+    ) -> Result<Option<OwnedSemaphorePermit>, ()> {
+        match &self.semaphore {
+            None => Ok(None),
+            Some(sem) => tokio::time::timeout(deadline, Arc::clone(sem).acquire_owned())
+                .await
+                .map(|r| Some(r.expect("inference semaphore was unexpectedly closed")))
+                .map_err(|_| ()),
+        }
     }
 
     // ------------------------------------------------------------------
