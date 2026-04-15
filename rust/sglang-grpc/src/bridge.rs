@@ -32,10 +32,10 @@ pub struct PyBridge {
     terminal_errors: Arc<Mutex<HashMap<String, String>>>,
     rust_tokenizer: Option<RustTokenizer>,
     context_len: i32,
-    /// Optional semaphore that caps the number of inference requests simultaneously
-    /// in-flight to the Python scheduler. Each inference RPC acquires a permit before
-    /// submitting to Python and holds it for the request's lifetime; the permit is
-    /// released automatically (RAII) when the response stream or unary handler returns.
+    /// Token-budget semaphore: each inference RPC acquires `max_new_tokens` permits
+    /// before prefill and releases them on the first response token (prefill done).
+    /// This bounds the total tokens queued for prefill to the KV cache capacity,
+    /// preventing scheduler saturation regardless of individual request length.
     semaphore: Option<Arc<Semaphore>>,
 }
 
@@ -74,16 +74,27 @@ impl PyBridge {
     ///                        is released exactly when the request finishes.
     /// - `Err(())`          — limit configured but `deadline` elapsed before a slot
     ///                        was free; caller should return `RESOURCE_EXHAUSTED`.
+    /// Acquire `n_tokens` permits from the prefill-budget semaphore.
+    ///
+    /// `n_tokens` should be the request's `max_new_tokens` (capped to `context_len`).
+    /// The semaphore is sized to `max_total_num_tokens` so that the total tokens
+    /// queued for prefill never exceeds the KV cache capacity.
     pub async fn acquire_slot(
         &self,
+        n_tokens: u32,
         deadline: Duration,
     ) -> Result<Option<OwnedSemaphorePermit>, ()> {
         match &self.semaphore {
             None => Ok(None),
-            Some(sem) => tokio::time::timeout(deadline, Arc::clone(sem).acquire_owned())
-                .await
-                .map(|r| Some(r.expect("inference semaphore was unexpectedly closed")))
-                .map_err(|_| ()),
+            Some(sem) => {
+                // Clamp to semaphore capacity so a single over-sized request
+                // can always make progress (rather than deadlocking).
+                let n = n_tokens.min(sem.available_permits() as u32).max(1);
+                tokio::time::timeout(deadline, Arc::clone(sem).acquire_many_owned(n))
+                    .await
+                    .map(|r| Some(r.expect("inference semaphore was unexpectedly closed")))
+                    .map_err(|_| ())
+            }
         }
     }
 

@@ -316,7 +316,7 @@ class ServerArgs:
     grpc_mode: bool = False
     grpc_port: Optional[int] = None
     grpc_worker_threads: int = 4
-    grpc_max_concurrent_requests: Optional[int] = 512
+    grpc_max_prefill_tokens: Optional[int] = None  # None = auto-detect from KV cache
     disable_grpc: bool = False
     smg_grpc: bool = False
     skip_server_warmup: bool = False
@@ -4106,15 +4106,16 @@ class ServerArgs:
             help="Number of Tokio worker threads for the native gRPC server.",
         )
         parser.add_argument(
-            "--grpc-max-concurrent-requests",
+            "--grpc-max-prefill-tokens",
             type=int,
-            default=512,
+            default=None,
             help=(
-                "Maximum number of inference requests the native gRPC server will "
-                "admit concurrently. Excess requests receive RESOURCE_EXHAUSTED and "
-                "should be retried by the client. Bounds prefill-queue depth and "
-                "keeps TTFT predictable under overload. Set to 0 to disable the "
-                "limit entirely."
+                "Token budget for concurrent prefill in the native gRPC server. "
+                "Each request acquires max_new_tokens permits before prefill and "
+                "releases them on the first response token (prefill done), so the "
+                "budget bounds total tokens queued for prefill to the KV cache "
+                "capacity. Default (None) auto-detects from the scheduler's "
+                "max_total_num_tokens. Set to 0 to disable admission control."
             ),
         )
         parser.add_argument(

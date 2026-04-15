@@ -95,20 +95,22 @@ async fn recv_chunk_with_timeout(
         .map_err(|_| Status::deadline_exceeded(timeout_message))
 }
 
-/// Acquire a concurrency slot for inference RPCs that submit work to the Python scheduler.
+/// Acquire `n_tokens` permits from the prefill token-budget semaphore.
 ///
-/// Returns `Ok(permit)` where `permit` may be `None` (no limit configured) or
-/// `Some(OwnedSemaphorePermit)` (limit active — caller must hold it for the entire
-/// request lifetime so the slot is freed when the request completes).
+/// `n_tokens` should be the request's `max_new_tokens`.  The semaphore is sized
+/// to `max_total_num_tokens` so the total tokens in-flight for prefill never
+/// exceeds KV cache capacity.  Permits are released on the first response token
+/// (prefill done) — callers must use `Option::take()` inside the stream.
 ///
-/// Returns `Err(Status::resource_exhausted(...))` when the limit is configured and
-/// [`ADMIT_TIMEOUT`] elapsed before a slot became free.
+/// Returns `Err(Status::resource_exhausted(...))` when `ADMIT_TIMEOUT` elapses
+/// before enough permits are available; the client should retry with backoff.
 async fn acquire_inference_slot(
     bridge: &Arc<PyBridge>,
+    n_tokens: u32,
 ) -> Result<Option<OwnedSemaphorePermit>, Status> {
-    bridge.acquire_slot(ADMIT_TIMEOUT).await.map_err(|_| {
+    bridge.acquire_slot(n_tokens, ADMIT_TIMEOUT).await.map_err(|_| {
         Status::resource_exhausted(
-            "server at maximum concurrent request capacity; retry after backoff",
+            "prefill token budget exhausted; server is at KV-cache capacity — retry after backoff",
         )
     })
 }
@@ -309,9 +311,14 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::TextGenerateRequest>,
     ) -> Result<Response<Self::TextGenerateStream>, Status> {
-        let permit = acquire_inference_slot(&self.bridge).await?;
-
         let req = request.into_inner();
+        let n_tokens = req
+            .sampling_params
+            .as_ref()
+            .and_then(|p| p.max_new_tokens)
+            .unwrap_or(512)
+            .max(1) as u32;
+        let permit = acquire_inference_slot(&self.bridge, n_tokens).await?;
         let rid = req
             .rid
             .clone()
@@ -379,9 +386,14 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStream>, Status> {
-        let permit = acquire_inference_slot(&self.bridge).await?;
-
         let req = request.into_inner();
+        let n_tokens = req
+            .sampling_params
+            .as_ref()
+            .and_then(|p| p.max_new_tokens)
+            .unwrap_or(512)
+            .max(1) as u32;
+        let permit = acquire_inference_slot(&self.bridge, n_tokens).await?;
         let rid = req
             .rid
             .clone()
@@ -448,7 +460,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::TextEmbedRequest>,
     ) -> Result<Response<proto::TextEmbedResponse>, Status> {
-        let _permit = acquire_inference_slot(&self.bridge).await?;
+        let _permit = acquire_inference_slot(&self.bridge, 1).await?;
 
         let req = request.into_inner();
         let rid = req
@@ -479,7 +491,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::EmbedRequest>,
     ) -> Result<Response<proto::EmbedResponse>, Status> {
-        let _permit = acquire_inference_slot(&self.bridge).await?;
+        let _permit = acquire_inference_slot(&self.bridge, 1).await?;
 
         let req = request.into_inner();
         let rid = req
@@ -514,7 +526,7 @@ impl proto::sglang_service_server::SglangService for SglangServiceImpl {
         &self,
         request: Request<proto::ClassifyRequest>,
     ) -> Result<Response<proto::ClassifyResponse>, Status> {
-        let _permit = acquire_inference_slot(&self.bridge).await?;
+        let _permit = acquire_inference_slot(&self.bridge, 1).await?;
 
         let req = request.into_inner();
         let rid = req
@@ -904,9 +916,14 @@ impl SglangServiceImpl {
         request: Request<proto::OpenAiRequest>,
         method_name: &str,
     ) -> Result<Response<StreamResult<proto::OpenAiStreamChunk>>, Status> {
-        let permit = acquire_inference_slot(&self.bridge).await?;
-
         let req = request.into_inner();
+        // Best-effort parse of max_tokens from OpenAI JSON body; fall back to 512.
+        let n_tokens: u32 = serde_json::from_slice::<serde_json::Value>(&req.json_body)
+            .ok()
+            .and_then(|v| v.get("max_tokens").and_then(|t| t.as_u64()))
+            .unwrap_or(512)
+            .max(1) as u32;
+        let permit = acquire_inference_slot(&self.bridge, n_tokens).await?;
         let rid = uuid::Uuid::new_v4().to_string();
 
         let mut receiver = self
@@ -965,7 +982,7 @@ impl SglangServiceImpl {
         request: Request<proto::OpenAiRequest>,
         method_name: &str,
     ) -> Result<Response<proto::OpenAiResponse>, Status> {
-        let _permit = acquire_inference_slot(&self.bridge).await?;
+        let _permit = acquire_inference_slot(&self.bridge, 1).await?;
 
         let req = request.into_inner();
         let rid = uuid::Uuid::new_v4().to_string();
