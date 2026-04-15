@@ -93,10 +93,8 @@ jobs:
           docker tag rocm/sgl-dev:${{ env.IMAGE_TAG }} lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
           docker push lmsysorg/sglang-rocm:${{ env.IMAGE_TAG }}
 
-  # Temporarily disable docker cache seeding until performant storage is in place
   cache:
-    if: false
-    # if: always() && github.repository == 'sgl-project/sglang'
+    if: always() && github.repository == 'sgl-project/sglang'
     runs-on: linux-mi300-gpu-1
     environment: 'prod'
     needs: publish
@@ -168,6 +166,7 @@ jobs:
             exit 1
           fi
 
+          mkdir -p "$(dirname "${final_path}")"
           tmp_path="${final_path}.tmp"
 
           echo "Pulling image: ${image}"
