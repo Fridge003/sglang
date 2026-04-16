@@ -99,6 +99,25 @@ if [ $KILLALL_EXIT -ne 0 ]; then
     exit 1
 fi
 
+# Clean orphaned IPC from /dev/shm left by previous CI runs.
+# On shared hosts with --ipc=host, semaphores and POSIX shared memory accumulate
+# across jobs (sem.loky-*, sem.mp-*, psm_*). Python's resource_tracker detects
+# these orphans during the next server startup and can interfere with model loading,
+# causing spurious SIGKILL (exit code -9) during setUpClass.
+# Safety: only remove files whose embedded PID is confirmed dead.
+{ set +x; } 2>/dev/null
+SHM_CLEANED=0
+for f in /dev/shm/sem.loky-* /dev/shm/sem.mp-* /dev/shm/psm_* /dev/shm/cuda.shm.*; do
+    [ -e "$f" ] || continue
+    pid=$(echo "$f" | grep -oP '[0-9]+' | head -1)
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$f"
+        SHM_CLEANED=$((SHM_CLEANED + 1))
+    fi
+done
+set -x
+echo "Cleaned ${SHM_CLEANED} orphaned IPC entries from /dev/shm"
+
 mark_step_done "Kill existing processes"
 
 # ------------------------------------------------------------------------------
