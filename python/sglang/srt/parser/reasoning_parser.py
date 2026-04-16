@@ -38,6 +38,16 @@ class BaseReasoningFormatDetector:
         self._buffer = ""
         self.stripped_think_start = False
         self.think_start_self_label = ""
+        # When True we expect the next characters in the buffer to *optionally*
+        # begin with ``think_start_token + think_start_self_label`` and must be
+        # consumed before any reasoning content is surfaced. This covers the
+        # case where ``force_reasoning=True`` but the model still emits an
+        # explicit start token (e.g. Gemma-4 with ``enable_thinking=True``,
+        # DeepSeek-R1-0528).
+        self._awaiting_start_strip = force_reasoning
+        # Reasoning content buffered when ``stream_reasoning=False``; flushed
+        # when a reasoning block ends.
+        self._pending_reasoning = ""
 
         self.continue_final_message = continue_final_message
         if self.continue_final_message:
@@ -102,99 +112,184 @@ class BaseReasoningFormatDetector:
             return StreamingParseResult(normal_text=processed_text)
 
     @staticmethod
-    def _split_trailing_partial_token(text: str, tokens: list[str]) -> tuple[str, str]:
-        """Split text into processable content and a trailing partial token.
+    def _split_trailing_partial_token(
+        text: str, tokens: Tuple[str, ...]
+    ) -> Tuple[str, str]:
+        """Split ``text`` into processable content and a trailing partial-token suffix.
 
         Streaming chunks can end with the beginning of a control token, e.g.
-        ``"...<chan"`` before the rest of ``"<channel|>"`` arrives. We must keep
-        that suffix buffered instead of leaking it to the caller.
-        """
-        longest_partial = ""
-        for token in tokens:
-            max_prefix_len = min(len(text), len(token) - 1)
-            for prefix_len in range(max_prefix_len, 0, -1):
-                suffix = text[-prefix_len:]
-                if token.startswith(suffix):
-                    if prefix_len > len(longest_partial):
-                        longest_partial = suffix
-                    break
+        ``"...<chan"`` before the rest of ``"<channel|>"`` arrives. Returning the
+        ``<chan`` as output would leak a delimiter fragment to the caller.
+        This helper finds the longest suffix of ``text`` that is a STRICT
+        prefix of any of ``tokens`` (never the full token — full matches are
+        handled by the caller via ``find``). The returned pair is
+        ``(head, partial)`` such that ``head + partial == text``.
 
-        if not longest_partial:
+        Example (tokens include ``"<channel|>"``):
+            ``_split_trailing_partial_token("hello<chan", (..., "<channel|>"))``
+            → ``("hello", "<chan")``
+        """
+        best_partial_len = 0
+        for token in tokens:
+            if not token:
+                continue
+            # Strict prefixes only: ``prefix_len < len(token)``. Full-token
+            # matches must be consumed by ``find`` so the state machine can
+            # actually transition.
+            max_len = min(len(text), len(token) - 1)
+            for prefix_len in range(max_len, best_partial_len, -1):
+                if token.startswith(text[-prefix_len:]):
+                    best_partial_len = prefix_len
+                    break
+        if best_partial_len == 0:
             return text, ""
-        return text[: -len(longest_partial)], longest_partial
+        return text[:-best_partial_len], text[-best_partial_len:]
 
     def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
-        """
-        Streaming incremental parsing for reasoning content.
-        Handles partial reasoning tags and content.
+        """Streaming incremental parse of reasoning content.
 
-        If stream_reasoning is False:
-            Accumulates reasoning content until the end tag is found
-        If stream_reasoning is True:
-            Streams reasoning content as it arrives
+        Implements an explicit two-state machine ({outside, inside}-reasoning)
+        that loops until it either consumes the full buffer or needs more
+        input. This guarantees:
+
+        * Delimiter strings (``<|channel>``, ``<channel|>``, ``<think>``, etc.)
+          never leak into emitted text, even when split across chunk
+          boundaries — only the longest trailing *strict* prefix of a control
+          token is retained in the internal buffer.
+        * Normal text preceding a ``think_start_token`` in the same chunk is
+          correctly routed to ``normal_text`` (not absorbed into reasoning).
+        * Multiple reasoning blocks in a single response are handled
+          idempotently; each block's boundaries are stripped.
+        * With ``force_reasoning=True`` we start inside reasoning but still
+          consume an optional leading start token if the model emits one.
+
+        If ``stream_reasoning`` is False, reasoning content is buffered in
+        ``_pending_reasoning`` and flushed (rstripped) only when the block's
+        end token is seen.
         """
         self._buffer += new_text
-        current_text = self._buffer
 
         think_start_text = self.think_start_token + self.think_start_self_label
+        reasoning_parts = []
+        normal_parts = []
 
-        # If the current text is a prefix of the think token, keep buffering
-        tokens_to_check = [think_start_text, self.think_end_token]
-        if self.tool_start_token:
-            tokens_to_check.append(self.tool_start_token)
+        while self._buffer:
+            if not self._in_reasoning:
+                # Look for a complete start sequence.
+                idx = self._buffer.find(think_start_text)
+                if idx >= 0:
+                    if idx > 0:
+                        normal_parts.append(self._buffer[:idx])
+                    self._buffer = self._buffer[idx + len(think_start_text) :]
+                    self._in_reasoning = True
+                    self.stripped_think_start = True
+                    self._awaiting_start_strip = False
+                    continue
 
-        current_text, trailing_partial = self._split_trailing_partial_token(
-            current_text, tokens_to_check
-        )
-        if not current_text and trailing_partial:
-            return StreamingParseResult()
-
-        # Strip `<think>` token if present
-        if not self.stripped_think_start and think_start_text in current_text:
-            current_text = current_text.replace(think_start_text, "", 1)
-            self.stripped_think_start = True
-            self._in_reasoning = True
-
-        # Handle end of reasoning block
-        if self._in_reasoning and self.think_end_token in current_text:
-            end_idx = current_text.find(self.think_end_token)
-
-            reasoning_text = current_text[:end_idx]
-
-            self._buffer = trailing_partial
-            self._in_reasoning = False
-            normal_text = current_text[end_idx + len(self.think_end_token) :]
-
-            return StreamingParseResult(
-                normal_text=normal_text, reasoning_text=reasoning_text.rstrip()
-            )
-
-        # Continue with reasoning content
-        if self._in_reasoning:
-            # Check for tool_start_token interruption
-            if self.tool_start_token and self.tool_start_token in current_text:
-                tool_idx = current_text.find(self.tool_start_token)
-                reasoning_text = current_text[:tool_idx]
-                # Preserve tool_start_token in normal text
-                normal_text = current_text[tool_idx:]
-                self._buffer = trailing_partial
-                self._in_reasoning = False
-                return StreamingParseResult(
-                    normal_text=normal_text, reasoning_text=reasoning_text
+                # No full start token. Flush everything except a trailing
+                # partial start-token (or partial end-token, which is unlikely
+                # outside reasoning but handled for symmetry).
+                head, partial = self._split_trailing_partial_token(
+                    self._buffer, (think_start_text, self.think_end_token)
                 )
-            if self.stream_reasoning:
-                # Stream the content immediately
-                self._buffer = trailing_partial
-                return StreamingParseResult(reasoning_text=current_text)
+                if head:
+                    normal_parts.append(head)
+                self._buffer = partial
+                break
+
+            # Inside a reasoning block.
+            if self._awaiting_start_strip:
+                # ``force_reasoning=True`` entry: the model may still emit a
+                # leading start token (e.g. Gemma-4 with enable_thinking=True
+                # emits ``<|channel>thought\\n``). Consume it if present or
+                # partially present; otherwise just clear the flag and
+                # proceed.
+                if self._buffer.startswith(think_start_text):
+                    self._buffer = self._buffer[len(think_start_text) :]
+                    self.stripped_think_start = True
+                    self._awaiting_start_strip = False
+                    continue
+                if think_start_text.startswith(self._buffer):
+                    # Buffer is a strict prefix of the start sequence; wait
+                    # for more data so we don't mis-classify it as reasoning.
+                    break
+                # Buffer does not start with (nor is a prefix of) the start
+                # sequence — treat as raw reasoning (DeepSeek-R1 style).
+                self._awaiting_start_strip = False
+
+            # Find the first boundary: end-token or tool-token (if any).
+            end_idx = self._buffer.find(self.think_end_token)
+            tool_idx = (
+                self._buffer.find(self.tool_start_token)
+                if self.tool_start_token
+                else -1
+            )
+            # Smallest non-negative index wins.
+            candidate = -1
+            candidate_kind = None
+            if end_idx >= 0:
+                candidate, candidate_kind = end_idx, "end"
+            if tool_idx >= 0 and (candidate < 0 or tool_idx < candidate):
+                candidate, candidate_kind = tool_idx, "tool"
+
+            if candidate >= 0:
+                if candidate > 0:
+                    piece = self._buffer[:candidate]
+                    # Match historical behavior: rstrip the reasoning chunk
+                    # that closes the block.
+                    if candidate_kind == "end":
+                        piece = piece.rstrip()
+                    if piece:
+                        reasoning_parts.append(piece)
+                if candidate_kind == "end":
+                    self._buffer = self._buffer[candidate + len(self.think_end_token) :]
+                    self._in_reasoning = False
+                else:  # tool
+                    # Tool delimiter is preserved in normal text so downstream
+                    # function-call parsers can see it.
+                    normal_parts.append(self._buffer[candidate:])
+                    self._buffer = ""
+                    self._in_reasoning = False
+                continue
+
+            # No boundary in buffer. Flush reasoning content minus any
+            # trailing partial delimiter.
+            partial_tokens = [self.think_end_token]
+            if self.tool_start_token:
+                partial_tokens.append(self.tool_start_token)
+            head, partial = self._split_trailing_partial_token(
+                self._buffer, tuple(partial_tokens)
+            )
+            # Also retain trailing whitespace in the buffer: it either gets
+            # rstripped away when the end-token actually arrives, or it will
+            # be flushed alongside the next non-whitespace reasoning content.
+            # Without this, per-chunk arrivals of ``"...\n"`` followed by
+            # ``"</think>"`` would emit a stray newline that single-shot
+            # parsing correctly strips.
+            trailing_ws_len = len(head) - len(head.rstrip())
+            if trailing_ws_len:
+                partial = head[-trailing_ws_len:] + partial
+                head = head[:-trailing_ws_len]
+            if head:
+                reasoning_parts.append(head)
+            self._buffer = partial
+            break
+
+        reasoning_text = "".join(reasoning_parts)
+        normal_text = "".join(normal_parts)
+
+        if not self.stream_reasoning:
+            # Accumulate reasoning until a boundary closes the block.
+            self._pending_reasoning += reasoning_text
+            if not self._in_reasoning and self._pending_reasoning:
+                reasoning_text = self._pending_reasoning.rstrip()
+                self._pending_reasoning = ""
             else:
-                return StreamingParseResult()
+                reasoning_text = ""
 
-        # If we're not in a reasoning block return as normal text
-        if not self._in_reasoning:
-            self._buffer = trailing_partial
-            return StreamingParseResult(normal_text=current_text)
-
-        return StreamingParseResult()
+        return StreamingParseResult(
+            normal_text=normal_text, reasoning_text=reasoning_text
+        )
 
 
 class DeepSeekR1Detector(BaseReasoningFormatDetector):

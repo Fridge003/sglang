@@ -486,13 +486,11 @@ class TestGlm45Detector(CustomTestCase):
         self.assertEqual(result.reasoning_text, "")
         self.assertEqual(result.normal_text, "")
 
-        # Tool interruption should still work - flushes buffered reasoning.
-        # Note: when stream_reasoning=False, the <think> tag is stripped from the
-        # local `current_text` variable but NOT from `self._buffer` (which is never
-        # cleared in the non-streaming path). So the flushed reasoning content
-        # includes the raw <think> tag.
+        # Tool interruption flushes buffered reasoning. The ``<think>`` start
+        # token must be stripped — it is a control delimiter, not part of the
+        # reasoning payload.
         result = detector.parse_streaming_increment("<tool_call>tool call")
-        self.assertEqual(result.reasoning_text, "<think>thinking")
+        self.assertEqual(result.reasoning_text, "thinking")
         self.assertEqual(result.normal_text, "<tool_call>tool call")
 
     def test_streaming_empty_reasoning_with_tool(self):
@@ -748,6 +746,184 @@ class TestGemma4Detector(CustomTestCase):
         result = detector.detect_and_parse(text)
         self.assertEqual(result.reasoning_text, "This should be reasoning")
         self.assertEqual(result.normal_text, "The answer.")
+
+    # ------------------------------------------------------------------
+    # Regression tests for the three streaming bugs that caused Gemma-4
+    # ``<|channel>`` / ``<channel|>`` delimiters to leak into ``normal_text``
+    # (see PR #22902 and follow-up fix).
+    # ------------------------------------------------------------------
+
+    LEAK_MARKERS = ("<|channel>", "<channel|>", "<|channel", "channel|>")
+
+    def _feed_chunks(self, chunks, detector=None):
+        detector = detector or Gemma4Detector()
+        reasoning, normal = "", ""
+        for chunk in chunks:
+            result = detector.parse_streaming_increment(chunk)
+            reasoning += result.reasoning_text
+            normal += result.normal_text
+        return reasoning, normal, detector
+
+    def _assert_no_leak(self, reasoning, normal):
+        for marker in self.LEAK_MARKERS:
+            self.assertNotIn(marker, normal, f"{marker!r} leaked into normal_text")
+            self.assertNotIn(
+                marker, reasoning, f"{marker!r} leaked into reasoning_text"
+            )
+
+    def test_multiple_reasoning_blocks_no_leak(self):
+        """Multi-hop Gemma-4 responses emit several reasoning blocks in a row.
+
+        The parser must strip *every* block's delimiters, not just the first.
+        Regression test for the ``stripped_think_start`` one-shot latch.
+        """
+        raw = (
+            "<|channel>thought\nfirst hop reasoning\n<channel|>"
+            "first answer.\n"
+            "<|channel>thought\nsecond hop reasoning\n<channel|>"
+            "second answer."
+        )
+        reasoning, normal, _ = self._feed_chunks([raw])
+        self._assert_no_leak(reasoning, normal)
+        self.assertIn("first hop reasoning", reasoning)
+        self.assertIn("second hop reasoning", reasoning)
+        self.assertEqual(normal, "first answer.\nsecond answer.")
+
+    def test_multiple_reasoning_blocks_per_character_no_leak(self):
+        """Same multi-block scenario but streamed one character at a time.
+
+        Exercises the interaction between the one-shot-latch bug and
+        chunk-boundary partial-token buffering.
+        """
+        raw = (
+            "<|channel>thought\nhop one\n<channel|>A."
+            "<|channel>thought\nhop two\n<channel|>B."
+        )
+        reasoning, normal, detector = self._feed_chunks(list(raw))
+        self._assert_no_leak(reasoning, normal)
+        self.assertEqual(normal, "A.B.")
+        # ``_in_reasoning`` should land back in the outside-reasoning state.
+        self.assertFalse(detector._in_reasoning)
+
+    def test_start_token_split_across_chunks_no_leak(self):
+        """Start delimiter split across chunk boundaries must be buffered.
+
+        Previously the tail-prefix check only buffered when the *entire*
+        buffer was a prefix of a control token, so ``"hi<|chan"`` would be
+        flushed as normal text with ``"<|chan"`` leaked.
+        """
+        reasoning, normal, _ = self._feed_chunks(
+            ["hi<|chan", "nel>thought\n", "reasoned.<channel|>done."]
+        )
+        self._assert_no_leak(reasoning, normal)
+        self.assertEqual(normal, "hidone.")
+        self.assertEqual(reasoning, "reasoned.")
+
+    def test_end_token_split_across_chunks_no_leak(self):
+        """End delimiter split across chunks must not leak into reasoning."""
+        chunks = [
+            "<|channel>thought\n",
+            "reasoning body",
+            "<chan",
+            "nel|>",
+            "final answer",
+        ]
+        reasoning, normal, _ = self._feed_chunks(chunks)
+        self._assert_no_leak(reasoning, normal)
+        self.assertEqual(reasoning, "reasoning body")
+        self.assertEqual(normal, "final answer")
+
+    def test_normal_text_before_start_not_absorbed(self):
+        """Text preceding the start token must be routed to ``normal_text``.
+
+        The legacy implementation ``replace(think_start_text, "", 1)`` ran
+        over the whole buffer, so anything before the start delimiter was
+        swallowed into the reasoning block.
+        """
+        raw = "preamble text <|channel>thought\nreasoning<channel|>the answer"
+        reasoning, normal, _ = self._feed_chunks([raw])
+        self._assert_no_leak(reasoning, normal)
+        self.assertEqual(reasoning, "reasoning")
+        self.assertEqual(normal, "preamble text the answer")
+
+    def test_normal_text_before_start_streamed_no_leak(self):
+        """Per-character variant of the normal-text-before-start test."""
+        raw = "hello <|channel>thought\nwork<channel|>world"
+        reasoning, normal, _ = self._feed_chunks(list(raw))
+        self._assert_no_leak(reasoning, normal)
+        self.assertEqual(reasoning, "work")
+        self.assertEqual(normal, "hello world")
+
+    def test_partial_end_token_tail_buffered(self):
+        """Ending a chunk with a strict prefix of the end token must not leak.
+
+        The buffer should retain ``"<chan"`` and emit nothing until the
+        remainder of ``<channel|>`` arrives.
+        """
+        detector = Gemma4Detector()
+        detector.parse_streaming_increment("<|channel>thought\n")
+        detector.parse_streaming_increment("body ")
+
+        result = detector.parse_streaming_increment("<chan")
+        self.assertEqual(result.reasoning_text, "")
+        self.assertEqual(result.normal_text, "")
+        self.assertTrue(detector._in_reasoning)
+
+        result = detector.parse_streaming_increment("nel|>done")
+        self.assertFalse(detector._in_reasoning)
+        self.assertEqual(result.reasoning_text, "")
+        self.assertEqual(result.normal_text, "done")
+
+    def test_partial_start_token_tail_buffered(self):
+        """Strict prefix of the start token at chunk tail must be buffered."""
+        detector = Gemma4Detector()
+        result = detector.parse_streaming_increment("hello <|chan")
+        self.assertEqual(result.normal_text, "hello ")
+        self.assertFalse(detector._in_reasoning)
+        result = detector.parse_streaming_increment("nel>thought\nreasoning")
+        self.assertTrue(detector._in_reasoning)
+        self.assertEqual(result.reasoning_text, "reasoning")
+        self.assertEqual(result.normal_text, "")
+
+    def test_force_reasoning_with_self_generated_start_stripped(self):
+        """``force_reasoning=True`` + model self-emits ``<|channel>thought\\n``.
+
+        This is the Gemma-4 continuation-after-tool-response scenario: the
+        chat template primes a reasoning turn, then the model re-emits its
+        own start delimiter, which must be stripped idempotently.
+        """
+        detector = Gemma4Detector(force_reasoning=True)
+        result = detector.parse_streaming_increment("<|channel>thought\nreasoning")
+        self.assertEqual(result.reasoning_text, "reasoning")
+        self.assertEqual(result.normal_text, "")
+        result = detector.parse_streaming_increment("<channel|>answer")
+        self.assertEqual(result.normal_text, "answer")
+        self.assertFalse(detector._in_reasoning)
+
+    def test_force_reasoning_without_self_generated_start(self):
+        """``force_reasoning=True`` + no self-emitted start token (DeepSeek-R1
+        style) must still stream reasoning directly.
+        """
+        detector = Gemma4Detector(force_reasoning=True)
+        result = detector.parse_streaming_increment("raw reasoning")
+        self.assertEqual(result.reasoning_text, "raw reasoning")
+        result = detector.parse_streaming_increment(" more<channel|>answer")
+        self.assertEqual(result.reasoning_text, " more")
+        self.assertEqual(result.normal_text, "answer")
+
+    def test_force_reasoning_partial_self_generated_start(self):
+        """``force_reasoning=True`` with the start token split across chunks.
+
+        The first chunk is ``"<|cha"`` (strict prefix of the start sequence)
+        so the parser must buffer it rather than emit as reasoning.
+        """
+        detector = Gemma4Detector(force_reasoning=True)
+        result = detector.parse_streaming_increment("<|cha")
+        self.assertEqual(result.reasoning_text, "")
+        self.assertEqual(result.normal_text, "")
+        result = detector.parse_streaming_increment("nnel>thought\nbody<channel|>x")
+        self.assertEqual(result.reasoning_text, "body")
+        self.assertEqual(result.normal_text, "x")
 
 
 class TestReasoningParser(CustomTestCase):
