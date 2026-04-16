@@ -15,7 +15,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentType,
-    HiCachePhase,
+    CacheTransferPhase,
     TreeComponent,
 )
 
@@ -184,17 +184,17 @@ class FullComponent(TreeComponent):
     # ---- HiCache Hooks ----
 
     def build_hicache_transfers(
-        self, node: UnifiedTreeNode, phase: HiCachePhase, **kw
+        self, node: UnifiedTreeNode, phase: CacheTransferPhase, **kw
     ) -> Optional[list[PoolTransfer]]:
         ct = self.component_type
 
-        if phase == HiCachePhase.BACKUP:
+        if phase == CacheTransferPhase.BACKUP_HOST:
             # Full KV backup is handled by the main flow
             # (write_backup → cache_controller.write on host_value directly).
             # No extra PoolTransfer needed.
             return None
 
-        if phase == HiCachePhase.RESTORE:
+        if phase == CacheTransferPhase.LOAD_BACK:
             # Walk evicted chain, collect host_values and nodes
             backed_up: list[torch.Tensor] = []
             nodes: list = []
@@ -225,16 +225,16 @@ class FullComponent(TreeComponent):
     def commit_hicache_transfer(
         self,
         node: UnifiedTreeNode,
-        phase: HiCachePhase,
+        phase: CacheTransferPhase,
         transfers: list[PoolTransfer] = (),
     ) -> None:
         ct = self.component_type
 
-        if phase == HiCachePhase.BACKUP:
+        if phase == CacheTransferPhase.BACKUP_HOST:
             if transfers and transfers[0].host_indices is not None:
                 node.component_data[ct].host_value = transfers[0].host_indices.clone()
 
-        elif phase == HiCachePhase.RESTORE:
+        elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers or transfers[0].device_indices is None:
                 self.cache._update_evictable_leaf_sets(node)
                 return

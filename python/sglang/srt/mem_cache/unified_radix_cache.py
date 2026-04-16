@@ -37,7 +37,7 @@ from sglang.srt.mem_cache.unified_cache_components import (
     ComponentData,
     ComponentType,
     FullComponent,
-    HiCachePhase,
+    CacheTransferPhase,
     MambaComponent,
     SWAComponent,
     TreeComponent,
@@ -1084,7 +1084,7 @@ class UnifiedRadixCache(BasePrefixCache):
         for comp in self._components_tuple:
             if comp.component_type == BASE_COMPONENT_TYPE:
                 continue
-            t = comp.build_hicache_transfers(node, HiCachePhase.BACKUP)
+            t = comp.build_hicache_transfers(node, CacheTransferPhase.BACKUP_HOST)
             if t:
                 comp_xfers[comp.component_type] = t
 
@@ -1106,13 +1106,13 @@ class UnifiedRadixCache(BasePrefixCache):
         kv_xfer = PoolTransfer(name=PoolName.KV, host_indices=host_indices)
         self.components[BASE_COMPONENT_TYPE].commit_hicache_transfer(
             node,
-            HiCachePhase.BACKUP,
+            CacheTransferPhase.BACKUP_HOST,
             transfers=[kv_xfer],
         )
         for ct, xfers in comp_xfers.items():
             self.components[ct].commit_hicache_transfer(
                 node,
-                HiCachePhase.BACKUP,
+                CacheTransferPhase.BACKUP_HOST,
                 transfers=xfers,
             )
 
@@ -1134,7 +1134,7 @@ class UnifiedRadixCache(BasePrefixCache):
         # Build KV transfer
         last_hit_node = node
         kv_xfer = self.components[BASE_COMPONENT_TYPE].build_hicache_transfers(
-            last_hit_node, HiCachePhase.RESTORE
+            last_hit_node, CacheTransferPhase.LOAD_BACK
         )[0]
 
         # Lock path & pre-evict if device pool is insufficient
@@ -1160,7 +1160,7 @@ class UnifiedRadixCache(BasePrefixCache):
             if comp.component_type == BASE_COMPONENT_TYPE:
                 continue
             t = comp.build_hicache_transfers(
-                last_hit_node, HiCachePhase.RESTORE, req=req
+                last_hit_node, CacheTransferPhase.LOAD_BACK, req=req
             )
             if t:
                 comp_xfers[comp.component_type] = t
@@ -1187,13 +1187,13 @@ class UnifiedRadixCache(BasePrefixCache):
         kv_xfer.device_indices = device_indices
         self.components[BASE_COMPONENT_TYPE].commit_hicache_transfer(
             last_hit_node,
-            HiCachePhase.RESTORE,
+            CacheTransferPhase.LOAD_BACK,
             [kv_xfer],
         )
         for ct, xfers in comp_xfers.items():
             self.components[ct].commit_hicache_transfer(
                 last_hit_node,
-                HiCachePhase.RESTORE,
+                CacheTransferPhase.LOAD_BACK,
                 xfers,
             )
 

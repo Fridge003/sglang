@@ -16,7 +16,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     ComponentType,
-    HiCachePhase,
+    CacheTransferPhase,
     TreeComponent,
     get_and_increase_time_counter,
 )
@@ -314,11 +314,11 @@ class MambaComponent(TreeComponent):
     # ---- HiCache Hooks ----
 
     def build_hicache_transfers(
-        self, node: UnifiedTreeNode, phase: HiCachePhase, **kw
+        self, node: UnifiedTreeNode, phase: CacheTransferPhase, **kw
     ) -> Optional[list[PoolTransfer]]:
         ct = self.component_type
 
-        if phase == HiCachePhase.BACKUP:
+        if phase == CacheTransferPhase.BACKUP_HOST:
             cd = node.component_data[ct]
             if cd.value is None:
                 return None
@@ -329,7 +329,7 @@ class MambaComponent(TreeComponent):
                 )
             ]
 
-        if phase == HiCachePhase.RESTORE:
+        if phase == CacheTransferPhase.LOAD_BACK:
             req = kw.get("req")
             transfers: list[PoolTransfer] = []
 
@@ -372,18 +372,18 @@ class MambaComponent(TreeComponent):
     def commit_hicache_transfer(
         self,
         node: UnifiedTreeNode,
-        phase: HiCachePhase,
+        phase: CacheTransferPhase,
         transfers: list[PoolTransfer] = (),
     ) -> None:
         ct = self.component_type
 
-        if phase == HiCachePhase.BACKUP:
+        if phase == CacheTransferPhase.BACKUP_HOST:
             if transfers and transfers[0].host_indices is not None:
                 cd = node.component_data[ct]
                 if cd.host_value is None:
                     cd.host_value = transfers[0].host_indices.clone()
 
-        elif phase == HiCachePhase.RESTORE:
+        elif phase == CacheTransferPhase.LOAD_BACK:
             if not transfers:
                 return
             transfer = transfers[0]

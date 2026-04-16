@@ -68,12 +68,12 @@ class ComponentData:
     host_lock_ref: int = 0
 
 
-class HiCachePhase(str, Enum):
+class CacheTransferPhase(str, Enum):
     """Direction of a HiCache data transfer."""
 
-    BACKUP = "backup"  # D→H
-    RESTORE = "restore"  # H→D
-    ARCHIVE = "archive"  # H→Storage
+    BACKUP_HOST = "backup_host"  # D→H
+    LOAD_BACK = "load_back"  # H→D
+    BACKUP_STORAGE = "backup_storage"  # H→Storage
     PREFETCH = "prefetch"  # Storage→H
 
 
@@ -307,7 +307,7 @@ class TreeComponent(ABC):
     # ---- HiCache Hooks (defaults = no-op) ----
 
     def build_hicache_transfers(
-        self, node: UnifiedTreeNode, phase: HiCachePhase, **kw
+        self, node: UnifiedTreeNode, phase: CacheTransferPhase, **kw
     ) -> Optional[list[PoolTransfer]]:
         """Build transfer descriptors for this component in the given phase.
         Returns None if the component has nothing to transfer."""
@@ -316,7 +316,7 @@ class TreeComponent(ABC):
     def commit_hicache_transfer(
         self,
         node: UnifiedTreeNode,
-        phase: HiCachePhase,
+        phase: CacheTransferPhase,
         transfers: list[PoolTransfer] = (),
     ) -> None:
         """Post-transfer bookkeeping: store host indices, update LRU, etc."""
