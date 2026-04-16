@@ -176,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
     runs-on: ${{matrix.runner}}
     steps:
       - name: Checkout code
@@ -225,7 +225,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-2gpu-sglang.test]
+        runner: [linux-mi300-2gpu-sglang]
     runs-on: ${{matrix.runner}}
     steps:
       - name: Checkout code
@@ -270,7 +270,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
     runs-on: ${{matrix.runner}}
     steps:
       - name: Checkout code
@@ -311,7 +311,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
     runs-on: ${{matrix.runner}}
     steps:
       - name: Checkout code
@@ -353,7 +353,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
         part: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     runs-on: ${{matrix.runner}}
     steps:
@@ -395,7 +395,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
     runs-on: ${{matrix.runner}}
     steps:
       - name: Checkout code
@@ -474,7 +474,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
         part: [0, 1]
     runs-on: ${{matrix.runner}}
     steps:
@@ -516,7 +516,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-2gpu-sglang.test]
+        runner: [linux-mi300-2gpu-sglang]
         part: [0, 1]
     runs-on: ${{matrix.runner}}
     steps:
@@ -559,7 +559,7 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Run one at a time to avoid eviction from resource exhaustion during AITER kernel JIT
       matrix:
-        runner: [linux-mi300-1gpu-sglang.test]
+        runner: [linux-mi300-1gpu-sglang]
         part: [0, 1, 2, 3]
     runs-on: ${{matrix.runner}}
     steps:
@@ -693,7 +693,7 @@ jobs:
       fail-fast: false
       max-parallel: 1  # Run one at a time to avoid eviction from resource exhaustion during AITER kernel JIT
       matrix:
-        runner: [linux-mi300-2gpu-sglang.test]
+        runner: [linux-mi300-2gpu-sglang]
         part: [0, 1]  # 2 partitions: 9 tests ÷ 2 = ~4-5 tests each
     runs-on: ${{matrix.runner}}
     steps:
@@ -825,7 +825,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-4gpu-sglang.test]
+        runner: [linux-mi300-4gpu-sglang]
         part: [0]
     runs-on: ${{matrix.runner}}
     steps:
@@ -882,11 +882,11 @@ jobs:
         )
       )
     env:
-      RUNNER_LABELS: linux-mi300-8gpu-sglang.test
+      RUNNER_LABELS: linux-mi300-8gpu-sglang
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-mi300-8gpu-sglang.test]
+        runner: [linux-mi300-8gpu-sglang]
         part: [0, 1, 2]
     runs-on: ${{matrix.runner}}
     steps:
