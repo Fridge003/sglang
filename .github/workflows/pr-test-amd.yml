@@ -86,10 +86,11 @@ env:
   AITER_COMMIT_OVERRIDE: ${{ inputs.aiter_ref }}
 
 concurrency:
-  # Scheduled and run_all_tests runs get unique groups (never cancel each other).
-  # PR runs share a group per branch so new pushes cancel stale runs.
-  group: pr-test-amd-${{ (inputs.run_all_tests || github.event_name == 'schedule') && format('full-{0}', github.run_id) || inputs.pr_head_sha || inputs.ref || github.ref }}
-  cancel-in-progress: ${{ !inputs.run_all_tests && github.event_name != 'workflow_call' && github.event_name != 'schedule' }}
+  # Full runs get unique groups (never cancel each other).
+  # This includes schedule, workflow_call with run_all_tests=true, and workflow_dispatch without a target stage.
+  # PR and targeted manual runs share a group per ref so new runs cancel stale ones.
+  group: pr-test-amd-${{ (inputs.run_all_tests || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !(inputs.target_stage || inputs.target_stage_select))) && format('full-{0}', github.run_id) || inputs.pr_head_sha || inputs.ref || github.ref }}
+  cancel-in-progress: ${{ !(inputs.run_all_tests || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && !(inputs.target_stage || inputs.target_stage_select))) && github.event_name != 'workflow_call' }}
 
 jobs:
   call-gate:
@@ -101,6 +102,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     outputs:
+      run_all_tests: ${{ steps.run-mode.outputs.run_all_tests }}
       main_package: ${{ steps.filter.outputs.main_package || steps.run-mode.outputs.run_all_tests }}
       sgl_kernel: ${{ steps.filter.outputs.sgl_kernel || steps.run-mode.outputs.run_all_tests }}
       jit_kernel: ${{ steps.filter.outputs.jit_kernel || steps.run-mode.outputs.run_all_tests }}
@@ -115,12 +117,15 @@ jobs:
       - name: Determine run mode
         id: run-mode
         run: |
-          if [[ "${{ inputs.run_all_tests }}" == "true" || "${{ github.event_name }}" == "schedule" ]]; then
+          event_name="${{ github.event_name }}"
+          selected_stage="${{ inputs.target_stage || inputs.target_stage_select }}"
+
+          if [[ "${{ inputs.run_all_tests }}" == "true" || "$event_name" == "schedule" || ("$event_name" == "workflow_dispatch" && -z "$selected_stage") ]]; then
             echo "run_all_tests=true" >> $GITHUB_OUTPUT
-            echo "Run mode: ALL TESTS (run_all_tests=${{ inputs.run_all_tests }}, event=${{ github.event_name }})"
+            echo "Run mode: ALL TESTS (run_all_tests=${{ inputs.run_all_tests }}, event=$event_name, selected_stage=${selected_stage:-<all>})"
           else
             echo "run_all_tests=false" >> $GITHUB_OUTPUT
-            echo "Run mode: FILTERED (triggered by ${{ github.event_name }})"
+            echo "Run mode: FILTERED/TARGETED (event=$event_name, selected_stage=${selected_stage:-<auto-detect>})"
           fi
 
       - name: Set continue-on-error for schedule/full runs
@@ -346,7 +351,7 @@ jobs:
   # =============================================== Wait Jobs for Sequential PR Execution ====================================================
   # These jobs poll GitHub API to wait for previous stages to complete.
   # For PR runs: wait jobs run and enforce sequential execution via polling.
-  # For scheduled runs: wait jobs are skipped, enabling parallel execution of all stages.
+  # For full runs, wait jobs are skipped, enabling parallel execution of all stages.
 
   wait-for-stage-a-amd:
     needs: [check-changes, call-gate]
@@ -377,7 +382,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-b-test-1-gpu-small-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -419,7 +424,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-b-test-1-gpu-small-amd-nondeterministic,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -499,7 +504,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-b-test-1-gpu-large-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -541,7 +546,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-b-test-2-gpu-large-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -870,7 +875,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-c-test-4-gpu-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
@@ -928,7 +933,7 @@ jobs:
         (contains(format(',{0},', inputs.target_stage || inputs.target_stage_select), ',stage-c-test-large-8-gpu-amd,')) ||
         (
           !(inputs.target_stage || inputs.target_stage_select) &&
-          ((github.event_name == 'schedule') || (!failure() && !cancelled())) &&
+          ((needs.check-changes.outputs.run_all_tests == 'true') || (!failure() && !cancelled())) &&
           ((needs.check-changes.outputs.main_package == 'true') || (needs.check-changes.outputs.sgl_kernel == 'true'))
         )
       )
