@@ -23,13 +23,109 @@ set -euxo pipefail
 # Configuration & timing
 # ------------------------------------------------------------------------------
 # Set up environment variables
+#
+# CU_VERSION controls:
+#   - PyTorch index URL (pytorch.org/whl/${CU_VERSION})
+#   - FlashInfer JIT cache index (flashinfer.ai/whl/${CU_VERSION})
+#   - nvrtc variant selection (cu12 vs cu13)
+#
+# Legacy path: hardcoded to cu129 (matches the current 12.9 toolkit images).
+# Venv path (SGLANG_CI_USE_VENV=1): auto-detected from the container's nvcc.
 CU_VERSION="cu129"
+NVCC_VER=""
 
 # Nvidia package versions we override (torch pins older versions).
 # Used both as pip constraints during install and for post-install verification.
 NVIDIA_CUDNN_VERSION="9.16.0.29"
 NVIDIA_NVSHMEM_VERSION="3.4.5"
 OPTIONAL_DEPS="${1:-}"
+
+# ------------------------------------------------------------------------------
+# Optional venv isolation
+# ------------------------------------------------------------------------------
+# SGLANG_CI_USE_VENV=1 creates a fresh uv venv per job and installs everything
+# into it instead of system Python. Motivation: stale CUDA .so files accumulate
+# in the runner's writable layer across toolkit bumps (e.g. cu129→cu130→cu129
+# revert) and shadow the freshly-installed ones at dlopen time. A fresh venv
+# per job gives deterministic dependencies regardless of runner history.
+if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
+    # Auto-detect CU_VERSION from the container's CUDA toolkit.
+    # nvcc is authoritative: nvidia-smi reflects the host driver, which on some
+    # runners disagrees with the actual container toolkit version.
+    if command -v nvcc >/dev/null 2>&1; then
+        NVCC_VER=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
+    elif [ -f /usr/local/cuda/version.json ]; then
+        NVCC_VER=$(python3 -c "import json; print(json.load(open('/usr/local/cuda/version.json'))['cuda']['version'][:4])")
+    else
+        echo "FATAL: SGLANG_CI_USE_VENV=1 but cannot detect CUDA toolkit version in container (nvcc missing, version.json missing)"
+        exit 1
+    fi
+    CU_VERSION="cu$(echo "$NVCC_VER" | tr -d '.')"
+
+    # Host driver must be >= container toolkit. Skip silently? No — log the
+    # skip path so "check passed" vs "check skipped" is greppable in CI logs.
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        DRIVER_CUDA=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)
+        if [ -n "$DRIVER_CUDA" ]; then
+            if [ "$NVCC_VER" = "$DRIVER_CUDA" ] || \
+               [ "$(printf '%s\n' "$NVCC_VER" "$DRIVER_CUDA" | sort -V | tail -1)" = "$DRIVER_CUDA" ]; then
+                echo "Host driver CUDA ${DRIVER_CUDA} >= container toolkit ${NVCC_VER} OK"
+            else
+                echo "FATAL: Host driver supports CUDA ${DRIVER_CUDA} but container has toolkit ${NVCC_VER}"
+                echo "Host driver must be >= container toolkit version"
+                exit 1
+            fi
+        else
+            echo "WARNING: nvidia-smi present but could not parse 'CUDA Version:' line; skipping host driver >= toolkit check"
+        fi
+    else
+        echo "WARNING: nvidia-smi not found; skipping host driver >= toolkit check (expected on CPU-only runners only)"
+    fi
+
+    # Allowlist guard: this is the set of CUDA toolkit versions this CI has
+    # been validated against. Gates both the PyTorch index URL and FlashInfer
+    # wheel availability. Update when adding a new toolkit.
+    VALID_CU_VERSIONS="cu126 cu128 cu129 cu130"
+    if ! echo "$VALID_CU_VERSIONS" | grep -qw "$CU_VERSION"; then
+        echo "FATAL: Auto-detected CU_VERSION=${CU_VERSION} is not in the supported set: ${VALID_CU_VERSIONS}"
+        echo "This likely means the container has an unexpected CUDA toolkit version."
+        echo "Either update the supported set or check the container image."
+        exit 1
+    fi
+    echo "CU_VERSION=${CU_VERSION} (auto-detected from nvcc=${NVCC_VER})"
+
+    # uv must be available on system Python to create the venv. Install if missing.
+    python3 -m pip install --upgrade pip
+    if ! command -v uv >/dev/null 2>&1; then
+        pip install uv
+    fi
+
+    # Per-job unique path. Include $$ (shell PID) so concurrent/back-to-back jobs
+    # on the same runner never target the same directory even if GITHUB_JOB
+    # doesn't differentiate matrix partitions.
+    UV_VENV="/tmp/sglang-ci-${GITHUB_RUN_ID:-norun}-${GITHUB_JOB:-nojob}-$$"
+    SYS_PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    # --seed installs pip/setuptools into the venv so bare `pip` calls in
+    # cache_nvidia_wheels.sh and the human-eval setup resolve to the venv's
+    # pip (rather than silently falling back to system Python).
+    uv venv "$UV_VENV" --python "python${SYS_PYTHON_VER}" --seed
+    # shellcheck disable=SC1091
+    source "$UV_VENV/bin/activate"
+    # Assert activation actually took effect. A misconfigured activate script
+    # would otherwise leave us silently running against system Python.
+    [ "${VIRTUAL_ENV:-}" = "$UV_VENV" ] || { echo "FATAL: venv activation did not set VIRTUAL_ENV correctly"; exit 1; }
+    [ "$(command -v python3)" = "$UV_VENV/bin/python3" ] || { echo "FATAL: python3 still resolves outside venv (got $(command -v python3))"; exit 1; }
+
+    # Propagate to subsequent workflow steps. GITHUB_ENV/GITHUB_PATH only
+    # affect *later* steps, never the current one.
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "VIRTUAL_ENV=$UV_VENV" >> "$GITHUB_ENV"
+        echo "SGLANG_CI_VENV_PATH=$UV_VENV" >> "$GITHUB_ENV"
+    fi
+    if [ -n "${GITHUB_PATH:-}" ]; then
+        echo "$UV_VENV/bin" >> "$GITHUB_PATH"
+    fi
+fi
 
 SECONDS=0
 _CI_MARK_PREV=${SECONDS}
@@ -154,10 +250,19 @@ mark_step_done "Python package site hygiene & install protoc"
 # ------------------------------------------------------------------------------
 # Pip / uv toolchain & stale package cleanup
 # ------------------------------------------------------------------------------
-# Install pip and uv (use python3 -m pip for robustness since some runners only have pip3)
+# Install pip and uv (use python3 -m pip for robustness since some runners only have pip3).
+# In venv mode this upgrades the venv's pip (the bootstrap block near the top
+# already upgraded system pip before `uv venv`).
 python3 -m pip install --upgrade pip
 
-if [ "$USE_UV" = "0" ]; then
+if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
+    # uv is already installed on system Python (above) and the venv is active.
+    # Do NOT set UV_SYSTEM_PYTHON — that would redirect uv back to system Python.
+    PIP_CMD="uv pip"
+    PIP_INSTALL_SUFFIX="--index-strategy unsafe-best-match --prerelease allow"
+    PIP_UNINSTALL_CMD="uv pip uninstall"
+    PIP_UNINSTALL_SUFFIX=""
+elif [ "$USE_UV" = "0" ]; then
     PIP_CMD="pip"
     PIP_INSTALL_SUFFIX="--break-system-packages"
     PIP_UNINSTALL_CMD="pip uninstall -y"
@@ -229,7 +334,7 @@ if [ -n "$OPTIONAL_DEPS" ]; then
     EXTRAS="dev,runai,tracing,${OPTIONAL_DEPS}"
 fi
 echo "Installing python extras: [${EXTRAS}]"
-source "$(dirname "$0")/cache_nvidia_wheels.sh"
+source "${SCRIPT_DIR}/cache_nvidia_wheels.sh"
 $PIP_CMD install -e "python[${EXTRAS}]" --extra-index-url https://download.pytorch.org/whl/${CU_VERSION} $PIP_INSTALL_SUFFIX
 
 mark_step_done "Install main package"
@@ -302,8 +407,18 @@ mark_step_done "Download flashinfer artifacts"
 # ------------------------------------------------------------------------------
 # Install extra dependency
 # ------------------------------------------------------------------------------
-# Install other python dependencies
-if [ "$CU_VERSION" = "cu130" ]; then
+# Install other python dependencies.
+# Match on CUDA major version so future minor bumps (cu131, etc.) don't fall
+# through to the wrong branch. Prefer NVCC_VER (set in the venv path); otherwise
+# parse the first two digits of CU_VERSION (pytorch convention is cu{major}{minor}
+# with a single-digit minor, e.g. cu126, cu129, cu130).
+if [ -n "$NVCC_VER" ]; then
+    CU_MAJOR="${NVCC_VER%%.*}"
+else
+    CU_STRIP="${CU_VERSION#cu}"
+    CU_MAJOR="${CU_STRIP:0:2}"
+fi
+if [ "$CU_MAJOR" = "13" ]; then
     NVRTC_SPEC="nvidia-cuda-nvrtc"
 else
     NVRTC_SPEC="nvidia-cuda-nvrtc-cu12"
@@ -360,18 +475,29 @@ mark_step_done "Fix other dependencies"
 # Force reinstall nvidia-cutlass-dsl to ensure the .pth file exists.
 # The Docker image ships nvidia-cutlass-dsl-libs-base 4.3.5; upgrading to 4.4.2
 # can delete the .pth file without reliably recreating it (pip race condition).
-$PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --no-deps --force-reinstall $PIP_INSTALL_SUFFIX || true
+# The `|| true` suppression is for the legacy path where the image pre-installs
+# the package. In venv mode we start from an empty tree, so there's no race —
+# fail fast instead of hiding a real install error.
+if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
+    $PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --no-deps --force-reinstall $PIP_INSTALL_SUFFIX
+else
+    $PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --no-deps --force-reinstall $PIP_INSTALL_SUFFIX || true
+fi
 
 # Download kernels from kernels community
 kernels download python || true
 kernels lock python || true
 mv python/kernels.lock ${HOME}/.cache/sglang || true
 
-# Install human-eval
-pip install "setuptools==70.0.0"
-git clone https://github.com/merrymercy/human-eval.git
-cd human-eval
-pip install -e . --no-build-isolation
+# Install human-eval. This script is sourced from ci_install_deepep.sh, so a
+# bare `cd human-eval` would leave the caller stuck in that directory for the
+# rest of its execution. The subshell keeps the cd local to the pip install.
+$PIP_CMD install "setuptools==70.0.0" $PIP_INSTALL_SUFFIX
+[ -d human-eval ] || git clone https://github.com/merrymercy/human-eval.git
+(
+    cd human-eval
+    $PIP_CMD install -e . --no-build-isolation $PIP_INSTALL_SUFFIX
+)
 
 # ------------------------------------------------------------------------------
 # Prepare runner
@@ -382,11 +508,92 @@ bash "${SCRIPT_DIR}/prepare_runner.sh"
 mark_step_done "Prepare runner"
 
 # ------------------------------------------------------------------------------
+# Venv LD_LIBRARY_PATH discovery (venv mode only)
+# ------------------------------------------------------------------------------
+# NVIDIA pip packages (cublas, cudnn, nccl, nvrtc, ...) and torch ship .so files
+# under site-packages. In venv mode these are NOT on the default LD_LIBRARY_PATH,
+# so dlopen('libcublas.so.12') from torch would fail. Prepend them here.
+# $UV_VENV and $SYS_PYTHON_VER were set in the venv-bootstrap block near the top.
+if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
+    SITE_PACKAGES="$UV_VENV/lib/python${SYS_PYTHON_VER}/site-packages"
+    # Glob matches NVIDIA pip-package layout:
+    # site-packages/nvidia/<component>/lib/lib*.so. If NVIDIA restructures
+    # packaging, this may need updating.
+    NVIDIA_LIBS=$(find "$SITE_PACKAGES" -path "*/nvidia/*/lib" -type d 2>/dev/null | tr '\n' ':')
+    TORCH_LIB="$SITE_PACKAGES/torch/lib"
+    VENV_LD="${NVIDIA_LIBS}${TORCH_LIB}"
+    export LD_LIBRARY_PATH="${VENV_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [ -n "${GITHUB_ENV:-}" ]; then
+        echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
+    fi
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+fi
+
+# ------------------------------------------------------------------------------
 # Verify imports
 # ------------------------------------------------------------------------------
 # Show current packages
 $PIP_CMD list
 python3 -c "import torch; print(torch.version.cuda)"
 python3 -c "import cutlass; import cutlass.cute;"
+
+# Extra venv smoke test: validate the venv is actually in use and CUDA libs
+# resolve. This catches the class of bugs the migration is meant to prevent
+# (stale .so shadowing, missing LD_LIBRARY_PATH entries).
+#
+# ldd is warn-only, not fatal: it can report spurious "not found" for libs
+# that are in fact resolved at runtime via torch's dlopen-with-rpath, so we
+# don't want to block the job here. The `::warning::` annotation surfaces
+# the signal in the PR checks UI rather than burying it in logs.
+if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
+    echo "=== Venv smoke test ==="
+    echo "python3 path: $(command -v python3)"
+    echo "VIRTUAL_ENV: ${VIRTUAL_ENV:-unset}"
+    python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'torch CUDA: {torch.version.cuda}')"
+    python3 -c "import sglang; print('sglang import OK')"
+
+    # Verify that key NVIDIA CUDA libs actually resolve to files under the
+    # venv, not to a stale system-level shadow copy. ldd shows DT_NEEDED
+    # resolution, but the loader can still pick a different copy at dlopen
+    # time — so we also inspect /proc/self/maps after importing torch to
+    # confirm what's really loaded.
+    python3 - <<PYEOF
+import os, sys, ctypes
+venv = os.environ.get("VIRTUAL_ENV", "")
+assert venv, "VIRTUAL_ENV not set"
+import torch  # triggers dlopen of cublas/cudnn/cudart etc.
+with open(f"/proc/{os.getpid()}/maps") as f:
+    maps = f.read()
+mismatches = []
+for soname in ("libcublas.so", "libcudart.so", "libcudnn.so"):
+    lines = [ln for ln in maps.splitlines() if soname in ln]
+    if not lines:
+        continue  # lib not loaded — acceptable, some configs don't touch cudnn at import
+    paths = {ln.split()[-1] for ln in lines if ln.split()[-1].startswith("/")}
+    outside = [p for p in paths if not p.startswith(venv)]
+    if outside:
+        mismatches.append(f"{soname}: loaded from {outside} (expected under {venv})")
+if mismatches:
+    print("::warning::NVIDIA libs resolved outside the venv — possible stale .so shadowing:")
+    for m in mismatches:
+        print(f"  {m}")
+else:
+    print("All loaded NVIDIA libs resolve under the venv")
+PYEOF
+
+    TORCH_CUDA_SO=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'))")
+    if [ -f "$TORCH_CUDA_SO" ]; then
+        if ldd "$TORCH_CUDA_SO" 2>/dev/null | grep -q "not found"; then
+            echo "::warning::libtorch_cuda.so has unresolved deps — tests may fail opaquely"
+            ldd "$TORCH_CUDA_SO" | grep "not found" || true
+            echo "=== Smoke test complete (with ldd warnings) ==="
+        else
+            echo "libtorch_cuda.so dependencies OK"
+            echo "=== Smoke test passed ==="
+        fi
+    else
+        echo "=== Smoke test passed ==="
+    fi
+fi
 
 mark_step_done "Verify imports"

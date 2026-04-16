@@ -605,6 +605,10 @@ jobs:
       - uses: ./.github/actions/upload-cuda-coredumps
         if: failure()
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   stage-a-test-cpu:
     needs: [check-changes, call-gate]
     if: |
@@ -716,6 +720,10 @@ jobs:
         with:
           artifact-suffix: ${{ matrix.partition }}
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   # Runs on H100 (80GB, SM90) - tests that don't pass on 5090 (FA3, FP8, high VRAM, etc.)
   stage-b-test-1-gpu-large:
     needs: [check-changes, call-gate, wait-for-stage-a, sgl-kernel-build-wheels]
@@ -772,6 +780,10 @@ jobs:
         with:
           artifact-suffix: ${{ matrix.partition }}
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   stage-b-test-2-gpu-large:
     needs: [check-changes, call-gate, wait-for-stage-a, sgl-kernel-build-wheels]
     if: |
@@ -826,6 +838,10 @@ jobs:
         if: failure()
         with:
           artifact-suffix: ${{ matrix.partition }}
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
 
   stage-b-test-4-gpu-b200:
     needs: [check-changes, call-gate, wait-for-stage-a, sgl-kernel-build-wheels]
@@ -882,6 +898,10 @@ jobs:
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: failure()
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
 
   call-multimodal-gen-tests:
     needs: [check-changes, call-gate, sgl-kernel-build-wheels]
@@ -970,6 +990,10 @@ jobs:
         with:
           artifact-suffix: ${{ matrix.part }}
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   stage-c-test-8-gpu-h200:
     needs: [check-changes, call-gate, wait-for-stage-b]
     if: |
@@ -1038,6 +1062,10 @@ jobs:
         with:
           artifact-suffix: ${{ matrix.part }}
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   stage-c-test-8-gpu-h20:
     needs: [check-changes, call-gate, wait-for-stage-b]
     if: |
@@ -1093,6 +1121,10 @@ jobs:
         if: failure()
         with:
           artifact-suffix: ${{ matrix.part }}
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
 
   stage-c-test-deepep-4-gpu-h100:
     needs: [check-changes, call-gate, wait-for-stage-b]
@@ -1153,6 +1185,10 @@ jobs:
 
       - uses: ./.github/actions/upload-cuda-coredumps
         if: failure()
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
 
   stage-c-test-deepep-8-gpu-h200:
     needs: [check-changes, call-gate, wait-for-stage-b]
@@ -1215,6 +1251,10 @@ jobs:
       - uses: ./.github/actions/upload-cuda-coredumps
         if: failure()
 
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
+
   stage-c-test-4-gpu-b200:
     needs: [check-changes, call-gate, wait-for-stage-b]
     if: |
@@ -1269,6 +1309,10 @@ jobs:
         if: failure()
         with:
           artifact-suffix: ${{ matrix.part }}
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
 
   # NOTE: GB200 stage temporarily disabled — no company-owned GB200 runner available yet.
   # Re-enable when a 4-gpu-gb200 runner is provisioned.

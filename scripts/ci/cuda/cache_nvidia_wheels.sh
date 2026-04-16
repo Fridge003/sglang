@@ -27,8 +27,14 @@ for url in \
     [ -f "$whl" ] && unzip -tq "$whl" &>/dev/null || curl -fL -o "$whl" "$url"
 done
 
-pip install --no-deps "$NVIDIA_WHEEL_CACHE"/nvidia_cudnn_cu12-*.whl \
-    "$NVIDIA_WHEEL_CACHE"/nvidia_nvshmem_cu12-*.whl 2>/dev/null || true
+# Caller (ci_install_dependency.sh) sets $PIP_CMD/$PIP_INSTALL_SUFFIX to route
+# installs into the active environment (venv or system). The `:-pip` fallback
+# keeps the file runnable ad-hoc for debugging; in CI the caller always sets
+# these. Silent failure here is deliberate — the pinned cudnn/nvshmem installs
+# later in ci_install_dependency.sh are the source of truth; this is only a
+# download optimization.
+${PIP_CMD:-pip} install --no-deps "$NVIDIA_WHEEL_CACHE"/nvidia_cudnn_cu12-*.whl \
+    "$NVIDIA_WHEEL_CACHE"/nvidia_nvshmem_cu12-*.whl ${PIP_INSTALL_SUFFIX:-} 2>/dev/null || true
 
 # If pre-cached NVIDIA pip wheels exist, tell pip to check there first.
 # This avoids re-downloading ~2 GB of cublas/cufft/nvrtc/etc. every run

@@ -1,0 +1,71 @@
+name: PR Test — Canary (uv venv)
+
+# Canary run for the uv venv CI install path. Forces SGLANG_CI_USE_VENV=1 on a
+# single 1-gpu-5090 runner and runs the stage-a-1-gpu-small suite. The install
+# and sanity-check steps fail loudly — they are the thing being validated.
+# Only the actual test run tolerates failure, so flaky test results don't
+# block the PR while we're still de-risking the install path.
+#
+# Delete this workflow once SGLANG_CI_USE_VENV=1 is the default on all runners.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'scripts/ci/cuda/**'
+      - 'python/pyproject.toml'
+      - '.github/workflows/pr-test-canary-venv.yml'
+  workflow_dispatch:
+    inputs:
+      pr_head_sha:
+        description: "PR head SHA to checkout"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: pr-test-canary-venv-${{ github.event_name }}-${{ github.head_ref || github.ref_name || 'default' }}-${{ inputs.pr_head_sha || 'current' }}
+  cancel-in-progress: true
+
+jobs:
+  canary-stage-a-test-1-gpu-small-venv:
+    runs-on: 1-gpu-5090
+    timeout-minutes: 60
+    env:
+      # Force the venv path on regardless of the runner's default setting.
+      SGLANG_CI_USE_VENV: "1"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+
+      # Install and sanity-check MUST fail loudly — they are the canary signal.
+      - name: Install dependencies (uv venv path)
+        timeout-minutes: 25
+        run: |
+          bash scripts/ci/cuda/ci_install_dependency.sh
+
+      - name: Venv sanity check
+        run: |
+          echo "VIRTUAL_ENV=${VIRTUAL_ENV:-unset}"
+          echo "python3 path: $(command -v python3)"
+          python3 -c "import sys; print('sys.prefix:', sys.prefix)"
+          python3 -c "import torch; print('torch CUDA:', torch.version.cuda); assert torch.cuda.is_available()"
+          python3 -c "import sglang; print('sglang import OK')"
+
+      # Test run is informational-only: a flaky test shouldn't block the PR,
+      # but an install/sanity-check failure must.
+      - name: Run stage-a-test-1-gpu-small (canary)
+        continue-on-error: true
+        timeout-minutes: 15
+        run: |
+          cd test/
+          python3 run_suite.py --hw cuda --suite stage-a-test-1-gpu-small
+
+      - uses: ./.github/actions/upload-cuda-coredumps
+        if: failure()
+
+      - name: Cleanup venv
+        if: always()
+        run: bash scripts/ci/cuda/ci_cleanup_venv.sh
