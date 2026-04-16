@@ -199,14 +199,26 @@ def _get_pid_cmdline(pid):
     return cmdline[:120] + ("..." if len(cmdline) > 120 else "")
 
 
+def _is_same_pid_namespace(pid):
+    """Check if a PID is in our PID namespace. Returns True if same or unknown."""
+    try:
+        my_ns = os.readlink("/proc/self/ns/pid")
+        target_ns = os.readlink(f"/proc/{pid}/ns/pid")
+        return my_ns == target_ns
+    except (OSError, FileNotFoundError, PermissionError):
+        # Can't determine — assume same namespace (safe default for non-Linux
+        # or when /proc/ns is not accessible).
+        return True
+
+
 def _find_sglang_pids_by_name():
     """Find SGLang process PIDs by command-line pattern matching.
 
     Scans /proc/*/cmdline for patterns matching known SGLang entry points.
     Equivalent to: pgrep -f 'sglang::|sglang.launch_server|...'
 
-    Safe in shared-GPU containers: without --pid=host, /proc only exposes
-    processes in our own PID namespace, so this cannot kill other containers.
+    On hosts with --pid=host, /proc exposes processes from ALL containers.
+    To avoid cross-container kills, skip PIDs in a different PID namespace.
     """
     my_pid = os.getpid()
     pids = set()
@@ -218,7 +230,10 @@ def _find_sglang_pids_by_name():
             continue
         cmdline = _read_proc_cmdline(pid)
         if cmdline and _SGLANG_PROCESS_PATTERNS.search(cmdline):
-            pids.add(pid)
+            if _is_same_pid_namespace(pid):
+                pids.add(pid)
+            else:
+                _log(f"  Skipping PID {pid} (different PID namespace): {cmdline[:80]}")
     return pids
 
 
