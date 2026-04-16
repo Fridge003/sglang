@@ -157,14 +157,20 @@ class MambaComponent(TreeComponent):
             self.cache.component_evictable_size_[self.component_type] -= freed
             if not is_leaf:
                 cd.value = None  # tombstone
+        
+        host_lru = self.cache.host_lru_lists[self.component_type]
         if is_leaf and cd.host_value is not None:
             # HiCache: free host mamba resources
             if self._mamba_pool_host is not None:
                 self._mamba_pool_host.free(cd.host_value)
             cd.host_value = None
-            host_lru = self.cache.host_lru_lists[self.component_type]
             if host_lru.in_list(node):
                 host_lru.remove_node(node)
+        
+        # Insert back to host LRU if only host_value is present
+        if cd.value is None and cd.host_value is not None:
+            if not host_lru.in_list(node):
+                host_lru.insert_mru(node)
         return freed
 
     def drive_eviction(
