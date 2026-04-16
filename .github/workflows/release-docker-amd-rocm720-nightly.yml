@@ -13,23 +13,55 @@ concurrency:
   cancel-in-progress: True
 
 jobs:
-  publish:
+  # publish:
+  #   if: github.repository == 'sgl-project/sglang'
+  #   runs-on: amd-docker-scale
+  #   environment: 'prod'
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       gpu_arch: ['gfx942-rocm720', 'gfx950-rocm720']
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+  #       with:
+  #         fetch-depth: 0  # Required for git describe to find tags
+
+  #     - name: Resolve test image tag
+  #       run: |
+  #         # Temporary publish test: reuse an existing image instead of building.
+  #         if [ "${{ matrix.gpu_arch }}" = "gfx942-rocm720" ]; then
+  #           rocm_tag="rocm720-mi30x"
+  #         elif [ "${{ matrix.gpu_arch }}" = "gfx950-rocm720" ]; then
+  #           rocm_tag="rocm720-mi35x"
+  #         else
+  #           echo "Unsupported gfx arch"
+  #           exit 1
+  #         fi
+
+  #         echo "IMAGE_TAG=v0.5.10rc0-${rocm_tag}-20260413" >> $GITHUB_ENV
+
+  #     - name: Login to Docker Hub
+  #       uses: docker/login-action@v2
+  #       with:
+  #         username: ${{ secrets.DOCKERHUB_AMD_USERNAME }}
+  #         password: ${{ secrets.DOCKERHUB_AMD_TOKEN }}
+
+  #     - name: Pull test image from rocm/sgl-dev
+  #       run: |
+  #         docker pull rocm/sgl-dev:${{ env.IMAGE_TAG }}
+
+  push_local_registry:
     if: github.repository == 'sgl-project/sglang'
-    runs-on: amd-docker-scale
+    runs-on: linux-mi300-1gpu-sglang
     environment: 'prod'
     strategy:
       fail-fast: false
       matrix:
         gpu_arch: ['gfx942-rocm720', 'gfx950-rocm720']
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Required for git describe to find tags
-
       - name: Resolve test image tag
         run: |
-          # Temporary publish test: reuse an existing image instead of building.
           if [ "${{ matrix.gpu_arch }}" = "gfx942-rocm720" ]; then
             rocm_tag="rocm720-mi30x"
           elif [ "${{ matrix.gpu_arch }}" = "gfx950-rocm720" ]; then
