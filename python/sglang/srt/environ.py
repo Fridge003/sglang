@@ -243,6 +243,7 @@ class Envs:
     SGLANG_DISAGGREGATION_WAITING_TIMEOUT = EnvInt(300)
     SGLANG_DISAGGREGATION_NIXL_BACKEND = EnvStr("UCX")
     SGLANG_DISAGGREGATION_ALL_CP_RANKS_TRANSFER = EnvBool(False)
+    SGLANG_DISAGGREGATION_FORCE_QUERY_PREFILL_DP_RANK = EnvBool(False)
     # Extra slots in req_to_token_pool for decode workers (only effective when
     # max_num_reqs > 32). Increases pool capacity so more KV cache transfers
     # can overlap with decode execution without raising max_running_requests.
@@ -263,6 +264,7 @@ class Envs:
     SGLANG_NCCL_ALL_GATHER_IN_OVERLAP_SCHEDULER_SYNC_BATCH = EnvBool(False)
     SGLANG_REQ_RUNNING_TIMEOUT = EnvFloat(-1)  # in seconds
     SGLANG_DISAGGREGATION_BOOTSTRAP_ENTRY_CLEANUP_INTERVAL = EnvInt(120)
+    SGLANG_SWA_EVICTION_INTERVAL_MULTIPLIER = EnvFloat(1.0)
 
     # Test: pd-disaggregation
     SGLANG_TEST_PD_DISAGG_BACKEND = EnvStr("mooncake")
@@ -313,8 +315,10 @@ class Envs:
 
     # AMD & ROCm
     SGLANG_USE_AITER = EnvBool(False)
+    SGLANG_USE_AITER_UNIFIED_ATTN = EnvBool(False)
     SGLANG_ROCM_FUSED_DECODE_MLA = EnvBool(False)
     SGLANG_ROCM_DISABLE_LINEARQUANT = EnvBool(False)
+    SGLANG_MORI_NUM_MAX_DISPATCH_TOKENS_PER_RANK = EnvInt(4096)
 
     # MPS (Apple Silicon)
     SGLANG_USE_MLX = EnvBool(False)
@@ -471,6 +475,9 @@ class Envs:
     # Mamba
     SGLANG_MAMBA_CONV_DTYPE = EnvStr("bfloat16")
     SGLANG_MAMBA_SSM_DTYPE = EnvStr(None)
+
+    # Unified Radix Tree
+    SGLANG_ENABLE_UNIFIED_RADIX_TREE = EnvBool(False)
 
     # Breakable CUDA Graph
     SGLANG_USE_BREAKABLE_CUDA_GRAPH = EnvBool(False)
