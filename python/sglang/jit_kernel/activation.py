@@ -42,9 +42,13 @@ def _prepare_out(input: torch.Tensor, out: Optional[torch.Tensor]) -> torch.Tens
             dtype=input.dtype,
         )
     else:
+        assert input.dim() == out.dim(), f"{input.dim()} != {out.dim()}"
         assert (
-            out.shape[-1] * 2 == input.shape[-1]
-        ), f"{out.shape[-1]} * 2 != {input.shape[-1]}"
+            input.shape[:-1] == out.shape[:-1]
+        ), f"{input.shape[:-1]} != {out.shape[:-1]}"
+        assert (
+            input.shape[-1] == 2 * out.shape[-1]
+        ), f"{input.shape[-1]} != {2 * out.shape[-1]}"
     return out
 
 

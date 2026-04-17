@@ -24,7 +24,7 @@ SGL_DEVICE float silu(const float& x) {
 
 SGL_DEVICE float gelu(const float& x) {
   constexpr float kAlpha = M_SQRT1_2;
-  return x * 0.5f * (1.0f + erff(x * kAlpha));
+  return x * (0.5f * (1.0f + erff(x * kAlpha)));
 }
 
 template <typename T, float (*Activation)(const float&)>
