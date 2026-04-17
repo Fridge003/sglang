@@ -107,6 +107,9 @@ jobs:
           fi
           MATRIX=$(python3 scripts/ci/slurm/generate_matrix.py \
             scripts/ci/slurm/nightly-configs.yaml --runner gb200 "${FILTER_ARG[@]}")
+          echo ""
+          echo "matrix output (will be consumed by benchmark job via fromJson):"
+          echo "$MATRIX"
           echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
 
   # ---------------------------------------------------------------------------
