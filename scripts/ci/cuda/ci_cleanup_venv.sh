@@ -40,4 +40,15 @@ else
     [ "$matched" -eq 0 ] && echo "No venv to clean for run=${GITHUB_RUN_ID:-?} job=${GITHUB_JOB:-?}"
 fi
 
+# Sweep stale venvs from cancelled/crashed jobs that never reached cleanup.
+# Any /tmp/sglang-ci-* dir older than 4 hours is considered orphaned.
+stale_count=0
+for venv in /tmp/sglang-ci-*; do
+    [ -d "$venv" ] || continue
+    if find "$venv" -maxdepth 0 -mmin +240 -print -quit | grep -q .; then
+        rm -rf "$venv" && stale_count=$((stale_count + 1))
+    fi
+done
+[ "$stale_count" -gt 0 ] && echo "Swept $stale_count stale venv(s) older than 4h"
+
 exit 0
