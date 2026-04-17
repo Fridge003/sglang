@@ -198,6 +198,15 @@ jobs:
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 14
         run: |
@@ -245,6 +254,15 @@ jobs:
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 20
         run: |
@@ -288,6 +306,15 @@ jobs:
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 10
         run: |
@@ -326,6 +353,15 @@ jobs:
       - name: Install dependencies
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run JIT kernel unit tests
         timeout-minutes: 10
@@ -393,6 +429,15 @@ jobs:
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 30
         run: |
@@ -432,6 +477,15 @@ jobs:
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 30
         run: |
@@ -470,6 +524,15 @@ jobs:
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run test
         timeout-minutes: 30
@@ -511,6 +574,15 @@ jobs:
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 30
         run: |
@@ -550,6 +622,15 @@ jobs:
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run test
         timeout-minutes: 30
@@ -599,6 +680,15 @@ jobs:
       - name: Install dependencies
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh diffusion
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Setup kernel caches
         run: |
@@ -728,6 +818,15 @@ jobs:
       - name: Install dependencies
         run: |
           bash scripts/ci/amd/amd_ci_install_dependency.sh diffusion
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Setup kernel caches
         run: |
@@ -874,6 +973,15 @@ jobs:
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Run test
         timeout-minutes: 60
         run: |
@@ -932,6 +1040,15 @@ jobs:
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
 
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Test RCCL multi-GPU communication
         timeout-minutes: 5
         run: |
@@ -977,6 +1094,15 @@ jobs:
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Run test
         timeout-minutes: 60
@@ -1056,6 +1182,15 @@ jobs:
 
       - name: Install dependencies
         run: bash scripts/ci/amd/amd_ci_install_dependency.sh
+
+      - name: Upload pip-install debug logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-install-debug-${{ github.job }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pip-install-debug/
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify RDMA in Container
         run: |

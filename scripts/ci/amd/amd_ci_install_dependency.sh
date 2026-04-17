@@ -72,6 +72,114 @@ install_with_retry() {
   return 1
 }
 
+# ============================================================================
+# DEBUG INSTRUMENTATION (bingxche/fix-install-depend-error)
+# Diagnostic install of `pip install -e python[$EXTRAS]` to capture exactly
+# which package(s) are causing pip's resolver to explode with
+# `resolution-too-deep`. Writes the full -vvv log to /tmp on the runner so
+# the workflow can upload it as an artifact, and also prints a compact digest
+# to the GitHub Actions log for quick triage.
+# ============================================================================
+install_sglang_with_debug() {
+  local extras="$1"
+  local ts log_dir log_attempt1 log_attempt2 log_attempt3
+  ts=$(date +%Y%m%d-%H%M%S)
+  log_dir="${RUNNER_TEMP:-/tmp}/pip-install-debug"
+  mkdir -p "$log_dir"
+  log_attempt1="${log_dir}/attempt1-vvv-${ts}.log"
+  log_attempt2="${log_dir}/attempt2-legacy-resolver-${ts}.log"
+  log_attempt3="${log_dir}/attempt3-aliyun-${ts}.log"
+
+  echo "::group::[DEBUG] Pre-install environment baseline"
+  echo "----- pip version inside container -----"
+  docker exec ci_sglang pip --version || true
+  docker exec ci_sglang python -V || true
+  echo "----- pip config -----"
+  docker exec ci_sglang pip config list || true
+  echo "----- Pre-installed versions of dependencies most likely to backtrack -----"
+  docker exec ci_sglang pip list --format=freeze 2>/dev/null | \
+    grep -iE "^(transformers|tokenizers|huggingface[-_]hub|setproctitle|urllib3|certifi|requests|cache-dit|peft|diffusers|torch|easydict|aiohttp|accelerate|outlines|xgrammar|openai|mistral[-_]common|numpy|pillow|safetensors|llguidance|fsspec|regex)=" || true
+  echo "----- Disk usage of container (root) -----"
+  docker exec ci_sglang df -h / 2>/dev/null | head -3 || true
+  echo "::endgroup::"
+
+  echo "::group::[DEBUG] Attempt 1: pip install -vvv (full resolver trace -> ${log_attempt1})"
+  set +e
+  docker exec ci_sglang pip install -vvv --no-input --no-color \
+    --cache-dir=/sgl-data/pip-cache -e "python[${extras}]" \
+    > "$log_attempt1" 2>&1
+  local rc1=$?
+  set -e
+  echo "Attempt 1 exit code: $rc1"
+  echo "Attempt 1 log size: $(wc -c < "$log_attempt1" 2>/dev/null || echo 0) bytes, $(wc -l < "$log_attempt1" 2>/dev/null || echo 0) lines"
+  echo "::endgroup::"
+
+  if [ $rc1 -eq 0 ]; then
+    echo "Attempt 1 succeeded — no debug needed."
+    return 0
+  fi
+
+  echo "::group::[DEBUG] Attempt 1 failed — resolver log digest"
+  echo "----- Last 5 'error/ERROR' lines -----"
+  grep -E "^(error|ERROR)[: ]" "$log_attempt1" | tail -5 || true
+  echo "----- 'resolution-too-deep' / 'taking longer' indicators -----"
+  grep -nE "resolution-too-deep|taking longer than usual|backtracking" "$log_attempt1" | head -10 || true
+  echo "----- Top 30 packages by 'Collecting' frequency (high = pip kept re-collecting it) -----"
+  grep -oE "^Collecting [a-zA-Z0-9._-]+" "$log_attempt1" \
+    | awk '{print $2}' | sort | uniq -c | sort -rn | head -30 || true
+  echo "----- Top 30 packages by 'Using cached' frequency (high = many versions explored == backtrack hot spot) -----"
+  grep -oE "Using cached [a-zA-Z0-9._-]+-[0-9]" "$log_attempt1" \
+    | awk '{print $3}' | sed -E 's/-[0-9].*//' | sort | uniq -c | sort -rn | head -30 || true
+  echo "----- Top 30 distinct (package, version) pairs pip downloaded metadata for -----"
+  grep -oE "Downloading [a-zA-Z0-9._-]+-[0-9][a-zA-Z0-9.+_-]*" "$log_attempt1" \
+    | awk '{print $2}' | sort | uniq -c | sort -rn | head -30 || true
+  echo "----- Last 80 lines of attempt-1 log -----"
+  tail -80 "$log_attempt1" || true
+  echo "::endgroup::"
+
+  echo "::group::[DEBUG] Attempt 2: pip install --use-deprecated=legacy-resolver (does the OLD resolver succeed?)"
+  set +e
+  docker exec ci_sglang pip install --no-input --no-color \
+    --cache-dir=/sgl-data/pip-cache \
+    --use-deprecated=legacy-resolver \
+    -e "python[${extras}]" \
+    > "$log_attempt2" 2>&1
+  local rc2=$?
+  set -e
+  echo "Attempt 2 exit code: $rc2"
+  echo "Attempt 2 log size: $(wc -c < "$log_attempt2" 2>/dev/null || echo 0) bytes"
+  echo "----- Last 60 lines of attempt-2 log -----"
+  tail -60 "$log_attempt2" || true
+  echo "::endgroup::"
+
+  if [ $rc2 -eq 0 ]; then
+    echo "[DEBUG] Attempt 2 succeeded with legacy-resolver. This CONFIRMS the new resolver is the problem."
+    return 0
+  fi
+
+  echo "::group::[DEBUG] Attempt 3: pip install with aliyun fallback mirror (last-resort, kept for parity with prod retry)"
+  set +e
+  docker exec ci_sglang pip install --no-input --no-color \
+    --cache-dir=/sgl-data/pip-cache \
+    --index-url https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+    -e "python[${extras}]" \
+    > "$log_attempt3" 2>&1
+  local rc3=$?
+  set -e
+  echo "Attempt 3 exit code: $rc3"
+  echo "----- Last 40 lines of attempt-3 log -----"
+  tail -40 "$log_attempt3" || true
+  echo "::endgroup::"
+
+  if [ $rc3 -eq 0 ]; then
+    return 0
+  fi
+
+  echo "[DEBUG] All 3 attempts failed. Full logs preserved under: ${log_dir}"
+  ls -la "$log_dir" || true
+  return 1
+}
+
 # Helper function to git clone with retries
 git_clone_with_retry() {
   local repo_url="$1"
@@ -121,7 +229,7 @@ else
   docker exec -w /sglang-checkout/sgl-kernel ci_sglang bash -c "rm -f pyproject.toml && mv pyproject_rocm.toml pyproject.toml && python3 setup_rocm.py install"
 
   docker exec ci_sglang bash -c 'rm -rf python/pyproject.toml && mv python/pyproject_other.toml python/pyproject.toml'
-  install_with_retry docker exec ci_sglang pip install --cache-dir=/sgl-data/pip-cache -e "python[${EXTRAS}]"
+  install_sglang_with_debug "${EXTRAS}"
 fi
 
 if [[ -n "${SKIP_TT_DEPS}" ]]; then
