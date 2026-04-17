@@ -99,6 +99,34 @@ if [ $KILLALL_EXIT -ne 0 ]; then
     exit 1
 fi
 
+# Clean orphaned IPC from /dev/shm left by previous CI runs.
+# On shared hosts with --ipc=host, Python multiprocessing semaphores (sem.loky-*,
+# sem.mp-*) and POSIX shared memory segments (psm_*, cuda.shm.*) accumulate across
+# jobs. Python's resource_tracker detects these orphans during new server startup
+# and can interfere with model loading, causing spurious SIGKILL (exit -9).
+# Safety: only remove entries whose embedded PID is confirmed dead.
+{ set +x; } 2>/dev/null
+SHM_CLEANED=0
+for f in /dev/shm/sem.loky-* /dev/shm/sem.mp-* /dev/shm/psm_* /dev/shm/cuda.shm.*; do
+    [ -e "$f" ] || continue
+    pid=$(echo "$f" | grep -oP '[0-9]+' | head -1 || true)
+    if [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$f"
+        SHM_CLEANED=$((SHM_CLEANED + 1))
+    fi
+done
+set -x
+echo "Cleaned ${SHM_CLEANED} orphaned IPC entries from /dev/shm"
+
+# Clean stale TVM/sgl-kernel JIT caches. These contain compiled .so files linked
+# against a specific CUDA runtime version (e.g. libcudart.so.13). After a CUDA
+# toolkit upgrade/downgrade, the old .so files fail to load with "cannot open
+# shared object file". Safe to remove unconditionally — they recompile on first use.
+if [ -d "${HOME}/.cache/tvm-ffi" ]; then
+    rm -rf "${HOME}/.cache/tvm-ffi"
+    echo "Cleared stale TVM JIT cache"
+fi
+
 mark_step_done "Kill existing processes"
 
 # ------------------------------------------------------------------------------
@@ -365,7 +393,11 @@ $PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.
 # Download kernels from kernels community
 kernels download python || true
 kernels lock python || true
-mv python/kernels.lock ${HOME}/.cache/sglang || true
+# Ensure target is a directory — on fresh containers ${HOME}/.cache/sglang may
+# not exist, and a bare `mv src dest` when dest is absent creates a FILE at that
+# path, breaking every later os.makedirs() call with NotADirectoryError.
+mkdir -p "${HOME}/.cache/sglang"
+mv python/kernels.lock "${HOME}/.cache/sglang/" || true
 
 # Install human-eval
 pip install "setuptools==70.0.0"
