@@ -63,13 +63,11 @@ class ComponentData:
     value: Optional[torch.Tensor] = None
     lock_ref: int = 0
     metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-    # ---- HiCache: host-side mirror ----
     host_value: Optional[torch.Tensor] = None
     host_lock_ref: int = 0
 
 
 class CacheTransferPhase(str, Enum):
-    """Direction of a HiCache data transfer."""
 
     BACKUP_HOST = "backup_host"  # D→H
     LOAD_BACK = "load_back"  # H→D
@@ -304,7 +302,7 @@ class TreeComponent(ABC):
         paths it is still provided so components can free their resources."""
         pass
 
-    # ---- HiCache Hooks (defaults = no-op) ----
+    # ---- HiCache Hooks ----
 
     def build_hicache_transfers(
         self, node: UnifiedTreeNode, phase: CacheTransferPhase, **kw
