@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from sglang.jit_kernel.utils import cache_once, load_jit, make_cpp_args
+from sglang.srt.utils.custom_op import register_custom_op
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
@@ -52,12 +53,23 @@ def _prepare_out(input: torch.Tensor, out: Optional[torch.Tensor]) -> torch.Tens
     return out
 
 
+@register_custom_op(op_name="jit_silu_and_mul", mutates_args=["out"])
+def _silu_and_mul_custom_op(input: torch.Tensor, out: torch.Tensor) -> None:
+    module = _jit_silu_and_mul_module(input.dtype)
+    module.silu_and_mul(out.view(-1, out.shape[-1]), input.view(-1, input.shape[-1]))
+
+
+@register_custom_op(op_name="jit_gelu_and_mul", mutates_args=["out"])
+def _gelu_and_mul_custom_op(input: torch.Tensor, out: torch.Tensor) -> None:
+    module = _jit_gelu_and_mul_module(input.dtype)
+    module.gelu_and_mul(out.view(-1, out.shape[-1]), input.view(-1, input.shape[-1]))
+
+
 def silu_and_mul(
     input: torch.Tensor, out: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     out = _prepare_out(input, out)
-    module = _jit_silu_and_mul_module(input.dtype)
-    module.silu_and_mul(out.view(-1, out.shape[-1]), input.view(-1, input.shape[-1]))
+    _silu_and_mul_custom_op(input, out)
     return out
 
 
@@ -65,6 +77,5 @@ def gelu_and_mul(
     input: torch.Tensor, out: Optional[torch.Tensor] = None
 ) -> torch.Tensor:
     out = _prepare_out(input, out)
-    module = _jit_gelu_and_mul_module(input.dtype)
-    module.gelu_and_mul(out.view(-1, out.shape[-1]), input.view(-1, input.shape[-1]))
+    _gelu_and_mul_custom_op(input, out)
     return out
