@@ -109,7 +109,7 @@ def build_unified_hybrid_stack(
                     host_pool=mamba_pool_host,
                     device_pool=params.req_to_token_pool.mamba_pool,
                     layer_mapper=mamba_layer_mapper,
-                    host_evict_fn=lambda n: cache._evict_host(n, ComponentType.MAMBA),
+                    host_evict_fn=lambda n: cache.evict_host(n, ComponentType.MAMBA),
                     device_evict_fn=lambda n: cache.evict(EvictParams(mamba_num=n)),
                 )
             )
@@ -134,6 +134,9 @@ def build_unified_hybrid_stack(
         cache.host_pool_group = host_pool_group
         cache.cache_controller = cache_controller
 
+        full_comp = cache.components[ComponentType.FULL]
+        full_comp._full_kv_pool_host = full_kv_pool_host
+
         if has_mamba:
             cache.mamba_pool_host = mamba_pool_host
             mamba_comp = cache.components[ComponentType.MAMBA]
@@ -142,14 +145,11 @@ def build_unified_hybrid_stack(
                 cache_controller.layer_done_counter
             )
 
-        kvcache.register_layer_transfer_counter(
-            cache_controller.layer_done_counter
-        )
+        kvcache.register_layer_transfer_counter(cache_controller.layer_done_counter)
 
         pool_names = "KV + MAMBA" if has_mamba else "KV"
         logger.info(
-            "Unified hybrid stack: HostPoolGroup(%s), "
-            "transfer_layer_num=%s",
+            "Unified hybrid stack: HostPoolGroup(%s), " "transfer_layer_num=%s",
             pool_names,
             transfer_layer_num,
         )

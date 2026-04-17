@@ -826,7 +826,7 @@ class Scheduler(
                     tree_components.append(
                         ComponentType.SWA if self.is_hybrid_swa else ComponentType.MAMBA
                     )
-                    
+
                 params.tree_components = tuple(tree_components)
                 self.tree_cache = UnifiedRadixCache(params)
                 if self.enable_hierarchical_cache:

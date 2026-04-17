@@ -14,8 +14,9 @@ from sglang.srt.mem_cache.base_prefix_cache import (
 )
 from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
 from sglang.srt.mem_cache.unified_cache_components.tree_component import (
-    ComponentType,
     CacheTransferPhase,
+    ComponentType,
+    EvictLayer,
     TreeComponent,
 )
 
@@ -37,9 +38,8 @@ class FullComponent(TreeComponent):
             self._free_full = allocator.full_attn_allocator.free
         else:
             self._free_full = allocator.free
-
-    def node_has_component_data(self, node: UnifiedTreeNode) -> bool:
-        return node.component_data[self.component_type].value is not None
+        # HiCache state: set to host KV pool when HiCache enabled
+        self._full_kv_pool_host = None
 
     def create_match_validator(self) -> Callable[[UnifiedTreeNode], bool]:
         # HiCache: evicted + backuped nodes are valid match boundaries
@@ -87,21 +87,32 @@ class FullComponent(TreeComponent):
             ].clone()
             child_cd.host_value = child_cd.host_value[split_len:].clone()
 
-    def evict_component(self, node: UnifiedTreeNode, is_leaf: bool) -> int:
+    def evict_component(
+        self,
+        node: UnifiedTreeNode,
+        target: EvictLayer = EvictLayer.DEVICE,
+    ) -> tuple[int, int]:
         cd = node.component_data[self.component_type]
         freed = 0
-        if cd.value is not None:
+        host_freed = 0
+
+        # Device layer
+        if EvictLayer.DEVICE in target and cd.value is not None:
             self._free_full(cd.value)
             freed = len(cd.value)
             self.cache.component_evictable_size_[self.component_type] -= freed
-            if not is_leaf:
-                cd.value = None  # tombstone
-        if is_leaf and cd.host_value is not None:
-            if self.cache.cache_controller is not None:
-                self.cache.cache_controller.evict_host(cd.host_value)
+            # TODO: Cannot release value = None here; otherwise, the SWAComponent won't be properly released.
+            # FULL and SWA need to be fully decoupled in the future
+            # cd.value = None
+            self.cache.evictable_device_leaves.discard(node)
+
+        # Host layer
+        if EvictLayer.HOST in target and cd.host_value is not None:
+            host_freed = len(cd.host_value)
+            if self._full_kv_pool_host is not None:
+                self._full_kv_pool_host.free(cd.host_value)
             cd.host_value = None
-        self.cache.evictable_device_leaves.discard(node)
-        return freed
+        return freed, host_freed
 
     def eviction_priority(self, is_leaf: bool) -> int:
         return 0 if is_leaf else 2
@@ -113,12 +124,12 @@ class FullComponent(TreeComponent):
         # Heap-based eviction from evictable_device_leaves, ordered by LRU.
         heap = [(n.last_access_time, n) for n in self.cache.evictable_device_leaves]
         heapq.heapify(heap)
-        while tracker[self.component_type] < request and heap:
+        ct = self.component_type
+        while tracker[ct] < request and heap:
             _, x = heapq.heappop(heap)
             if x not in self.cache.evictable_device_leaves:
                 continue
-            evicted = self.cache._evict_device_leaf(x)
-            tracker[self.component_type] += evicted
+            self.cache._evict_device_leaf(x, tracker)
             if x.parent is not None and x.parent in self.cache.evictable_device_leaves:
                 heapq.heappush(heap, (x.parent.last_access_time, x.parent))
 
@@ -128,12 +139,12 @@ class FullComponent(TreeComponent):
         """Evict host leaves to free KV host pool space."""
         heap = [(n.last_access_time, n) for n in self.cache.evictable_host_leaves]
         heapq.heapify(heap)
-        num_evicted = 0
-        while num_evicted < num_tokens and heap:
+        ct = self.component_type
+        while tracker[ct] < num_tokens and heap:
             _, x = heapq.heappop(heap)
             if x not in self.cache.evictable_host_leaves:
                 continue
-            num_evicted += self.cache._evict_host_leaf(x, tracker)
+            self.cache._evict_host_leaf(x, tracker)
             if x.parent is not None and x.parent in self.cache.evictable_host_leaves:
                 heapq.heappush(heap, (x.parent.last_access_time, x.parent))
 

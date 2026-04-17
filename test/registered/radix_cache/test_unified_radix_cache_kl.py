@@ -261,6 +261,7 @@ class TestUnifiedSWARadixCache(UnifiedRadixTreeTestMixin, CustomTestCase):
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
 
+
 class TestUnifiedMambaRadixCacheWithHiCache(UnifiedRadixTreeTestMixin, CustomTestCase):
     """Mamba hybrid + UnifiedRadixCache."""
 
@@ -299,7 +300,7 @@ class TestUnifiedMambaRadixCacheWithHiCache(UnifiedRadixTreeTestMixin, CustomTes
                 "--hicache-io-backend",
                 "direct",
                 "--hicache-mem-layout",
-                "page_first_direct"
+                "page_first_direct",
             ],
             env={"SGLANG_ENABLE_UNIFIED_RADIX_TREE": "1"},
         )
@@ -308,6 +309,7 @@ class TestUnifiedMambaRadixCacheWithHiCache(UnifiedRadixTreeTestMixin, CustomTes
     @classmethod
     def tearDownClass(cls):
         kill_process_tree(cls.process.pid)
+
 
 if __name__ == "__main__":
     unittest.main()
