@@ -50,9 +50,13 @@ _is_hip = is_hip()
 _is_xpu = is_xpu()
 
 if _is_cuda or _is_xpu:
-    from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+    from sgl_kernel import gelu_tanh_and_mul
+
+    from sglang.jit_kernel.activation import gelu_and_mul, silu_and_mul
 elif _is_hip:
-    from sgl_kernel import gelu_and_mul, gelu_quick, gelu_tanh_and_mul, silu_and_mul
+    from sgl_kernel import gelu_quick, gelu_tanh_and_mul
+
+    from sglang.jit_kernel.activation import gelu_and_mul, silu_and_mul
 
 if is_npu():
     import torch_npu

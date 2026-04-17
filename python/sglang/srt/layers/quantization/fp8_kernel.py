@@ -334,7 +334,7 @@ def _per_token_group_quant_8bit_fuse_silu_and_mul(
     masked_m: Optional[torch.Tensor],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # Another way to implement (can be used in e.g. comparison tests)
-    # from sgl_kernel import silu_and_mul
+    # from sglang.jit_kernel.activation import silu_and_mul
     # x_after_silu_and_mul = silu_and_mul(x)
     # return per_token_group_quant_fp8(
     #     x_after_silu_and_mul,

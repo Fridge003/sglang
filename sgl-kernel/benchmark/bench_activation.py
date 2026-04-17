@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.testing
-from sgl_kernel import gelu_and_mul, gelu_tanh_and_mul, silu_and_mul
+from sgl_kernel import gelu_tanh_and_mul
 
 from sglang.utils import is_in_ci
 
@@ -35,7 +35,7 @@ except ImportError:
     GELU_QUICK_AVAILABLE = False
     gelu_quick = None
 
-if VLLM_AVAILABLE and not hasattr(vllm_ops, "silu_and_mul"):
+if VLLM_AVAILABLE and not hasattr(vllm_ops, "gelu_tanh_and_mul"):
     vllm_ops = torch.ops._C
 
 
@@ -90,10 +90,10 @@ def calculate_diff(
 
 # CI environment uses simplified parameters for kernels and dtypes too
 if IS_CI:
-    kernels = ["silu_and_mul"]  # Only test one kernel in CI
+    kernels = ["gelu_tanh_and_mul"]  # Only test one kernel in CI
     dtypes = [torch.float16]  # Only test one dtype in CI
 else:
-    kernels = ["silu_and_mul", "gelu_and_mul", "gelu_tanh_and_mul"]
+    kernels = ["gelu_tanh_and_mul"]
     if GELU_QUICK_AVAILABLE:
         kernels.append("gelu_quick")
     dtypes = [torch.float16, torch.bfloat16]

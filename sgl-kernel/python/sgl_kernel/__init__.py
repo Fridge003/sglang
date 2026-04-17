@@ -22,13 +22,11 @@ from sgl_kernel.elementwise import (
     concat_mla_k,
     copy_to_gpu_no_ce,
     fused_add_rmsnorm,
-    gelu_and_mul,
     gelu_tanh_and_mul,
     gemma_fused_add_rmsnorm,
     gemma_rmsnorm,
     rmsnorm,
     rotary_embedding,
-    silu_and_mul,
 )
 from sgl_kernel.expert_specialization import (
     es_fp8_blockwise_scaled_grouped_mm,

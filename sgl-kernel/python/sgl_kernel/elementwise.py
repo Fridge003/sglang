@@ -262,21 +262,6 @@ def _check_shape(input: torch.Tensor, output: torch.Tensor) -> None:
     ), f"{input.shape[-1]} != {2 * output.shape[-1]}"
 
 
-def silu_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
-    if input.shape[-1] * input.dtype.itemsize % 16 != 0:
-        raise ValueError("The pointers must be multiple of 16 bytes.")
-    if out is not None:
-        _check_shape(input, out)
-    else:
-        out = torch.empty(
-            input.shape[:-1] + (input.shape[-1] // 2,),
-            device=input.device,
-            dtype=input.dtype,
-        )
-    torch.ops.sgl_kernel.silu_and_mul.default(out, input)
-    return out
-
-
 def gelu_tanh_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
     if input.shape[-1] * input.dtype.itemsize % 16 != 0:
         raise ValueError("The pointers must be multiple of 16 bytes.")
@@ -289,21 +274,6 @@ def gelu_tanh_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Te
             dtype=input.dtype,
         )
     torch.ops.sgl_kernel.gelu_tanh_and_mul.default(out, input)
-    return out
-
-
-def gelu_and_mul(input: torch.Tensor, out: torch.Tensor = None) -> torch.Tensor:
-    if input.shape[-1] * input.dtype.itemsize % 16 != 0:
-        raise ValueError("The pointers must be multiple of 16 bytes.")
-    if out is not None:
-        _check_shape(input, out)
-    else:
-        out = torch.empty(
-            input.shape[:-1] + (input.shape[-1] // 2,),
-            device=input.device,
-            dtype=input.dtype,
-        )
-    torch.ops.sgl_kernel.gelu_and_mul.default(out, input)
     return out
 
 

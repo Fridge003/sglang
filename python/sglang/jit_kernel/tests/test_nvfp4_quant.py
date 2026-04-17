@@ -10,7 +10,7 @@ from sglang.jit_kernel.nvfp4 import (
 )
 
 try:
-    from sgl_kernel import silu_and_mul as _sgl_silu_and_mul
+    from sglang.jit_kernel.activation import silu_and_mul as _sgl_silu_and_mul
 except Exception:
     _sgl_silu_and_mul = None
 

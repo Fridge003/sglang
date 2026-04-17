@@ -17,7 +17,7 @@ _is_cuda = current_platform.is_cuda()
 _is_hip = current_platform.is_hip()
 _is_npu = current_platform.is_npu()
 if _is_cuda or _is_hip:
-    from sgl_kernel import silu_and_mul
+    from sglang.jit_kernel.activation import silu_and_mul
 
 if _is_npu:
     import torch_npu

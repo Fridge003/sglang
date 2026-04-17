@@ -47,11 +47,13 @@ _use_sgl_xpu = use_intel_xpu_backend()
 
 
 if _is_cuda:
-    from sgl_kernel import gelu_and_mul, moe_sum_reduce, silu_and_mul
+    from sgl_kernel import moe_sum_reduce
+
+    from sglang.jit_kernel.activation import gelu_and_mul, silu_and_mul
 elif _is_cpu and _is_cpu_amx_available:
     pass
 elif _is_hip:
-    from sgl_kernel import gelu_and_mul, silu_and_mul
+    from sglang.jit_kernel.activation import gelu_and_mul, silu_and_mul
 
     if _use_aiter:
         try:
@@ -61,7 +63,9 @@ elif _is_hip:
     # Note: vllm_ops is not needed for HIP when _use_aiter=False
     # because the code uses moe_sum_reduce_triton as fallback (line 619)
 elif _is_xpu:
-    from sgl_kernel import moe_sum_reduce, silu_and_mul
+    from sgl_kernel import moe_sum_reduce
+
+    from sglang.jit_kernel.activation import silu_and_mul
 
 # Try to import vllm_ops for non-CUDA/HIP/XPU platforms
 _has_vllm_ops = False
