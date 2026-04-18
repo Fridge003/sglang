@@ -356,9 +356,7 @@ mark_step_done "Download flashinfer artifacts"
 CU_STRIP="${CU_VERSION#cu}"
 CU_MAJOR="${CU_STRIP:0:2}"
 if [ "$CU_MAJOR" = "13" ]; then
-    # Install both cu13 and cu12 nvrtc: cu13 for native code, cu12 for sgl-kernel
-    # (sgl-kernel .so files are compiled on cu12 and link against libnvrtc.so.12)
-    NVRTC_SPEC="nvidia-cuda-nvrtc nvidia-cuda-nvrtc-cu12"
+    NVRTC_SPEC="nvidia-cuda-nvrtc"
 else
     NVRTC_SPEC="nvidia-cuda-nvrtc-cu12"
 fi
