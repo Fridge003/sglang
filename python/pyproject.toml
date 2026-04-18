@@ -90,11 +90,15 @@ name = "torch-cu130"
 url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
+# To be removed after pypi sglang-kernel uses cu130
+[[tool.uv.index]]
+name = "sglang-kernel-cu130"
+url = "https://docs.sglang.ai/whl/cu130/"
+explicit = true
+
 [tool.uv.sources]
-torch = [
-  { index = "torch-cu130", marker = "platform_machine == 'x86_64'"},
-  { index = "torch-cu130", marker = "platform_machine == 'aarch64'"},
-]
+torch = { index = "torch-cu130" }
+sglang-kernel = { index = "sglang-kernel-cu130" }
 
 [project.optional-dependencies]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
