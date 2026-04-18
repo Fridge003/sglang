@@ -6,6 +6,7 @@ import torch
 
 from sglang.jit_kernel.utils import (
     cache_once,
+    get_jit_cuda_arch,
     is_hip_runtime,
     load_jit,
     make_cpp_args,
@@ -17,9 +18,17 @@ if TYPE_CHECKING:
 
 
 def _fast_math_flags() -> list[str]:
-    # --use_fast_math is an nvcc-only flag; on ROCm hipcc (clang-based) it
-    # would error with "unknown argument".
-    return [] if is_hip_runtime() else ["--use_fast_math"]
+    # Match sgl-kernel's CMake policy for activation.cu:
+    # - SM90 build uses -use_fast_math
+    # - SM100+ (Blackwell) builds use precise math — expf must match
+    #   sgl_kernel's reference bit-for-bit, otherwise Llama-2 LoRA
+    #   greedy generation diverges on B200 CI.
+    # - nvcc-only; hipcc (ROCm, clang-based) rejects the flag.
+    if is_hip_runtime():
+        return []
+    if get_jit_cuda_arch().major >= 10:
+        return []
+    return ["--use_fast_math"]
 
 
 @cache_once
