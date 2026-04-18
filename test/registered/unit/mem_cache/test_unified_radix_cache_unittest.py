@@ -906,8 +906,8 @@ class UnifiedRadixCacheSuite:
         # Create a chain: root -> A -> B -> C (3 levels)
         ps = self.cfg.page_size
         chain = self._make_seq(1, 6)
-        self._insert(tree, allocator, req_to_token_pool, chain[:2 * ps])
-        self._insert(tree, allocator, req_to_token_pool, chain[:4 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain[: 2 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain[: 4 * ps])
         self._insert(tree, allocator, req_to_token_pool, chain)
 
         initial_evictable = tree.full_evictable_size()
@@ -990,9 +990,7 @@ class UnifiedRadixCacheSuite:
 
         tree.dec_lock_ref(
             m.last_device_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)),
         )
         tree.sanity_check()
 
@@ -1031,9 +1029,7 @@ class UnifiedRadixCacheSuite:
 
         tree.dec_lock_ref(
             m.last_device_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)),
         )
         tree.sanity_check()
 
@@ -1102,9 +1098,7 @@ class UnifiedRadixCacheSuite:
 
         tree.dec_lock_ref(
             m.last_device_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)),
         )
         tree.sanity_check()
 
@@ -1212,9 +1206,7 @@ class UnifiedRadixCacheSuite:
 
         tree.dec_lock_ref(
             m.last_device_node,
-            DecLockRefParams(
-                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
-            ),
+            DecLockRefParams(swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)),
         )
         tree.sanity_check()
 
@@ -1290,7 +1282,7 @@ class UnifiedRadixCacheSuite:
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         chain = self._make_seq(1, 4)
         ps = self.cfg.page_size
-        self._insert(tree, allocator, req_to_token_pool, chain[:2 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain[: 2 * ps])
         self._insert(tree, allocator, req_to_token_pool, chain)
 
         # Backup all

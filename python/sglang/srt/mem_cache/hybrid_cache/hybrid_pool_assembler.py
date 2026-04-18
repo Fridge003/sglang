@@ -98,6 +98,7 @@ def build_unified_hybrid_stack(
             ),
         ]
         if has_mamba:
+
             def mamba_layer_mapper(layer_id: int) -> Optional[int]:
                 if not 0 <= layer_id < transfer_layer_num:
                     return None
