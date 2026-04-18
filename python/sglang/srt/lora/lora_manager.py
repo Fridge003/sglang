@@ -86,7 +86,6 @@ class LoRAManager:
         self._experts_shared_outer_override: Optional[bool] = (
             server_args.experts_shared_outer_loras
         )
-        self.lora_use_virtual_experts: bool = server_args.lora_use_virtual_experts
         self.lora_strict_loading: bool = getattr(
             server_args, "lora_strict_loading", False
         )
@@ -764,6 +763,7 @@ class LoRAManager:
                     lora_module = self.set_lora_module(module_name, module)
                     self.embed_tokens_module = lora_module
                     continue
+
             # Handle lm_head
             if "lm_head" in module_name and "lm_head" in self.target_modules:
                 if isinstance(module, ParallelLMHead) and not isinstance(
@@ -808,5 +808,4 @@ class LoRAManager:
                 layer_id = get_layer_id(module_name)
                 lora_module = self.set_lora_module(module_name, module)
                 lora_module.experts_shared_outer_loras = self.experts_shared_outer_loras
-                lora_module.lora_use_virtual_experts = self.lora_use_virtual_experts
                 self.lora_modules[layer_id][module_name] = lora_module
