@@ -263,14 +263,14 @@ def write_summary(changes, summary_file):
             f"({len(significant)} of {len(changes)} updates)"
         )
         lines.append("")
-        lines.append("| File | Suite | Backend | Old (s) | New (s) | Δ |")
-        lines.append("| --- | --- | --- | ---: | ---: | ---: |")
-        for rel_path, suite, backend, old_val, new_val in significant:
+        lines.append("| File | Suite | Old (s) | New (s) | Δ |")
+        lines.append("| --- | --- | ---: | ---: | ---: |")
+        for rel_path, suite, _backend, old_val, new_val in significant:
             delta = new_val - old_val
             sign = "+" if delta > 0 else ""
             pct = round(delta / old_val * 100)
             lines.append(
-                f"| `{rel_path}` | `{suite}` | {backend} | "
+                f"| `{Path(rel_path).name}` | `{suite}` | "
                 f"{old_val} | {new_val} | {sign}{delta} ({sign}{pct}%) |"
             )
     else:
