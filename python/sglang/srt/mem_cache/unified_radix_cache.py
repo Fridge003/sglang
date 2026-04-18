@@ -840,6 +840,8 @@ class UnifiedRadixCache(BasePrefixCache):
             self._inc_hit_count(target_node, params.chunked)
         return result
 
+    # ---- Evict Helpers ----
+
     def _cascade_evict(
         self,
         node: UnifiedTreeNode,
@@ -854,18 +856,18 @@ class UnifiedRadixCache(BasePrefixCache):
         for comp in self._components_tuple:
             if comp.eviction_priority(is_leaf) <= trigger_priority:
                 if comp is not trigger and comp.node_has_component_data(node, target):
-                    if target is EvictLayer.DEVICE:
-                        assert node.component_data[comp.component_type].lock_ref == 0
-                    else:
-                        assert (
-                            node.component_data[comp.component_type].host_lock_ref == 0
-                        )
+                    cd = node.component_data[comp.component_type]
+                    if EvictLayer.DEVICE in target:
+                        assert cd.lock_ref == 0
+                    if EvictLayer.HOST in target:
+                        assert cd.host_lock_ref == 0
                     self._evict_component_and_detach_lru(
                         node, comp, target=target, tracker=tracker
                     )
 
-        # Tombstone trigger's device value after cascade so that SWA can
-        # still read Full.value during its free_swa call in the loop above.
+        # Now that all components (including SWA which depends on Full.value)
+        # have been freed, we can safely tombstone Full.value.
+        # This is deferred from evict_component because free_swa needs it.
         if (
             target is EvictLayer.DEVICE
             and trigger.component_type == BASE_COMPONENT_TYPE
@@ -888,10 +890,10 @@ class UnifiedRadixCache(BasePrefixCache):
     ) -> tuple[int, int]:
         device_freed, host_freed = comp.evict_component(node, target=target)
         if tracker is not None:
-            if target is EvictLayer.HOST:
-                tracker[comp.component_type] += host_freed
-            elif target is EvictLayer.DEVICE:
+            if EvictLayer.DEVICE in target:
                 tracker[comp.component_type] += device_freed
+            elif EvictLayer.HOST in target:
+                tracker[comp.component_type] += host_freed
 
         # Detach from the appropriate LRU list(s)
         ct = comp.component_type
@@ -974,15 +976,15 @@ class UnifiedRadixCache(BasePrefixCache):
                     continue
                 lru_op(lru, node)
 
-    # ---- HiCache: Evict Helpers ----
     def evict_host(
         self, num_tokens: int, component_type: ComponentType = BASE_COMPONENT_TYPE
-    ) -> None:
+    ) -> int:
         """Evict host resources for a specific component to free host pool space."""
         tracker: dict[ComponentType, int] = {ct: 0 for ct in self.tree_components}
         comp = self.components.get(component_type)
         if comp is not None:
             comp.drive_host_eviction(num_tokens, tracker)
+        return tracker[component_type]
 
     def _is_device_leaf(self, node: UnifiedTreeNode) -> bool:
         """D-leaf: Full device value present, no device child, unlocked, not root.
@@ -1034,17 +1036,16 @@ class UnifiedRadixCache(BasePrefixCache):
     ) -> None:
         """GPU→CPU demotion: release all device resources, node stays in tree."""
         assert not node.evicted and node.backuped
-        for comp in self._components_tuple:
-            if comp.node_has_component_data(node):
-                self._evict_component_and_detach_lru(
-                    node, comp, target=EvictLayer.DEVICE, tracker=tracker
-                )
+        trigger = self.components[BASE_COMPONENT_TYPE]
+        self._evict_component_and_detach_lru(
+            node, trigger, target=EvictLayer.DEVICE, tracker=tracker
+        )
+        self._cascade_evict(node, trigger, tracker)
 
         # after device eviction, insert aux components into host LRU.
         self._for_each_component_lru(
             node, UnifiedLRUList.insert_mru, target=EvictLayer.HOST, skip_existing=True
         )
-        self._update_evictable_leaf_sets(node)
         self._update_evictable_leaf_sets(node.parent)
 
     def _evict_device_leaf(
@@ -1090,9 +1091,10 @@ class UnifiedRadixCache(BasePrefixCache):
         assert self._is_host_leaf(node), f"node {node.id} is not an H-leaf"
 
         for comp in self._components_tuple:
-            self._evict_component_and_detach_lru(
-                node, comp, target=EvictLayer.ALL, tracker=tracker
+            _, hf = self._evict_component_and_detach_lru(
+                node, comp, target=EvictLayer.ALL, tracker=None
             )
+            tracker[comp.component_type] += hf
         self.evictable_host_leaves.discard(node)
         self._remove_leaf_from_parent(node)
         self._iteratively_delete_tombstone_leaf(node, tracker)
@@ -1124,7 +1126,10 @@ class UnifiedRadixCache(BasePrefixCache):
         kv_tokens = len(device_value)
         host_avail = self.cache_controller.mem_pool_host.available_size()
         if host_avail < kv_tokens:
-            self.evict_host(kv_tokens - host_avail)
+            needed = kv_tokens - host_avail
+            evicted = self.evict_host(needed)
+            if evicted < needed:
+                return 0
 
         aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
         host_indices = self.cache_controller.write(
@@ -1183,7 +1188,11 @@ class UnifiedRadixCache(BasePrefixCache):
 
         avail = self.token_to_kv_pool_allocator.available_size()
         if avail < kv_tokens:
-            self.evict(EvictParams(num_tokens=kv_tokens - avail))
+            needed = kv_tokens - avail
+            result = self.evict(EvictParams(num_tokens=needed))
+            if result.num_tokens_evicted < needed:
+                self.dec_lock_ref(ancestor_node)
+                return None
 
         # Build aux transfers, keyed per component
         comp_xfers: dict[ComponentType, list] = {}

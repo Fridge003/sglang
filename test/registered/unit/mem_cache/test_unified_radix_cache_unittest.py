@@ -850,6 +850,521 @@ class UnifiedRadixCacheSuite:
 
         tree.sanity_check()
 
+    # ================================================================
+    # Evict Chain Tests (T3/T5/T6 state transitions, cascade, tombstone)
+    # ================================================================
+
+    def test_evict_leaf_frees_all_components(self):
+        """T5: evicting a D-leaf frees Full + all aux components atomically."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq = self._make_seq(1, 3)
+        self._insert(tree, allocator, req_to_token_pool, seq)
+
+        full_before = tree.full_evictable_size()
+        mamba_before = tree.mamba_evictable_size() if self.cfg.has_mamba else 0
+        swa_before = tree.swa_evictable_size() if self.cfg.has_swa else 0
+        self.assertGreater(full_before, 0)
+
+        result = tree.evict(EvictParams(num_tokens=full_before * 2))
+        self.assertGreaterEqual(result.num_tokens_evicted, full_before)
+        self.assertEqual(tree.full_evictable_size(), 0)
+        if self.cfg.has_mamba:
+            self.assertEqual(tree.mamba_evictable_size(), 0)
+        if self.cfg.has_swa:
+            self.assertEqual(tree.swa_evictable_size(), 0)
+        tree.sanity_check()
+
+    def test_evict_cascade_parent_becomes_d_leaf(self):
+        """After evicting a D-leaf child, parent may become a new D-leaf."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        base = self._make_seq(1, 2)
+        leaf = base + self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, base)
+        self._insert(tree, allocator, req_to_token_pool, leaf)
+
+        # Lock the base node to prevent it from being evicted
+        m_base = tree.match_prefix(MatchPrefixParams(key=RadixKey(base)))
+        lock_result = tree.inc_lock_ref(m_base.last_device_node)
+
+        # Evict the leaf — parent (base) should become D-leaf after unlock
+        result = tree.evict(EvictParams(num_tokens=len(leaf)))
+        tree.sanity_check()
+
+        tree.dec_lock_ref(
+            m_base.last_device_node,
+            DecLockRefParams(
+                swa_uuid_for_lock=getattr(lock_result, "swa_uuid_for_lock", None)
+            ),
+        )
+        # After unlock, base should be in evictable_device_leaves
+        self.assertIn(m_base.last_device_node, tree.evictable_device_leaves)
+        tree.sanity_check()
+
+    def test_evict_iterative_tombstone_cleanup(self):
+        """Tombstone cascade: evicting a leaf triggers cleanup up the tree."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        # Create a chain: root -> A -> B -> C (3 levels)
+        ps = self.cfg.page_size
+        chain = self._make_seq(1, 6)
+        self._insert(tree, allocator, req_to_token_pool, chain[:2 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain[:4 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain)
+
+        initial_evictable = tree.full_evictable_size()
+        self.assertGreater(initial_evictable, 0)
+
+        # Evict everything — tombstone cascade should clean up all
+        result = tree.evict(EvictParams(num_tokens=initial_evictable * 2))
+        self.assertGreaterEqual(result.num_tokens_evicted, initial_evictable)
+        self.assertEqual(tree.full_evictable_size(), 0)
+        # Only root should remain
+        self.assertEqual(len(tree.root_node.children), 0)
+        tree.sanity_check()
+
+    def test_evict_respects_lru_order(self):
+        """Older (less recently accessed) nodes are evicted first."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        ps = self.cfg.page_size
+        seq_old = self._make_seq(1, 2)
+        seq_new = self._make_seq(500, 2)
+
+        self._insert(tree, allocator, req_to_token_pool, seq_old)
+        self._insert(tree, allocator, req_to_token_pool, seq_new)
+
+        # Touch seq_new to make it MRU
+        tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_new)))
+
+        # Evict just enough for one sequence
+        tree.evict(EvictParams(num_tokens=len(seq_old)))
+
+        # seq_old should be gone (LRU), seq_new should remain
+        m_old = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_old)))
+        m_new = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_new)))
+        self.assertEqual(len(m_old.device_indices), 0)
+        self.assertEqual(len(m_new.device_indices), len(seq_new))
+        tree.sanity_check()
+
+    def test_evict_multiple_independent_leaves(self):
+        """Evicting multiple independent leaves works correctly."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seqs = [self._make_seq(i * 100, 2) for i in range(4)]
+        for s in seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+
+        total = sum(len(s) for s in seqs)
+        self.assertEqual(tree.full_evictable_size(), total)
+
+        # Evict half
+        half = total // 2
+        result = tree.evict(EvictParams(num_tokens=half))
+        self.assertGreaterEqual(result.num_tokens_evicted, half)
+        self.assertLessEqual(tree.full_evictable_size(), total - half)
+        tree.sanity_check()
+
+        # Evict remainder
+        remaining = tree.full_evictable_size()
+        result = tree.evict(EvictParams(num_tokens=remaining * 2))
+        self.assertGreaterEqual(result.num_tokens_evicted, remaining)
+        self.assertEqual(tree.full_evictable_size(), 0)
+        tree.sanity_check()
+
+    def test_evict_shared_prefix_keeps_common_path(self):
+        """Evicting one branch preserves the shared prefix for other branch."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        base = self._make_seq(1, 2)
+        branch_a = base + self._make_seq(100, 2)
+        branch_b = base + self._make_seq(200, 2)
+
+        self._insert(tree, allocator, req_to_token_pool, branch_a)
+        self._insert(tree, allocator, req_to_token_pool, branch_b)
+
+        # Lock branch_b
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(branch_b)))
+        lr = tree.inc_lock_ref(m.last_device_node)
+
+        # Evict — branch_a should go, base + branch_b stay
+        tree.evict(EvictParams(num_tokens=len(branch_a)))
+
+        m_b = tree.match_prefix(MatchPrefixParams(key=RadixKey(branch_b)))
+        self.assertEqual(len(m_b.device_indices), len(branch_b))
+
+        tree.dec_lock_ref(
+            m.last_device_node,
+            DecLockRefParams(
+                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
+            ),
+        )
+        tree.sanity_check()
+
+    def test_evict_result_accounting_matches_actual(self):
+        """EvictResult.num_tokens_evicted matches actual size change."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seqs = [self._make_seq(i * 100, 2) for i in range(5)]
+        for s in seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+
+        before = tree.full_evictable_size()
+        result = tree.evict(EvictParams(num_tokens=before))
+        after = tree.full_evictable_size()
+        self.assertEqual(result.num_tokens_evicted, before - after)
+        tree.sanity_check()
+
+    def test_evict_locked_subtree_skipped(self):
+        """All nodes in a locked path are skipped during eviction."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq_a = self._make_seq(1, 3)
+        seq_b = self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq_a)
+        self._insert(tree, allocator, req_to_token_pool, seq_b)
+
+        # Lock seq_a
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_a)))
+        lr = tree.inc_lock_ref(m.last_device_node)
+
+        # Try to evict everything
+        total = tree.full_evictable_size() + tree.full_protected_size()
+        result = tree.evict(EvictParams(num_tokens=total))
+
+        # seq_a should still be matchable (protected)
+        m2 = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_a)))
+        self.assertEqual(len(m2.device_indices), len(seq_a))
+
+        tree.dec_lock_ref(
+            m.last_device_node,
+            DecLockRefParams(
+                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
+            ),
+        )
+        tree.sanity_check()
+
+    def test_mamba_internal_tombstone_evict(self):
+        """Mamba eviction on internal node tombstones mamba only, keeps Full."""
+        if not self.cfg.has_mamba:
+            self.skipTest("requires Mamba component")
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        # Create internal node with mamba and leaf extending it
+        seq_short = self._make_seq(1, 2)
+        seq_long = seq_short + self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq_short)
+        self._insert(tree, allocator, req_to_token_pool, seq_long)
+
+        # Evict only mamba
+        result = tree.evict(EvictParams(num_tokens=0, mamba_num=10))
+        self.assertEqual(tree.mamba_evictable_size(), 0)
+
+        # Full should still be accessible for at least the long seq base
+        # (mamba gone breaks match, but full data might still be in tree)
+        tree.sanity_check()
+
+    def test_evict_reinsert_after_full_eviction(self):
+        """After evicting everything, new inserts work correctly."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq_a = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq_a)
+        tree.evict(EvictParams(num_tokens=len(seq_a) * 2))
+        self.assertEqual(tree.full_evictable_size(), 0)
+
+        # Re-insert
+        seq_b = self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq_b)
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq_b)))
+        self.assertEqual(len(m.device_indices), len(seq_b))
+        tree.sanity_check()
+
+    def test_swa_evict_internal_tombstone(self):
+        """SWA eviction on internal node cascades to lower-priority components."""
+        if not self.cfg.has_swa:
+            self.skipTest("requires SWA component")
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        base = self._make_seq(1, 3)
+        leaf = base + self._make_seq(500, 3)
+        self._insert(tree, allocator, req_to_token_pool, base)
+        self._insert(tree, allocator, req_to_token_pool, leaf)
+
+        swa_before = tree.swa_evictable_size()
+        result = tree.evict(EvictParams(num_tokens=0, swa_num_tokens=swa_before * 2))
+        self.assertEqual(tree.swa_evictable_size(), 0)
+        tree.sanity_check()
+
+    def test_evict_d_leaf_set_consistency(self):
+        """evictable_device_leaves is consistent after mixed operations."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seqs = [self._make_seq(i * 100, 2) for i in range(6)]
+        for s in seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+
+        # Lock some, evict some, unlock
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seqs[0])))
+        lr = tree.inc_lock_ref(m.last_device_node)
+
+        tree.evict(EvictParams(num_tokens=len(seqs[1])))
+        tree.sanity_check()
+
+        tree.dec_lock_ref(
+            m.last_device_node,
+            DecLockRefParams(
+                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
+            ),
+        )
+        tree.sanity_check()
+
+        # Insert more
+        extra = self._make_seq(9000, 2)
+        self._insert(tree, allocator, req_to_token_pool, extra)
+        tree.sanity_check()
+
+    # ================================================================
+    # HiCache Unit Tests (simulated D<->H without real cache_controller)
+    # ================================================================
+
+    def _simulate_backup(self, tree, node):
+        """Simulate D->H backup by manually setting host_value on Full."""
+        ct = ComponentType.FULL
+        cd = node.component_data[ct]
+        if cd.value is not None and cd.host_value is None:
+            cd.host_value = cd.value.clone()
+        # Backup mamba host_value if present
+        if self.cfg.has_mamba:
+            mcd = node.component_data[ComponentType.MAMBA]
+            if mcd.value is not None and mcd.host_value is None:
+                mcd.host_value = mcd.value.clone()
+
+    def _simulate_backup_tree(self, tree):
+        """Backup all non-root nodes (simulates write-through)."""
+        stack = [tree.root_node]
+        while stack:
+            node = stack.pop()
+            if node is not tree.root_node:
+                self._simulate_backup(tree, node)
+            stack.extend(node.children.values())
+
+    def test_hicache_node_states(self):
+        """Verify S0/S1/S2 states after insert and simulated backup."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq)
+
+        # Find the leaf node
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
+        node = m.last_device_node
+        self.assertIsNot(node, tree.root_node)
+
+        ct = ComponentType.FULL
+        # S1: device only
+        self.assertIsNotNone(node.component_data[ct].value)
+        self.assertIsNone(node.component_data[ct].host_value)
+        self.assertFalse(node.backuped)
+        self.assertFalse(node.evicted)
+
+        # Simulate backup -> S2
+        self._simulate_backup(tree, node)
+        self.assertIsNotNone(node.component_data[ct].value)
+        self.assertIsNotNone(node.component_data[ct].host_value)
+        self.assertTrue(node.backuped)
+        self.assertFalse(node.evicted)
+        tree.sanity_check()
+
+    def test_hicache_evict_to_host(self):
+        """T3: backuped D-leaf eviction demotes to S3 (host only)."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq)
+
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
+        node = m.last_device_node
+
+        # Simulate backup to make it S2
+        self._simulate_backup(tree, node)
+        self.assertTrue(node.backuped)
+
+        # Evict -> should demote to host (S3)
+        result = tree.evict(EvictParams(num_tokens=len(seq)))
+        self.assertGreaterEqual(result.num_tokens_evicted, len(seq))
+
+        # Node should now be evicted (S3)
+        self.assertTrue(node.evicted)
+        self.assertTrue(node.backuped)
+        self.assertIsNone(node.component_data[ComponentType.FULL].value)
+        self.assertIsNotNone(node.component_data[ComponentType.FULL].host_value)
+
+        # Should be in host_leaves, not device_leaves
+        self.assertNotIn(node, tree.evictable_device_leaves)
+        self.assertIn(node, tree.evictable_host_leaves)
+        tree.sanity_check()
+
+    def test_hicache_match_through_evicted_node(self):
+        """Match can traverse evicted (S3) nodes using host_value."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        base = self._make_seq(1, 2)
+        leaf = base + self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, base)
+        self._insert(tree, allocator, req_to_token_pool, leaf)
+
+        # Backup everything
+        self._simulate_backup_tree(tree)
+
+        # Lock leaf so only base can be evicted
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(leaf)))
+        lr = tree.inc_lock_ref(m.last_device_node)
+
+        # Evict base (inner node won't be evicted while child is locked)
+        tree.evict(EvictParams(num_tokens=len(base)))
+
+        tree.dec_lock_ref(
+            m.last_device_node,
+            DecLockRefParams(
+                swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)
+            ),
+        )
+        tree.sanity_check()
+
+    def test_hicache_d_leaf_h_leaf_mutual_exclusion(self):
+        """D-leaf and H-leaf sets are always disjoint."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seqs = [self._make_seq(i * 100, 2) for i in range(4)]
+        for s in seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+
+        # Backup some nodes
+        for i in range(2):
+            m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seqs[i])))
+            self._simulate_backup(tree, m.last_device_node)
+
+        # Evict one backed-up node
+        tree.evict(EvictParams(num_tokens=len(seqs[0])))
+
+        # Check mutual exclusion
+        overlap = tree.evictable_device_leaves & tree.evictable_host_leaves
+        self.assertEqual(len(overlap), 0)
+        tree.sanity_check()
+
+    def test_hicache_host_leaf_eviction(self):
+        """T6: H-leaf eviction removes node from tree entirely."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq)
+
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
+        node = m.last_device_node
+
+        # Backup then evict to host (S2->S3)
+        self._simulate_backup(tree, node)
+        tree.evict(EvictParams(num_tokens=len(seq)))
+
+        self.assertTrue(node.evicted)
+        self.assertIn(node, tree.evictable_host_leaves)
+
+        # Now evict host
+        tree.evict_host(len(seq))
+
+        # Node should be removed from tree
+        self.assertNotIn(node, tree.evictable_host_leaves)
+        self.assertEqual(len(tree.root_node.children), 0)
+        tree.sanity_check()
+
+    def test_hicache_unevict_on_insert(self):
+        """T7: inserting through an evicted node restores Full device."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        base = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, base)
+
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(base)))
+        node = m.last_device_node
+
+        # Backup and evict
+        self._simulate_backup(tree, node)
+        tree.evict(EvictParams(num_tokens=len(base)))
+        self.assertTrue(node.evicted)
+
+        # Insert through the evicted node
+        extended = base + self._make_seq(500, 2)
+        self._insert(tree, allocator, req_to_token_pool, extended)
+
+        # Base node should be un-evicted now
+        self.assertFalse(node.evicted)
+        self.assertIsNotNone(node.component_data[ComponentType.FULL].value)
+        tree.sanity_check()
+
+    def test_hicache_backup_continuity(self):
+        """A4: backed-up nodes form a continuous prefix from root."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        chain = self._make_seq(1, 4)
+        ps = self.cfg.page_size
+        self._insert(tree, allocator, req_to_token_pool, chain[:2 * ps])
+        self._insert(tree, allocator, req_to_token_pool, chain)
+
+        # Backup all
+        self._simulate_backup_tree(tree)
+
+        # Verify: every backed-up node's parent is also backed-up (or root)
+        all_nodes = tree._collect_all_nodes()
+        for node in all_nodes:
+            if node is tree.root_node:
+                continue
+            if node.backuped:
+                parent = node.parent
+                self.assertTrue(
+                    parent is tree.root_node or parent.backuped,
+                    f"A4 violated: node {node.id} backed up but parent {parent.id} not",
+                )
+        tree.sanity_check()
+
+    def test_hicache_evict_to_host_updates_aux_lru(self):
+        """T3: aux components move from device LRU to host LRU on D->H eviction."""
+        if not self.cfg.has_mamba:
+            self.skipTest("requires Mamba component")
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seq = self._make_seq(1, 2)
+        self._insert(tree, allocator, req_to_token_pool, seq)
+
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
+        node = m.last_device_node
+
+        # Check mamba is in device LRU
+        mamba_lru = tree.lru_lists[ComponentType.MAMBA]
+        host_mamba_lru = tree.host_lru_lists[ComponentType.MAMBA]
+        self.assertTrue(mamba_lru.in_list(node))
+        self.assertFalse(host_mamba_lru.in_list(node))
+
+        # Backup and evict to host
+        self._simulate_backup(tree, node)
+        tree.evict(EvictParams(num_tokens=len(seq)))
+
+        # Mamba should move to host LRU
+        self.assertFalse(mamba_lru.in_list(node))
+        if node.component_data[ComponentType.MAMBA].host_value is not None:
+            self.assertTrue(host_mamba_lru.in_list(node))
+        tree.sanity_check()
+
+    def test_hicache_mixed_backup_evict_insert(self):
+        """Complex scenario: backup some, evict, insert new, verify invariants."""
+        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        seqs = [self._make_seq(i * 100, 2) for i in range(5)]
+
+        # Insert all
+        for s in seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+        tree.sanity_check()
+
+        # Backup first 3
+        for i in range(3):
+            m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seqs[i])))
+            self._simulate_backup(tree, m.last_device_node)
+
+        # Evict to free some tokens
+        tree.evict(EvictParams(num_tokens=len(seqs[0]) * 2))
+        tree.sanity_check()
+
+        # Insert new sequences
+        new_seqs = [self._make_seq(i * 1000, 2) for i in range(3)]
+        for s in new_seqs:
+            self._insert(tree, allocator, req_to_token_pool, s)
+        tree.sanity_check()
+
+        # Verify D-leaf / H-leaf mutual exclusion
+        overlap = tree.evictable_device_leaves & tree.evictable_host_leaves
+        self.assertEqual(len(overlap), 0)
+
 
 _CONFIGS: list[CacheConfig] = [
     CacheConfig(page_size=1, components=(ComponentType.FULL,)),

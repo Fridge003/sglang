@@ -101,10 +101,9 @@ class FullComponent(TreeComponent):
             self._free_full(cd.value)
             freed = len(cd.value)
             self.cache.component_evictable_size_[self.component_type] -= freed
-            # TODO: Cannot release value = None here; otherwise, the SWAComponent won't be properly released.
-            # FULL and SWA need to be fully decoupled in the future
+            # NOTE: cd.value = None is deferred to _cascade_evict (Full as trigger)
+            # because SWA's free_swa still needs to read Full.value.
             # cd.value = None
-            self.cache.evictable_device_leaves.discard(node)
 
         # Host layer
         if EvictLayer.HOST in target and cd.host_value is not None:
