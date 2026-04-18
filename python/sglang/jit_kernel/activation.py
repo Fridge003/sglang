@@ -19,6 +19,7 @@ def _jit_silu_and_mul_module(dtype: torch.dtype) -> Module:
         *args,
         cuda_files=["elementwise/activation.cuh"],
         cuda_wrappers=[("silu_and_mul", f"SiluAndMulKernel<{args}>::run")],
+        extra_cuda_cflags=["--use_fast_math"],
     )
 
 
@@ -30,6 +31,7 @@ def _jit_gelu_and_mul_module(dtype: torch.dtype) -> Module:
         *args,
         cuda_files=["elementwise/activation.cuh"],
         cuda_wrappers=[("gelu_and_mul", f"GeluAndMulKernel<{args}>::run")],
+        extra_cuda_cflags=["--use_fast_math"],
     )
 
 
