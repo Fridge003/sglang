@@ -267,7 +267,7 @@ if [ -n "$OPTIONAL_DEPS" ]; then
     EXTRAS="dev,runai,tracing,${OPTIONAL_DEPS}"
 fi
 echo "Installing python extras: [${EXTRAS}]"
-source "${SCRIPT_DIR}/cache_nvidia_wheels.sh"
+# source "${SCRIPT_DIR}/cache_nvidia_wheels.sh"
 $PIP_CMD install -e "python[${EXTRAS}]" $PIP_INSTALL_SUFFIX
 
 mark_step_done "Install main package"
