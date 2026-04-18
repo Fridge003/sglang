@@ -28,61 +28,14 @@ set -euxo pipefail
 #   - PyTorch index URL (pytorch.org/whl/${CU_VERSION})
 #   - FlashInfer JIT cache index (flashinfer.ai/whl/${CU_VERSION})
 #   - nvrtc variant selection (cu12 vs cu13)
-#
-# Legacy path: hardcoded to cu129 (matches the current 12.9 toolkit images).
+
 CU_VERSION="cu130"
-NVCC_VER=""
 
 # Nvidia package versions we override (torch pins older versions).
 # Used both as pip constraints during install and for post-install verification.
 NVIDIA_CUDNN_VERSION="9.16.0.29"
 NVIDIA_NVSHMEM_VERSION="3.4.5"
 OPTIONAL_DEPS="${1:-}"
-
-# Auto-detect CU_VERSION from the container's CUDA toolkit.
-# nvcc is authoritative: nvidia-smi reflects the host driver, which on some
-# runners disagrees with the actual container toolkit version.
-if command -v nvcc >/dev/null 2>&1; then
-    NVCC_VER=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
-elif [ -f /usr/local/cuda/version.json ]; then
-    NVCC_VER=$(python3 -c "import json; print(json.load(open('/usr/local/cuda/version.json'))['cuda']['version'][:4])")
-else
-    echo "FATAL: Cannot detect CUDA toolkit version in container (nvcc missing, version.json missing)"
-    exit 1
-fi
-CU_VERSION="cu$(echo "$NVCC_VER" | tr -d '.')"
-
-# Host driver must be >= container toolkit. Skip silently? No — log the
-# skip path so "check passed" vs "check skipped" is greppable in CI logs.
-if command -v nvidia-smi >/dev/null 2>&1; then
-    DRIVER_CUDA=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)
-    if [ -n "$DRIVER_CUDA" ]; then
-        if [ "$NVCC_VER" = "$DRIVER_CUDA" ] || \
-            [ "$(printf '%s\n' "$NVCC_VER" "$DRIVER_CUDA" | sort -V | tail -1)" = "$DRIVER_CUDA" ]; then
-            echo "Host driver CUDA ${DRIVER_CUDA} >= container toolkit ${NVCC_VER} OK"
-        else
-            echo "FATAL: Host driver supports CUDA ${DRIVER_CUDA} but container has toolkit ${NVCC_VER}"
-            echo "Host driver must be >= container toolkit version"
-            exit 1
-        fi
-    else
-        echo "WARNING: nvidia-smi present but could not parse 'CUDA Version:' line; skipping host driver >= toolkit check"
-    fi
-else
-    echo "WARNING: nvidia-smi not found; skipping host driver >= toolkit check (expected on CPU-only runners only)"
-fi
-
-# Allowlist guard: this is the set of CUDA toolkit versions this CI has
-# been validated against. Gates both the PyTorch index URL and FlashInfer
-# wheel availability. Update when adding a new toolkit.
-VALID_CU_VERSIONS="cu126 cu128 cu129 cu130"
-if ! echo "$VALID_CU_VERSIONS" | grep -qw "$CU_VERSION"; then
-    echo "FATAL: Auto-detected CU_VERSION=${CU_VERSION} is not in the supported set: ${VALID_CU_VERSIONS}"
-    echo "This likely means the container has an unexpected CUDA toolkit version."
-    echo "Either update the supported set or check the container image."
-    exit 1
-fi
-echo "CU_VERSION=${CU_VERSION} (auto-detected from nvcc=${NVCC_VER})"
 
 # uv must be available on system Python to create the venv. Install if missing.
 python3 -m pip install --upgrade pip
@@ -400,12 +353,8 @@ mark_step_done "Download flashinfer artifacts"
 # through to the wrong branch. Prefer NVCC_VER (set in the venv path); otherwise
 # parse the first two digits of CU_VERSION (pytorch convention is cu{major}{minor}
 # with a single-digit minor, e.g. cu126, cu129, cu130).
-if [ -n "$NVCC_VER" ]; then
-    CU_MAJOR="${NVCC_VER%%.*}"
-else
-    CU_STRIP="${CU_VERSION#cu}"
-    CU_MAJOR="${CU_STRIP:0:2}"
-fi
+CU_STRIP="${CU_VERSION#cu}"
+CU_MAJOR="${CU_STRIP:0:2}"
 if [ "$CU_MAJOR" = "13" ]; then
     NVRTC_SPEC="nvidia-cuda-nvrtc"
 else
