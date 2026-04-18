@@ -92,7 +92,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [
-  { index = "pypi", marker = "platform_machine == 'x86_64'"},
+  { index = "torch-cu130", marker = "platform_machine == 'x86_64'"},
   { index = "torch-cu130", marker = "platform_machine == 'aarch64'"},
 ]
 
