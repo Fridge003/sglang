@@ -2,7 +2,7 @@
 """Update est_time values in CI test files based on actual execution times.
 
 Fetches logs from recent scheduled PR Test workflow runs on main,
-parses per-file elapsed times from successful jobs, computes the 75th
+parses per-file elapsed times from successful jobs, computes the 90th
 percentile, and updates the est_time literals in test registration calls.
 
 Usage:
@@ -29,8 +29,8 @@ LOG_PATTERN = re.compile(
 
 WORKFLOW_NAME = "PR Test"
 MIN_DATA_POINTS = 3
-TARGET_DATA_POINTS = 12
-MAX_RUNS = 20
+TARGET_DATA_POINTS = 15
+MAX_RUNS = 25
 
 # A change is "significant" if |delta| >= this many seconds AND the relative
 # change is at least SIGNIFICANT_REL_DELTA. Dual threshold filters out both
@@ -169,27 +169,27 @@ def collect_timings(repo):
     return timings
 
 
-def compute_p75(timings):
-    """Compute 75th percentile of last TARGET_DATA_POINTS timings for each entry.
+def compute_p90(timings):
+    """Compute 90th percentile of last TARGET_DATA_POINTS timings for each entry.
 
-    Returns dict mapping (rel_path, suite, backend) -> p75 (int).
+    Returns dict mapping (rel_path, suite, backend) -> p90 (int).
     Only includes entries with >= MIN_DATA_POINTS data points.
     """
-    p75s = {}
+    p90s = {}
     for key, values in timings.items():
         recent = values[:TARGET_DATA_POINTS]
         if len(recent) < MIN_DATA_POINTS:
             continue
-        p75s[key] = round(statistics.quantiles(recent, n=4, method="inclusive")[2])
-    return p75s
+        p90s[key] = round(statistics.quantiles(recent, n=10, method="inclusive")[8])
+    return p90s
 
 
-def update_est_times(p75s, dry_run=False):
+def update_est_times(p90s, dry_run=False):
     """Update est_time values in source files.
 
     Each registration call is matched by both the function name and suite,
     so files with multiple registrations for different suites get the correct
-    per-suite p75.
+    per-suite p90.
 
     Returns (updated_count, skipped_count, changes) where changes is a list
     of (rel_path, suite, backend, old_val, new_val) for each modified entry.
@@ -198,10 +198,10 @@ def update_est_times(p75s, dry_run=False):
     skipped = 0
     changes = []
 
-    # Group p75s by file: {rel_path: [(suite, backend, p75), ...]}
+    # Group p90s by file: {rel_path: [(suite, backend, p90), ...]}
     by_file = defaultdict(list)
-    for (rel_path, suite, backend), p75 in p75s.items():
-        by_file[rel_path].append((suite, backend, p75))
+    for (rel_path, suite, backend), p90 in p90s.items():
+        by_file[rel_path].append((suite, backend, p90))
 
     for rel_path, entries in sorted(by_file.items()):
         filepath = REPO_ROOT / rel_path
@@ -213,7 +213,7 @@ def update_est_times(p75s, dry_run=False):
         content = filepath.read_text()
         new_content = content
 
-        for suite, backend, p75 in entries:
+        for suite, backend, p90 in entries:
             # Match registration calls with this specific backend and suite.
             # Handles: register_cuda_ci(est_time=300, suite="stage-c-test-4-gpu-h100")
             pattern = re.compile(
@@ -225,14 +225,14 @@ def update_est_times(p75s, dry_run=False):
                 continue
 
             old_val = int(match.group(2))
-            if old_val == p75:
+            if old_val == p90:
                 continue
 
-            new_content = pattern.sub(rf"\g<1>{p75}\3", new_content)
-            changes.append((rel_path, suite, backend, old_val, p75))
+            new_content = pattern.sub(rf"\g<1>{p90}\3", new_content)
+            changes.append((rel_path, suite, backend, old_val, p90))
             print(
                 f"  {rel_path}: register_{backend}_ci "
-                f'suite="{suite}" est_time={old_val} -> {p75}'
+                f'suite="{suite}" est_time={old_val} -> {p90}'
             )
 
         if new_content != content:
@@ -307,12 +307,12 @@ def main():
     print("Collecting timings from CI logs...")
     timings = collect_timings(args.repo)
 
-    print("\nComputing 75th percentiles...")
-    p75s = compute_p75(timings)
-    print(f"Computed p75 for {len(p75s)} (file, suite, backend) entries")
+    print("\nComputing 90th percentiles...")
+    p90s = compute_p90(timings)
+    print(f"Computed p90 for {len(p90s)} (file, suite, backend) entries")
 
     print("\nUpdating est_time values...")
-    updated, skipped, changes = update_est_times(p75s, dry_run=args.dry_run)
+    updated, skipped, changes = update_est_times(p90s, dry_run=args.dry_run)
 
     action = "Would update" if args.dry_run else "Updated"
     print(f"\n{action} {updated} files, skipped {skipped} files")

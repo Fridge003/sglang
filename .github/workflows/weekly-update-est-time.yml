@@ -61,7 +61,7 @@ jobs:
           {
             echo "## Summary"
             echo
-            echo "Updates \`est_time\` values in CI test registration calls based on the 75th percentile of the last 12 successful executions from scheduled PR Test runs on main."
+            echo "Updates \`est_time\` values in CI test registration calls based on the 90th percentile of the last 15 successful executions from scheduled PR Test runs on main."
             echo
             echo "This keeps the LPT load-balancing algorithm accurate for partitioning tests across parallel CI jobs."
             echo
