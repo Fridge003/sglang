@@ -361,6 +361,23 @@ else
     fi
 fi
 
+# If CUDA major is 13, reinstall sgl-kernel from cu130 index.
+# PyPI sgl-kernel is compiled for cu12 (links libcublas.so.12, libnvrtc.so.12).
+# On CUDA 13.x systems those libs don't exist — need the cu130 build.
+if [ -n "${NVCC_VER:-}" ]; then
+    _KERNEL_CU_MAJOR="${NVCC_VER%%.*}"
+elif [ -n "${CU_VERSION:-}" ]; then
+    _KERNEL_CU_MAJOR="${CU_VERSION:2:2}"
+else
+    _KERNEL_CU_MAJOR="12"
+fi
+if [ "$_KERNEL_CU_MAJOR" = "13" ]; then
+    echo "CUDA 13.x detected — reinstalling sgl-kernel from cu130 index..."
+    $PIP_CMD install sglang-kernel==${SGL_KERNEL_VERSION_FROM_SRT} \
+        --index-url https://docs.sglang.ai/whl/cu130/ --force-reinstall $PIP_INSTALL_SUFFIX || \
+        echo "Warning: cu130 sgl-kernel not available, keeping cu12 version"
+fi
+
 mark_step_done "Install sglang-kernel"
 
 # ------------------------------------------------------------------------------
