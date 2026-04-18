@@ -39,91 +39,81 @@ NVIDIA_CUDNN_VERSION="9.16.0.29"
 NVIDIA_NVSHMEM_VERSION="3.4.5"
 OPTIONAL_DEPS="${1:-}"
 
-# ------------------------------------------------------------------------------
-# Optional venv isolation
-# ------------------------------------------------------------------------------
-# SGLANG_CI_USE_VENV=1 creates a fresh uv venv per job and installs everything
-# into it instead of system Python. Motivation: stale CUDA .so files accumulate
-# in the runner's writable layer across toolkit bumps (e.g. cu129→cu130→cu129
-# revert) and shadow the freshly-installed ones at dlopen time. A fresh venv
-# per job gives deterministic dependencies regardless of runner history.
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
-    # Auto-detect CU_VERSION from the container's CUDA toolkit.
-    # nvcc is authoritative: nvidia-smi reflects the host driver, which on some
-    # runners disagrees with the actual container toolkit version.
-    if command -v nvcc >/dev/null 2>&1; then
-        NVCC_VER=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
-    elif [ -f /usr/local/cuda/version.json ]; then
-        NVCC_VER=$(python3 -c "import json; print(json.load(open('/usr/local/cuda/version.json'))['cuda']['version'][:4])")
-    else
-        echo "FATAL: SGLANG_CI_USE_VENV=1 but cannot detect CUDA toolkit version in container (nvcc missing, version.json missing)"
-        exit 1
-    fi
-    CU_VERSION="cu$(echo "$NVCC_VER" | tr -d '.')"
+# Auto-detect CU_VERSION from the container's CUDA toolkit.
+# nvcc is authoritative: nvidia-smi reflects the host driver, which on some
+# runners disagrees with the actual container toolkit version.
+if command -v nvcc >/dev/null 2>&1; then
+    NVCC_VER=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+')
+elif [ -f /usr/local/cuda/version.json ]; then
+    NVCC_VER=$(python3 -c "import json; print(json.load(open('/usr/local/cuda/version.json'))['cuda']['version'][:4])")
+else
+    echo "FATAL: Cannot detect CUDA toolkit version in container (nvcc missing, version.json missing)"
+    exit 1
+fi
+CU_VERSION="cu$(echo "$NVCC_VER" | tr -d '.')"
 
-    # Host driver must be >= container toolkit. Skip silently? No — log the
-    # skip path so "check passed" vs "check skipped" is greppable in CI logs.
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        DRIVER_CUDA=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)
-        if [ -n "$DRIVER_CUDA" ]; then
-            if [ "$NVCC_VER" = "$DRIVER_CUDA" ] || \
-               [ "$(printf '%s\n' "$NVCC_VER" "$DRIVER_CUDA" | sort -V | tail -1)" = "$DRIVER_CUDA" ]; then
-                echo "Host driver CUDA ${DRIVER_CUDA} >= container toolkit ${NVCC_VER} OK"
-            else
-                echo "FATAL: Host driver supports CUDA ${DRIVER_CUDA} but container has toolkit ${NVCC_VER}"
-                echo "Host driver must be >= container toolkit version"
-                exit 1
-            fi
+# Host driver must be >= container toolkit. Skip silently? No — log the
+# skip path so "check passed" vs "check skipped" is greppable in CI logs.
+if command -v nvidia-smi >/dev/null 2>&1; then
+    DRIVER_CUDA=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' || true)
+    if [ -n "$DRIVER_CUDA" ]; then
+        if [ "$NVCC_VER" = "$DRIVER_CUDA" ] || \
+            [ "$(printf '%s\n' "$NVCC_VER" "$DRIVER_CUDA" | sort -V | tail -1)" = "$DRIVER_CUDA" ]; then
+            echo "Host driver CUDA ${DRIVER_CUDA} >= container toolkit ${NVCC_VER} OK"
         else
-            echo "WARNING: nvidia-smi present but could not parse 'CUDA Version:' line; skipping host driver >= toolkit check"
+            echo "FATAL: Host driver supports CUDA ${DRIVER_CUDA} but container has toolkit ${NVCC_VER}"
+            echo "Host driver must be >= container toolkit version"
+            exit 1
         fi
     else
-        echo "WARNING: nvidia-smi not found; skipping host driver >= toolkit check (expected on CPU-only runners only)"
+        echo "WARNING: nvidia-smi present but could not parse 'CUDA Version:' line; skipping host driver >= toolkit check"
     fi
+else
+    echo "WARNING: nvidia-smi not found; skipping host driver >= toolkit check (expected on CPU-only runners only)"
+fi
 
-    # Allowlist guard: this is the set of CUDA toolkit versions this CI has
-    # been validated against. Gates both the PyTorch index URL and FlashInfer
-    # wheel availability. Update when adding a new toolkit.
-    VALID_CU_VERSIONS="cu126 cu128 cu129 cu130"
-    if ! echo "$VALID_CU_VERSIONS" | grep -qw "$CU_VERSION"; then
-        echo "FATAL: Auto-detected CU_VERSION=${CU_VERSION} is not in the supported set: ${VALID_CU_VERSIONS}"
-        echo "This likely means the container has an unexpected CUDA toolkit version."
-        echo "Either update the supported set or check the container image."
-        exit 1
-    fi
-    echo "CU_VERSION=${CU_VERSION} (auto-detected from nvcc=${NVCC_VER})"
+# Allowlist guard: this is the set of CUDA toolkit versions this CI has
+# been validated against. Gates both the PyTorch index URL and FlashInfer
+# wheel availability. Update when adding a new toolkit.
+VALID_CU_VERSIONS="cu126 cu128 cu129 cu130"
+if ! echo "$VALID_CU_VERSIONS" | grep -qw "$CU_VERSION"; then
+    echo "FATAL: Auto-detected CU_VERSION=${CU_VERSION} is not in the supported set: ${VALID_CU_VERSIONS}"
+    echo "This likely means the container has an unexpected CUDA toolkit version."
+    echo "Either update the supported set or check the container image."
+    exit 1
+fi
+echo "CU_VERSION=${CU_VERSION} (auto-detected from nvcc=${NVCC_VER})"
 
-    # uv must be available on system Python to create the venv. Install if missing.
-    python3 -m pip install --upgrade pip
-    if ! command -v uv >/dev/null 2>&1; then
-        pip install uv
-    fi
+# uv must be available on system Python to create the venv. Install if missing.
+python3 -m pip install --upgrade pip
+if ! command -v uv >/dev/null 2>&1; then
+    pip install uv
+fi
 
-    # Per-job unique path. Include $$ (shell PID) so concurrent/back-to-back jobs
-    # on the same runner never target the same directory even if GITHUB_JOB
-    # doesn't differentiate matrix partitions.
-    UV_VENV="/tmp/sglang-ci-${GITHUB_RUN_ID:-norun}-${GITHUB_JOB:-nojob}-$$"
-    SYS_PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-    # --seed installs pip/setuptools into the venv so bare `pip` calls in
-    # cache_nvidia_wheels.sh and the human-eval setup resolve to the venv's
-    # pip (rather than silently falling back to system Python).
-    uv venv "$UV_VENV" --python "python${SYS_PYTHON_VER}" --seed
-    # shellcheck disable=SC1091
-    source "$UV_VENV/bin/activate"
-    # Assert activation actually took effect. A misconfigured activate script
-    # would otherwise leave us silently running against system Python.
-    [ "${VIRTUAL_ENV:-}" = "$UV_VENV" ] || { echo "FATAL: venv activation did not set VIRTUAL_ENV correctly"; exit 1; }
-    [ "$(command -v python3)" = "$UV_VENV/bin/python3" ] || { echo "FATAL: python3 still resolves outside venv (got $(command -v python3))"; exit 1; }
+# Per-job unique path. Include $$ (shell PID) so concurrent/back-to-back jobs
+# on the same runner never target the same directory even if GITHUB_JOB
+# doesn't differentiate matrix partitions.
+UV_VENV="/tmp/sglang-ci-${GITHUB_RUN_ID:-norun}-${GITHUB_JOB:-nojob}-$$"
+SYS_PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+# --seed installs pip/setuptools into the venv so bare `pip` calls in
+# cache_nvidia_wheels.sh and the human-eval setup resolve to the venv's
+# pip (rather than silently falling back to system Python).
+uv venv "$UV_VENV" --python "python${SYS_PYTHON_VER}" --seed
+# shellcheck disable=SC1091
+source "$UV_VENV/bin/activate"
+# Assert activation actually took effect. A misconfigured activate script
+# would otherwise leave us silently running against system Python.
+[ "${VIRTUAL_ENV:-}" = "$UV_VENV" ] || { echo "FATAL: venv activation did not set VIRTUAL_ENV correctly"; exit 1; }
+[ "$(command -v python3)" = "$UV_VENV/bin/python3" ] || { echo "FATAL: python3 still resolves outside venv (got $(command -v python3))"; exit 1; }
 
-    # Propagate to subsequent workflow steps. GITHUB_ENV/GITHUB_PATH only
-    # affect *later* steps, never the current one.
-    if [ -n "${GITHUB_ENV:-}" ]; then
-        echo "VIRTUAL_ENV=$UV_VENV" >> "$GITHUB_ENV"
-        echo "SGLANG_CI_VENV_PATH=$UV_VENV" >> "$GITHUB_ENV"
-    fi
-    if [ -n "${GITHUB_PATH:-}" ]; then
-        echo "$UV_VENV/bin" >> "$GITHUB_PATH"
-    fi
+# Propagate to subsequent workflow steps. GITHUB_ENV/GITHUB_PATH only
+# affect *later* steps, never the current one.
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "VIRTUAL_ENV=$UV_VENV" >> "$GITHUB_ENV"
+    echo "SGLANG_CI_VENV_PATH=$UV_VENV" >> "$GITHUB_ENV"
+fi
+if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$UV_VENV/bin" >> "$GITHUB_PATH"
 fi
 
 SECONDS=0
@@ -254,27 +244,13 @@ mark_step_done "Python package site hygiene & install protoc"
 # already upgraded system pip before `uv venv`).
 python3 -m pip install --upgrade pip
 
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
-    # uv is already installed on system Python (above) and the venv is active.
-    # Do NOT set UV_SYSTEM_PYTHON — that would redirect uv back to system Python.
-    PIP_CMD="uv pip"
-    PIP_INSTALL_SUFFIX="--index-strategy unsafe-best-match --prerelease allow"
-    PIP_UNINSTALL_CMD="uv pip uninstall"
-    PIP_UNINSTALL_SUFFIX=""
-elif [ "$USE_UV" = "0" ]; then
-    PIP_CMD="pip"
-    PIP_INSTALL_SUFFIX="--break-system-packages"
-    PIP_UNINSTALL_CMD="pip uninstall -y"
-    PIP_UNINSTALL_SUFFIX="--break-system-packages"
-else
-    pip install uv
-    export UV_SYSTEM_PYTHON=true
+# uv is already installed on system Python (above) and the venv is active.
+# Do NOT set UV_SYSTEM_PYTHON — that would redirect uv back to system Python.
+PIP_CMD="uv pip"
+PIP_INSTALL_SUFFIX="--index-strategy unsafe-best-match --prerelease allow"
+PIP_UNINSTALL_CMD="uv pip uninstall"
+PIP_UNINSTALL_SUFFIX=""
 
-    PIP_CMD="uv pip"
-    PIP_INSTALL_SUFFIX="--index-strategy unsafe-best-match --prerelease allow"
-    PIP_UNINSTALL_CMD="uv pip uninstall"
-    PIP_UNINSTALL_SUFFIX=""
-fi
 
 # Clean up existing installations
 $PIP_UNINSTALL_CMD sgl-kernel sglang-kernel sglang sgl-fa4 flash-attn-4 $PIP_UNINSTALL_SUFFIX || true
@@ -475,18 +451,6 @@ fi
 
 mark_step_done "Fix other dependencies"
 
-# Force reinstall nvidia-cutlass-dsl to ensure the .pth file exists.
-# The Docker image ships nvidia-cutlass-dsl-libs-base 4.3.5; upgrading to 4.4.2
-# can delete the .pth file without reliably recreating it (pip race condition).
-# The `|| true` suppression is for the legacy path where the image pre-installs
-# the package. In venv mode we start from an empty tree, so there's no race —
-# fail fast instead of hiding a real install error.
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
-    $PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --no-deps --force-reinstall $PIP_INSTALL_SUFFIX
-else
-    $PIP_CMD install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --no-deps --force-reinstall $PIP_INSTALL_SUFFIX || true
-fi
-
 # Download kernels from kernels community
 kernels download python || true
 kernels lock python || true
@@ -517,20 +481,19 @@ mark_step_done "Prepare runner"
 # under site-packages. In venv mode these are NOT on the default LD_LIBRARY_PATH,
 # so dlopen('libcublas.so.12') from torch would fail. Prepend them here.
 # $UV_VENV and $SYS_PYTHON_VER were set in the venv-bootstrap block near the top.
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
-    SITE_PACKAGES="$UV_VENV/lib/python${SYS_PYTHON_VER}/site-packages"
-    # Glob matches NVIDIA pip-package layout:
-    # site-packages/nvidia/<component>/lib/lib*.so. If NVIDIA restructures
-    # packaging, this may need updating.
-    NVIDIA_LIBS=$(find "$SITE_PACKAGES" -path "*/nvidia/*/lib" -type d 2>/dev/null | tr '\n' ':')
-    TORCH_LIB="$SITE_PACKAGES/torch/lib"
-    VENV_LD="${NVIDIA_LIBS}${TORCH_LIB}"
-    export LD_LIBRARY_PATH="${VENV_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    if [ -n "${GITHUB_ENV:-}" ]; then
-        echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-    fi
-    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+SITE_PACKAGES="$UV_VENV/lib/python${SYS_PYTHON_VER}/site-packages"
+# Glob matches NVIDIA pip-package layout:
+# site-packages/nvidia/<component>/lib/lib*.so. If NVIDIA restructures
+# packaging, this may need updating.
+NVIDIA_LIBS=$(find "$SITE_PACKAGES" -path "*/nvidia/*/lib" -type d 2>/dev/null | tr '\n' ':')
+TORCH_LIB="$SITE_PACKAGES/torch/lib"
+VENV_LD="${NVIDIA_LIBS}${TORCH_LIB}"
+export LD_LIBRARY_PATH="${VENV_LD}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
 fi
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
 
 # ------------------------------------------------------------------------------
 # Verify imports
