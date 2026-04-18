@@ -4,11 +4,22 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from sglang.jit_kernel.utils import cache_once, load_jit, make_cpp_args
+from sglang.jit_kernel.utils import (
+    cache_once,
+    is_hip_runtime,
+    load_jit,
+    make_cpp_args,
+)
 from sglang.srt.utils.custom_op import register_custom_op
 
 if TYPE_CHECKING:
     from tvm_ffi.module import Module
+
+
+def _fast_math_flags() -> list[str]:
+    # --use_fast_math is an nvcc-only flag; on ROCm hipcc (clang-based) it
+    # would error with "unknown argument".
+    return [] if is_hip_runtime() else ["--use_fast_math"]
 
 
 @cache_once
@@ -19,7 +30,7 @@ def _jit_silu_and_mul_module(dtype: torch.dtype) -> Module:
         *args,
         cuda_files=["elementwise/activation.cuh"],
         cuda_wrappers=[("silu_and_mul", f"SiluAndMulKernel<{args}>::run")],
-        extra_cuda_cflags=["--use_fast_math"],
+        extra_cuda_cflags=_fast_math_flags(),
     )
 
 
@@ -31,7 +42,7 @@ def _jit_gelu_and_mul_module(dtype: torch.dtype) -> Module:
         *args,
         cuda_files=["elementwise/activation.cuh"],
         cuda_wrappers=[("gelu_and_mul", f"GeluAndMulKernel<{args}>::run")],
-        extra_cuda_cflags=["--use_fast_math"],
+        extra_cuda_cflags=_fast_math_flags(),
     )
 
 
