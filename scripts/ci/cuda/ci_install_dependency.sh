@@ -545,22 +545,22 @@ venv = os.environ.get("VIRTUAL_ENV", "")
 assert venv, "VIRTUAL_ENV not set"
 import torch  # triggers dlopen of cublas/cudnn/cudart etc.
 with open(f"/proc/{os.getpid()}/maps") as f:
-maps = f.read()
+    maps = f.read()
 mismatches = []
 for soname in ("libcublas.so", "libcudart.so", "libcudnn.so"):
-lines = [ln for ln in maps.splitlines() if soname in ln]
-if not lines:
-    continue  # lib not loaded — acceptable, some configs don't touch cudnn at import
-paths = {ln.split()[-1] for ln in lines if ln.split()[-1].startswith("/")}
-outside = [p for p in paths if not p.startswith(venv)]
-if outside:
-    mismatches.append(f"{soname}: loaded from {outside} (expected under {venv})")
+    lines = [ln for ln in maps.splitlines() if soname in ln]
+    if not lines:
+        continue  # lib not loaded — acceptable, some configs don't touch cudnn at import
+    paths = {ln.split()[-1] for ln in lines if ln.split()[-1].startswith("/")}
+    outside = [p for p in paths if not p.startswith(venv)]
+    if outside:
+        mismatches.append(f"{soname}: loaded from {outside} (expected under {venv})")
 if mismatches:
-print("::warning::NVIDIA libs resolved outside the venv — possible stale .so shadowing:")
-for m in mismatches:
-    print(f"  {m}")
+    print("::warning::NVIDIA libs resolved outside the venv — possible stale .so shadowing:")
+    for m in mismatches:
+        print(f"  {m}")
 else:
-print("All loaded NVIDIA libs resolve under the venv")
+    print("All loaded NVIDIA libs resolve under the venv")
 PYEOF
 
 TORCH_CUDA_SO=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'))")
