@@ -131,7 +131,8 @@ if [ "$GRACE_BLACKWELL" = "1" ]; then
     if [ "$CUDA_VERSION" = "12.8" ]; then
         CHOSEN_TORCH_CUDA_ARCH_LIST='10.0'
     elif awk -v ver="$CUDA_VERSION" 'BEGIN {exit !(ver > 12.8)}'; then
-        CHOSEN_TORCH_CUDA_ARCH_LIST='10.0'
+        # CUDA > 12.8 supports sm_103 (Blackwell)
+        CHOSEN_TORCH_CUDA_ARCH_LIST='10.0;10.3'
     else
         echo "Unsupported CUDA version for Grace Blackwell: $CUDA_VERSION" && exit 1
     fi && \
