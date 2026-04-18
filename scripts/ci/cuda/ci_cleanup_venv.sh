@@ -5,18 +5,10 @@
 # destroyed even on job failure/cancel. Runner-level safety net: a cron or
 # startup task should also purge stale /tmp/sglang-ci-* directories to catch
 # cancelled or crashed jobs that never reached this cleanup.
-#
-# This step is safe on jobs that never ran the install: the SGLANG_CI_USE_VENV
-# guard short-circuits before any filesystem op.
 
 # Best-effort cleanup: never fail the job.
 set +e
 set -u
-
-if [ "${SGLANG_CI_USE_VENV:-0}" != "1" ]; then
-    echo "SGLANG_CI_USE_VENV not set, skipping venv cleanup (legacy path)"
-    exit 0
-fi
 
 # Prefer the path propagated via GITHUB_ENV. Fallback: glob for any venv from
 # this run+job (covers the case where install crashed before exporting the path).

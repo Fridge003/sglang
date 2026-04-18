@@ -15,8 +15,8 @@ source scripts/ci/cuda/ci_install_dependency.sh
 # In venv mode, PIP_CMD must be set by the sourced script. If it isn't, the
 # source chain is broken and we'd silently fall back to system `pip` below —
 # exactly the split-install bug the migration is meant to prevent.
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ] && [ -z "${PIP_CMD:-}" ]; then
-    echo "FATAL: SGLANG_CI_USE_VENV=1 but PIP_CMD is unset after sourcing ci_install_dependency.sh"
+if [ -z "${PIP_CMD:-}" ]; then
+    echo "FATAL:PIP_CMD is unset after sourcing ci_install_dependency.sh"
     exit 1
 fi
 

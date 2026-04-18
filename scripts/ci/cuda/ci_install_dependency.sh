@@ -30,7 +30,6 @@ set -euxo pipefail
 #   - nvrtc variant selection (cu12 vs cu13)
 #
 # Legacy path: hardcoded to cu129 (matches the current 12.9 toolkit images).
-# Venv path (SGLANG_CI_USE_VENV=1): auto-detected from the container's nvcc.
 CU_VERSION="cu130"
 NVCC_VER=""
 
@@ -549,55 +548,53 @@ python3 -c "import cutlass; import cutlass.cute;"
 # that are in fact resolved at runtime via torch's dlopen-with-rpath, so we
 # don't want to block the job here. The `::warning::` annotation surfaces
 # the signal in the PR checks UI rather than burying it in logs.
-if [ "${SGLANG_CI_USE_VENV:-0}" = "1" ]; then
-    echo "=== Venv smoke test ==="
-    echo "python3 path: $(command -v python3)"
-    echo "VIRTUAL_ENV: ${VIRTUAL_ENV:-unset}"
-    python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'torch CUDA: {torch.version.cuda}')"
-    python3 -c "import sglang; print('sglang import OK')"
+echo "=== Venv smoke test ==="
+echo "python3 path: $(command -v python3)"
+echo "VIRTUAL_ENV: ${VIRTUAL_ENV:-unset}"
+python3 -c "import torch; assert torch.cuda.is_available(), 'CUDA not available'; print(f'torch CUDA: {torch.version.cuda}')"
+python3 -c "import sglang; print('sglang import OK')"
 
-    # Verify that key NVIDIA CUDA libs actually resolve to files under the
-    # venv, not to a stale system-level shadow copy. ldd shows DT_NEEDED
-    # resolution, but the loader can still pick a different copy at dlopen
-    # time — so we also inspect /proc/self/maps after importing torch to
-    # confirm what's really loaded.
-    python3 - <<PYEOF
+# Verify that key NVIDIA CUDA libs actually resolve to files under the
+# venv, not to a stale system-level shadow copy. ldd shows DT_NEEDED
+# resolution, but the loader can still pick a different copy at dlopen
+# time — so we also inspect /proc/self/maps after importing torch to
+# confirm what's really loaded.
+python3 - <<PYEOF
 import os, sys, ctypes
 venv = os.environ.get("VIRTUAL_ENV", "")
 assert venv, "VIRTUAL_ENV not set"
 import torch  # triggers dlopen of cublas/cudnn/cudart etc.
 with open(f"/proc/{os.getpid()}/maps") as f:
-    maps = f.read()
+maps = f.read()
 mismatches = []
 for soname in ("libcublas.so", "libcudart.so", "libcudnn.so"):
-    lines = [ln for ln in maps.splitlines() if soname in ln]
-    if not lines:
-        continue  # lib not loaded — acceptable, some configs don't touch cudnn at import
-    paths = {ln.split()[-1] for ln in lines if ln.split()[-1].startswith("/")}
-    outside = [p for p in paths if not p.startswith(venv)]
-    if outside:
-        mismatches.append(f"{soname}: loaded from {outside} (expected under {venv})")
+lines = [ln for ln in maps.splitlines() if soname in ln]
+if not lines:
+    continue  # lib not loaded — acceptable, some configs don't touch cudnn at import
+paths = {ln.split()[-1] for ln in lines if ln.split()[-1].startswith("/")}
+outside = [p for p in paths if not p.startswith(venv)]
+if outside:
+    mismatches.append(f"{soname}: loaded from {outside} (expected under {venv})")
 if mismatches:
-    print("::warning::NVIDIA libs resolved outside the venv — possible stale .so shadowing:")
-    for m in mismatches:
-        print(f"  {m}")
+print("::warning::NVIDIA libs resolved outside the venv — possible stale .so shadowing:")
+for m in mismatches:
+    print(f"  {m}")
 else:
-    print("All loaded NVIDIA libs resolve under the venv")
+print("All loaded NVIDIA libs resolve under the venv")
 PYEOF
 
-    TORCH_CUDA_SO=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'))")
-    if [ -f "$TORCH_CUDA_SO" ]; then
-        if ldd "$TORCH_CUDA_SO" 2>/dev/null | grep -q "not found"; then
-            echo "::warning::libtorch_cuda.so has unresolved deps — tests may fail opaquely"
-            ldd "$TORCH_CUDA_SO" | grep "not found" || true
-            echo "=== Smoke test complete (with ldd warnings) ==="
-        else
-            echo "libtorch_cuda.so dependencies OK"
-            echo "=== Smoke test passed ==="
-        fi
+TORCH_CUDA_SO=$(python3 -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib', 'libtorch_cuda.so'))")
+if [ -f "$TORCH_CUDA_SO" ]; then
+    if ldd "$TORCH_CUDA_SO" 2>/dev/null | grep -q "not found"; then
+        echo "::warning::libtorch_cuda.so has unresolved deps — tests may fail opaquely"
+        ldd "$TORCH_CUDA_SO" | grep "not found" || true
+        echo "=== Smoke test complete (with ldd warnings) ==="
     else
+        echo "libtorch_cuda.so dependencies OK"
         echo "=== Smoke test passed ==="
     fi
+else
+    echo "=== Smoke test passed ==="
 fi
 
 mark_step_done "Verify imports"
