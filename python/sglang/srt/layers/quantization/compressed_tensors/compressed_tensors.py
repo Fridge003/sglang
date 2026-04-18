@@ -682,13 +682,16 @@ class CompressedTensorsConfig(QuantizationConfig):
                     logger.info_once("Using CompressedTensorsWNA16TritonMoE (ROCm)")
                     return CompressedTensorsWNA16TritonMoE(self)
                 else:
-                    moe_backend = get_moe_runner_backend()
-                    if moe_backend.is_triton():
+                    from sglang.srt.server_args import get_global_server_args
+
+                    server_args = get_global_server_args()
+                    if server_args and server_args.enable_lora:
                         logger.info_once(
-                            "Using CompressedTensorsWNA16TritonMoE "
-                            "(moe_runner_backend=triton)"
+                            "Using CompressedTensorsWNA16TritonMoEMethod "
+                            "(LoRA requires triton-compatible MoE weights)"
                         )
                         return CompressedTensorsWNA16TritonMoE(self)
+
                     logger.info_once("Using CompressedTensorsWNA16MarlinMoEMethod")
                     return CompressedTensorsWNA16MoE(self)
             else:
@@ -1006,9 +1009,6 @@ class CompressedTensorsFusedMoEMethod(FusedMoEMethodBase):
 
     def get_triton_quant_info(self, layer: torch.nn.Module):
         return layer.scheme.get_triton_quant_info(layer)
-
-    def get_marlin_quant_info(self, layer: torch.nn.Module):
-        return layer.scheme.get_marlin_quant_info(layer)
 
     def apply(
         self,
