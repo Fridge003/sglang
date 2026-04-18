@@ -212,7 +212,7 @@ async def _save_url_image_to_path(image_url: str, target_path: str) -> str:
 
             return target_path
     except Exception as e:
-        raise Exception(f"Failed to download image from URL: {str(e)}")
+        raise Exception(f"Failed to download image from URL {image_url}: {str(e)}")
 
 
 async def _save_base64_image_to_path(base64_data: str, target_path: str) -> str:
