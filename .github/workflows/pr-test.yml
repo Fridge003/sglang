@@ -344,6 +344,8 @@ jobs:
   # For PR runs: wait jobs run and enforce sequential execution via polling.
   # For scheduled runs: wait jobs are skipped, enabling parallel execution for easier retry.
 
+  # PR-local override for #23183: skip wait-for-stage so every stage dispatches
+  # in parallel (REVERT `false &&` BEFORE MERGE).
   wait-for-stage-a:
     needs: [check-changes, call-gate]
     if: |
@@ -351,7 +353,7 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request' &&
       !inputs.target_stage &&
-      false &&  # PR-local override for #23183: skip wait-for-stage so every stage dispatches in parallel (REVERT BEFORE MERGE)
+      false &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
       (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
     runs-on: ubuntu-latest
@@ -369,6 +371,8 @@ jobs:
           jobs: '["stage-a-test-1-gpu-small", "stage-a-test-cpu"]'
           max-wait-minutes: '240'
 
+  # PR-local override for #23183: skip wait-for-stage so every stage dispatches
+  # in parallel (REVERT `false &&` BEFORE MERGE).
   wait-for-stage-b:
     needs: [check-changes, call-gate, wait-for-stage-a]
     if: |
@@ -376,7 +380,7 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request' &&
       !inputs.target_stage &&
-      false &&  # PR-local override for #23183: skip wait-for-stage so every stage dispatches in parallel (REVERT BEFORE MERGE)
+      false &&
       (needs.check-changes.outputs.main_package == 'true' || needs.check-changes.outputs.sgl_kernel == 'true') &&
       (needs.wait-for-stage-a.result == 'success' || needs.wait-for-stage-a.result == 'skipped') &&
       (needs.call-gate.result == 'success' || needs.call-gate.result == 'skipped')
