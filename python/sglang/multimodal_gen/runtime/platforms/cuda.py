@@ -118,7 +118,12 @@ class CudaPlatformBase(Platform):
 
             return fp4_quantize
         except ImportError:
-            return None
+            try:
+                from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as fp4_quantize
+
+                return fp4_quantize
+            except ImportError:
+                return None
 
     @classmethod
     @lru_cache(maxsize=1)
@@ -174,7 +179,14 @@ class CudaPlatformBase(Platform):
 
             return cutlass_fp4_gemm, None
         except ImportError:
-            pass
+            try:
+                from sglang.jit_kernel.nvfp4 import (
+                    cutlass_scaled_fp4_mm as cutlass_fp4_gemm,
+                )
+
+                return cutlass_fp4_gemm, None
+            except ImportError:
+                pass
 
         try:
             from flashinfer import mm_fp4 as flashinfer_mm_fp4

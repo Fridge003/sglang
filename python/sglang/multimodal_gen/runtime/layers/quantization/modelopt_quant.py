@@ -68,7 +68,14 @@ def _get_cutlass_fp4_gemm_op():
 
         return cutlass_fp4_gemm
     except ImportError:
-        return None
+        try:
+            from sglang.jit_kernel.nvfp4 import (
+                cutlass_scaled_fp4_mm as cutlass_fp4_gemm,
+            )
+
+            return cutlass_fp4_gemm
+        except ImportError:
+            return None
 
 
 def _should_fallback_from_flashinfer_fp4(error: RuntimeError) -> bool:
