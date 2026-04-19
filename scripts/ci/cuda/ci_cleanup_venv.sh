@@ -22,26 +22,19 @@ case "$(printf '%s' "$USE_VENV_RAW" | tr '[:upper:]' '[:lower:]')" in
         ;;
 esac
 
-# Prefer the path propagated via GITHUB_ENV. Fallback: glob for any venv from
-# this run+job (covers the case where install crashed before exporting the path).
-if [ -n "${SGLANG_CI_VENV_PATH:-}" ] && [ -d "$SGLANG_CI_VENV_PATH" ]; then
-    if rm -rf "$SGLANG_CI_VENV_PATH"; then
-        echo "Cleaned up venv: $SGLANG_CI_VENV_PATH"
+# Prefer the path propagated via GITHUB_ENV. Fallback: the stable path used by
+# ci_install_dependency.sh (covers the case where install crashed before
+# exporting SGLANG_CI_VENV_PATH).
+STABLE_VENV="/tmp/sglang-ci-venv"
+TARGET="${SGLANG_CI_VENV_PATH:-$STABLE_VENV}"
+if [ -d "$TARGET" ]; then
+    if rm -rf "$TARGET"; then
+        echo "Cleaned up venv: $TARGET"
     else
-        echo "::warning::Failed to remove $SGLANG_CI_VENV_PATH — runner cron should sweep /tmp/sglang-ci-*"
+        echo "::warning::Failed to remove $TARGET — runner cron should sweep /tmp/sglang-ci-*"
     fi
 else
-    matched=0
-    for venv in /tmp/sglang-ci-${GITHUB_RUN_ID:-unknownrun}-${GITHUB_JOB:-unknownjob}-*; do
-        [ -d "$venv" ] || continue
-        matched=1
-        if rm -rf "$venv"; then
-            echo "Cleaned up venv (via glob): $venv"
-        else
-            echo "::warning::Failed to remove $venv — runner cron should sweep /tmp/sglang-ci-*"
-        fi
-    done
-    [ "$matched" -eq 0 ] && echo "No venv to clean for run=${GITHUB_RUN_ID:-?} job=${GITHUB_JOB:-?}"
+    echo "No venv to clean at $TARGET"
 fi
 
 # Sweep stale venvs from cancelled/crashed jobs that never reached cleanup.

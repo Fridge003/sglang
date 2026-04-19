@@ -39,9 +39,9 @@ NVIDIA_CUDNN_VERSION="9.16.0.29"
 NVIDIA_NVSHMEM_VERSION="3.4.5"
 OPTIONAL_DEPS="${1:-}"
 
-# Whether to create a uv venv. Default false; set USE_VENV=false to install
+# Whether to create a uv venv. Default true; set USE_VENV=false to install
 # directly into system Python (useful for runners where uv venv misbehaves).
-USE_VENV="${USE_VENV:-0}"
+USE_VENV="${USE_VENV:-1}"
 echo "USE_VENV=${USE_VENV}"
 
 # uv must be available on system Python (to create the venv, or to run
@@ -54,10 +54,11 @@ fi
 SYS_PYTHON_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 
 if [ "$USE_VENV" = "1" ]; then
-    # Per-job unique path. Include $$ (shell PID) so concurrent/back-to-back jobs
-    # on the same runner never target the same directory even if GITHUB_JOB
-    # doesn't differentiate matrix partitions.
-    UV_VENV="/tmp/sglang-ci-${GITHUB_RUN_ID:-norun}-${GITHUB_JOB:-nojob}-$$"
+    # Stable path keeps deep_gemm's library_root (hashed into its bf16 JIT
+    # cache key) constant across jobs. rm -rf clears a stale venv from a
+    # crashed prior job.
+    UV_VENV="/tmp/sglang-ci-venv"
+    rm -rf "$UV_VENV"
     # --seed installs pip/setuptools into the venv so bare `pip` calls in
     # cache_nvidia_wheels.sh and the human-eval setup resolve to the venv's
     # pip (rather than silently falling back to system Python).
