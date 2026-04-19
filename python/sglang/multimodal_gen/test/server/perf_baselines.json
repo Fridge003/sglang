@@ -35,6 +35,7 @@
         ]
     },
     "scenarios": {
+
         "qwen_image_t2i": {
             "stages_ms": {
                 "TextEncodingStage": 588.48,
