@@ -16,17 +16,10 @@ USE_VENV_RAW="${USE_VENV:-true}"
 case "$(printf '%s' "$USE_VENV_RAW" | tr '[:upper:]' '[:lower:]')" in
     1 | true | yes) ;;
     *)
-        # USE_VENV=false path: there is no /tmp/sglang-ci-* venv to drop,
-        # but system site-packages can carry over stale trees between jobs.
-        # Observed: `uv pip uninstall flashinfer-python` leaves flashinfer/data/
-        # behind because flashinfer-cubin owns files beneath it, so the next
-        # job's `uv pip install -e python[...]` fails with
-        # "failed to create directory flashinfer/data/: File exists (os error 17)".
-        # See https://github.com/sgl-project/sglang/actions/runs/24634237642/job/72027123887
-        #
-        # Fully uninstall the flashinfer trio and rm -rf any residual package
-        # dirs so the next setup starts from a clean slate. Cached wheels
-        # under ~/.cache/flashinfer-wheels/ keep the reinstall fast.
+        # USE_VENV=false: no venv to drop, but uninstall+purge the flashinfer
+        # trio so system site-packages don't carry co-owned dirs (flashinfer/data/)
+        # into the next job. Cached wheels under ~/.cache/flashinfer-wheels/ keep
+        # the reinstall fast.
         echo "USE_VENV=${USE_VENV_RAW}: purging flashinfer leftovers from system site-packages"
         python3 -m pip uninstall -y \
             flashinfer-python flashinfer-cubin flashinfer-jit-cache \
@@ -37,11 +30,8 @@ case "$(printf '%s' "$USE_VENV_RAW" | tr '[:upper:]' '[:lower:]')" in
             for pkg in flashinfer flashinfer_cubin flashinfer_jit_cache; do
                 stale="${SITE_PACKAGES}/${pkg}"
                 if [ -e "$stale" ] || [ -L "$stale" ]; then
-                    if rm -rf "$stale"; then
-                        echo "Purged ${stale}"
-                    else
-                        echo "::warning::Failed to remove ${stale}"
-                    fi
+                    rm -rf "$stale" && echo "Purged ${stale}" \
+                        || echo "::warning::Failed to remove ${stale}"
                 fi
             done
         fi

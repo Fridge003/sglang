@@ -282,19 +282,13 @@ FLASHINFER_UNINSTALL="flashinfer-python"
 $PIP_UNINSTALL_CMD $FLASHINFER_UNINSTALL $PIP_UNINSTALL_SUFFIX || true
 $PIP_UNINSTALL_CMD opencv-python opencv-python-headless $PIP_UNINSTALL_SUFFIX || true
 
-# `uv pip uninstall flashinfer-python` leaves the flashinfer/data/ subdir
-# behind when flashinfer-cubin is kept (cubin files sit under that tree),
-# which breaks the next `uv pip install -e python[...]` with
-# "failed to create directory flashinfer/data/: File exists (os error 17)".
-# See https://github.com/sgl-project/sglang/actions/runs/24634237642/job/72027123887
-#
-# Purge any residual flashinfer/ tree. If we wipe it, cubin's files go with
-# it, so force cubin to reinstall too (150 MB, fetched via the flashinfer
-# artifacts step below).
+# Runner-state robustness: flashinfer-python and flashinfer-cubin co-own files
+# under flashinfer/data/. Uninstalling only python leaves the dir; the next
+# `uv pip install` then fails with `mkdir flashinfer/data/: File exists`. Wipe
+# the tree and force cubin to reinstall so both packages land atomically.
 SITE_PACKAGES=$(python3 -c 'import site; print(site.getsitepackages()[0])' 2>/dev/null || true)
 if [ -n "$SITE_PACKAGES" ] && [ -d "$SITE_PACKAGES/flashinfer" ]; then
     rm -rf "$SITE_PACKAGES/flashinfer"
-    echo "Purged residual $SITE_PACKAGES/flashinfer after uninstall"
     if [ "$UNINSTALL_CUBIN" = false ]; then
         $PIP_UNINSTALL_CMD flashinfer-cubin $PIP_UNINSTALL_SUFFIX || true
         UNINSTALL_CUBIN=true
@@ -315,14 +309,10 @@ echo "Installing python extras: [${EXTRAS}]"
 # source "${SCRIPT_DIR}/cache_nvidia_wheels.sh"
 $PIP_CMD install -e "python[${EXTRAS}]" $PIP_INSTALL_SUFFIX
 
-# Purge orphaned nvidia-cuda-runtime-cu12 left over from pre-cu13 installs.
-# It ships libcudart.so.12 under nvidia/cuda_runtime/lib/ while the cu13 runtime
-# lives under nvidia/cu13/lib/, so having both on LD_LIBRARY_PATH makes
-# cudnn_frontend_shim.h dlopen both and throw:
-#   RuntimeError: Multiple libcudart libraries found: libcudart.so.12 and libcudart.so.13
-# Observed on CI runners carrying state from the pre-#23119 (cu129) era; nothing
-# currently depends on it (Required-by: empty), and its install dir is disjoint
-# from cu13's so the uninstall doesn't disturb any shared cu13 files.
+# Runner-state robustness: orphan cu12 runtime drags libcudart.so.12 onto
+# LD_LIBRARY_PATH next to cu13's libcudart.so.13, which trips cudnn_frontend's
+# dlopen probe (`Multiple libcudart libraries found`). Its install dir is
+# disjoint from cu13's so dropping it doesn't touch any shared files.
 $PIP_UNINSTALL_CMD nvidia-cuda-runtime-cu12 $PIP_UNINSTALL_SUFFIX || true
 
 mark_step_done "Install main package"
@@ -419,38 +409,34 @@ mark_step_done "Download flashinfer artifacts"
 # ------------------------------------------------------------------------------
 # Stabilize FlashInfer JIT cache paths
 # ------------------------------------------------------------------------------
-# FlashInfer JIT writes build.ninja with hardcoded -isystem paths pointing to the
-# venv's flashinfer/data/ and tvm_ffi/include/. With per-job venvs each job gets
-# a unique /tmp/sglang-ci-<run>-<job>-<pid>/ path, but the JIT cache is shared
-# on the host mount. When the next job's venv has a different path and the old one
-# is cleaned up, ninja fails because source files no longer exist at the cached path.
-#
-# Fix (two parts):
-# 1. Clear only STALE cached_ops (build.ninja referencing non-existent venv paths).
-#    Do NOT clear all cached_ops — they contain compiled .so files that take 10-20 min
-#    to recompile. Only remove entries where the source paths no longer exist.
-# 2. Copy source files to a stable host-mounted path and symlink each venv's
-#    copy there. build.ninja then references the stable path across all jobs.
-#
-# Part 1: Clear stale cached_ops (keep valid compiled kernels)
+# FlashInfer JIT writes build.ninja with absolute source paths. Two things make
+# them go stale on a long-lived runner: per-job venv dirs (/tmp/sglang-ci-*)
+# rotate under USE_VENV=1, and _stable_src/ (written by Part 2 below) only
+# exists while USE_VENV=1. Stale ninjas surface as
+#   "ninja: error: '<path>', needed by '<obj>', missing and no known rule".
+# Part 1: drop any cached_ops whose build.ninja references a missing source;
+# keeps already-compiled .so files intact (rebuilds are 10-20 min).
+# Part 2: under USE_VENV=1, materialize a stable source dir so build.ninja
+# paths survive venv rotation.
+if [ -d "${HOME}/.cache/flashinfer" ]; then
+    STALE_COUNT=0
+    while IFS= read -r ninja_file; do
+        missing=0
+        for p in $(grep -oE '/[^[:space:]:|]+\.(cu|cc|cpp|h|hpp)' "$ninja_file" 2>/dev/null | sort -u); do
+            [ -e "$p" ] || { missing=1; break; }
+        done
+        if [ "$missing" = 1 ]; then
+            rm -rf "$(dirname "$ninja_file")"
+            STALE_COUNT=$((STALE_COUNT + 1))
+        fi
+    done < <(find "${HOME}/.cache/flashinfer" -name "build.ninja" -type f 2>/dev/null)
+    echo "Cleaned $STALE_COUNT stale FlashInfer cached_ops (kept valid ones)"
+fi
+
+# Part 2: stable_src exists solely to anchor build.ninja paths across rotating
+# per-job venvs, so it's only populated under USE_VENV=1.
 if [ "$USE_VENV" = "1" ]; then
     STABLE_FI_DIR="${HOME}/.cache/flashinfer/_stable_src"
-    if [ -d "${HOME}/.cache/flashinfer" ]; then
-        STALE_COUNT=0
-        while IFS= read -r ninja_file; do
-            # Check for stale venv paths (/tmp/sglang-ci-*) or old stable path (flashinfer-src)
-            STALE_PATH=$(grep -o '/tmp/sglang-ci-[^ ]*\|flashinfer-src' "$ninja_file" 2>/dev/null | head -1 || true)
-            if [ -n "$STALE_PATH" ]; then
-                if echo "$STALE_PATH" | grep -q "flashinfer-src" || [ ! -d "$STALE_PATH" ]; then
-                    rm -rf "$(dirname "$ninja_file")"
-                    STALE_COUNT=$((STALE_COUNT + 1))
-                fi
-            fi
-        done < <(find "${HOME}/.cache/flashinfer" -name "build.ninja" -type f 2>/dev/null)
-        echo "Cleaned $STALE_COUNT stale FlashInfer cached_ops (kept valid ones)"
-    fi
-
-    # Part 2: Stabilize paths (STABLE_FI_DIR set above in Part 1)
     FI_DATA=$(python3 -c "import flashinfer, os; print(os.path.join(os.path.dirname(flashinfer.__file__), 'data'))")
     TVM_INC=$(python3 -c "import tvm_ffi, os; print(os.path.join(os.path.dirname(tvm_ffi.__file__), 'include'))")
 
