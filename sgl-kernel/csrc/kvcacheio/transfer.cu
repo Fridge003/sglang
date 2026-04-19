@@ -817,14 +817,17 @@ inline void transfer_kv_page_first_direct_impl(
   // not the host driver — a cu12 runtime on a cu13 driver host (common in
   // containers) still exposes the 9-param v12 signature. Dispatching on the
   // driver version here would segfault in that case (verified empirically).
-  // Use cudaRuntimeGetVersion so the signature follows the runtime.
-  int runtime_version = 0;
-  cudaError_t runtime_version_err = cudaRuntimeGetVersion(&runtime_version);
+  // Use cudaRuntimeGetVersion so the signature follows the runtime. The
+  // runtime version is process-constant, so cache the query (static init is
+  // thread-safe in C++11+) to keep the KV-transfer hot path free of a redundant
+  // runtime API call per invocation.
+  static int runtime_version = 0;
+  static cudaError_t runtime_version_err = cudaRuntimeGetVersion(&runtime_version);
   if (runtime_version_err != cudaSuccess) {
     fallback_to_page_copy();
     return;
   }
-  const bool use_v13_signature = runtime_version >= 13000;
+  static const bool use_v13_signature = runtime_version >= 13000;
 
   size_t num_copies = 0;
   std::vector<void*> batch_srcs;
