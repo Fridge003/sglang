@@ -75,14 +75,11 @@ async def warm_up_compile(
         )
         generate_req_input.bootstrap_host = [FAKE_BOOTSTRAP_HOST] * dp_size
         generate_req_input.bootstrap_room = [
-            i * (2**63 // dp_size) + (i % server_args.tp_size)
-            for i in range(dp_size)
+            i * (2**63 // dp_size) + (i % server_args.tp_size) for i in range(dp_size)
         ]
     else:
         input_ids = (
-            base_ids
-            if dp_size == 1
-            else [list(base_ids) for _ in range(dp_size)]
+            base_ids if dp_size == 1 else [list(base_ids) for _ in range(dp_size)]
         )
         generate_req_input = GenerateReqInput(
             input_ids=input_ids,
