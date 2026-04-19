@@ -315,6 +315,16 @@ echo "Installing python extras: [${EXTRAS}]"
 # source "${SCRIPT_DIR}/cache_nvidia_wheels.sh"
 $PIP_CMD install -e "python[${EXTRAS}]" $PIP_INSTALL_SUFFIX
 
+# Purge orphaned nvidia-cuda-runtime-cu12 left over from pre-cu13 installs.
+# It ships libcudart.so.12 under nvidia/cuda_runtime/lib/ while the cu13 runtime
+# lives under nvidia/cu13/lib/, so having both on LD_LIBRARY_PATH makes
+# cudnn_frontend_shim.h dlopen both and throw:
+#   RuntimeError: Multiple libcudart libraries found: libcudart.so.12 and libcudart.so.13
+# Observed on CI runners carrying state from the pre-#23119 (cu129) era; nothing
+# currently depends on it (Required-by: empty), and its install dir is disjoint
+# from cu13's so the uninstall doesn't disturb any shared cu13 files.
+$PIP_UNINSTALL_CMD nvidia-cuda-runtime-cu12 $PIP_UNINSTALL_SUFFIX || true
+
 mark_step_done "Install main package"
 
 # ------------------------------------------------------------------------------
