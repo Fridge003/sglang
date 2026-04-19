@@ -47,6 +47,7 @@ else:
     flashinfer = None
 
 _FORCE_CUTLASS_FP4_GEMM = False
+_FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE: str | None = None
 
 
 @lru_cache(maxsize=1)
@@ -58,7 +59,13 @@ def _get_fp4_quantize_op():
 def _get_fp4_gemm_op():
     if _FORCE_CUTLASS_FP4_GEMM:
         return _get_cutlass_fp4_gemm_op(), None
-    return current_platform.get_modelopt_fp4_gemm_op()
+    fp4_gemm, flashinfer_backend = current_platform.get_modelopt_fp4_gemm_op()
+    if (
+        flashinfer_backend is not None
+        and _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE is not None
+    ):
+        return fp4_gemm, _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE
+    return fp4_gemm, flashinfer_backend
 
 
 @lru_cache(maxsize=1)
@@ -83,13 +90,37 @@ def _should_fallback_from_flashinfer_fp4(error: RuntimeError) -> bool:
     return "Multiple libcudart libraries found" in message
 
 
+def _should_retry_flashinfer_fp4_with_cutlass_backend(
+    backend: str | None, error: RuntimeError
+) -> bool:
+    return backend not in {"cutlass", "trtllm"} and _should_fallback_from_flashinfer_fp4(
+        error
+    )
+
+
+def _override_flashinfer_fp4_runtime_backend(backend: str, reason: str) -> None:
+    global _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE
+
+    if _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE == backend:
+        return
+
+    _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE = backend
+    _get_fp4_gemm_op.cache_clear()
+    logger.warning(
+        "Switching FlashInfer FP4 GEMM backend to %s for this process because %s",
+        backend,
+        reason,
+    )
+
+
 def _disable_flashinfer_fp4_runtime(reason: str) -> None:
-    global _FORCE_CUTLASS_FP4_GEMM
+    global _FORCE_CUTLASS_FP4_GEMM, _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE
 
     if _FORCE_CUTLASS_FP4_GEMM:
         return
 
     _FORCE_CUTLASS_FP4_GEMM = True
+    _FLASHINFER_FP4_GEMM_BACKEND_OVERRIDE = None
     _get_fp4_gemm_op.cache_clear()
     logger.warning(
         "Disabling FlashInfer FP4 GEMM for this process and falling back to "
@@ -649,23 +680,50 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
                     backend=flashinfer_backend,
                 )
             except RuntimeError as error:
-                cutlass_fp4_gemm = _get_cutlass_fp4_gemm_op()
-                if (
-                    flashinfer_backend == "trtllm"
-                    or cutlass_fp4_gemm is None
-                    or not _should_fallback_from_flashinfer_fp4(error)
+                original_error = error
+                out = None
+                if _should_retry_flashinfer_fp4_with_cutlass_backend(
+                    flashinfer_backend, error
                 ):
-                    raise
+                    _override_flashinfer_fp4_runtime_backend("cutlass", str(error))
+                    try:
+                        out = fp4_gemm(
+                            x_fp4,
+                            w.T,
+                            x_scale_interleaved,
+                            w_scale_interleaved.T,
+                            layer.alpha,
+                            output_dtype,
+                            backend="cutlass",
+                        )
+                    except RuntimeError as cutlass_error:
+                        logger.warning(
+                            "FlashInfer FP4 CUTLASS retry also failed after %s: %s",
+                            flashinfer_backend,
+                            cutlass_error,
+                        )
+                        error = cutlass_error
 
-                _disable_flashinfer_fp4_runtime(str(error))
-                out = cutlass_fp4_gemm(
-                    x_fp4,
-                    w,
-                    x_scale_interleaved,
-                    w_scale_interleaved,
-                    layer.alpha,
-                    output_dtype,
-                )
+                if out is None:
+                    cutlass_fp4_gemm = _get_cutlass_fp4_gemm_op()
+                    if (
+                        flashinfer_backend == "trtllm"
+                        or cutlass_fp4_gemm is None
+                        or not _should_fallback_from_flashinfer_fp4(original_error)
+                    ):
+                        raise
+
+                    _disable_flashinfer_fp4_runtime(
+                        f"{original_error}; FlashInfer CUTLASS retry failed with: {error}"
+                    )
+                    out = cutlass_fp4_gemm(
+                        x_fp4,
+                        w,
+                        x_scale_interleaved,
+                        w_scale_interleaved,
+                        layer.alpha,
+                        output_dtype,
+                    )
         elif fp4_gemm is not None:
             out = fp4_gemm(
                 x_fp4,
