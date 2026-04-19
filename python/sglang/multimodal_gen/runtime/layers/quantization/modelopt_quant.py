@@ -46,6 +46,8 @@ if is_flashinfer_available():
 else:
     flashinfer = None
 
+_FORCE_CUTLASS_FP4_GEMM = False
+
 
 @lru_cache(maxsize=1)
 def _get_fp4_quantize_op():
@@ -54,7 +56,39 @@ def _get_fp4_quantize_op():
 
 @lru_cache(maxsize=1)
 def _get_fp4_gemm_op():
+    if _FORCE_CUTLASS_FP4_GEMM:
+        return _get_cutlass_fp4_gemm_op(), None
     return current_platform.get_modelopt_fp4_gemm_op()
+
+
+@lru_cache(maxsize=1)
+def _get_cutlass_fp4_gemm_op():
+    try:
+        from sgl_kernel import cutlass_scaled_fp4_mm as cutlass_fp4_gemm
+
+        return cutlass_fp4_gemm
+    except ImportError:
+        return None
+
+
+def _should_fallback_from_flashinfer_fp4(error: RuntimeError) -> bool:
+    message = str(error)
+    return "Multiple libcudart libraries found" in message
+
+
+def _disable_flashinfer_fp4_runtime(reason: str) -> None:
+    global _FORCE_CUTLASS_FP4_GEMM
+
+    if _FORCE_CUTLASS_FP4_GEMM:
+        return
+
+    _FORCE_CUTLASS_FP4_GEMM = True
+    _get_fp4_gemm_op.cache_clear()
+    logger.warning(
+        "Disabling FlashInfer FP4 GEMM for this process and falling back to "
+        "CUTLASS because %s",
+        reason,
+    )
 
 
 def _prepare_nvfp4_weight_bytes(
@@ -597,15 +631,34 @@ class ModelOptFp4LinearMethod(LinearMethodBase):
             w_scale_interleaved = w_scale_interleaved.view(torch.float8_e4m3fn)
         fp4_gemm, flashinfer_backend = _get_fp4_gemm_op()
         if flashinfer_backend is not None:
-            out = fp4_gemm(
-                x_fp4,
-                w.T,
-                x_scale_interleaved,
-                w_scale_interleaved.T,
-                layer.alpha,
-                output_dtype,
-                backend=flashinfer_backend,
-            )
+            try:
+                out = fp4_gemm(
+                    x_fp4,
+                    w.T,
+                    x_scale_interleaved,
+                    w_scale_interleaved.T,
+                    layer.alpha,
+                    output_dtype,
+                    backend=flashinfer_backend,
+                )
+            except RuntimeError as error:
+                cutlass_fp4_gemm = _get_cutlass_fp4_gemm_op()
+                if (
+                    flashinfer_backend == "trtllm"
+                    or cutlass_fp4_gemm is None
+                    or not _should_fallback_from_flashinfer_fp4(error)
+                ):
+                    raise
+
+                _disable_flashinfer_fp4_runtime(str(error))
+                out = cutlass_fp4_gemm(
+                    x_fp4,
+                    w,
+                    x_scale_interleaved,
+                    w_scale_interleaved,
+                    layer.alpha,
+                    output_dtype,
+                )
         elif fp4_gemm is not None:
             out = fp4_gemm(
                 x_fp4,

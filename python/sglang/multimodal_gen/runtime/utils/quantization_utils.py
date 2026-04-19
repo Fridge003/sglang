@@ -272,6 +272,14 @@ def _build_nvfp4_config_from_safetensors_files(
     safetensors. Building the config from only the first matching file can
     incorrectly exclude layers that are quantized in a later shard.
     """
+
+    def _module_name_from_weight_name(weight_name: str) -> str:
+        return (
+            weight_name[: -len(".weight")]
+            if weight_name.endswith(".weight")
+            else weight_name
+        )
+
     group_size = None
     quantized_bfl_modules: set[str] = set()
     non_quantized_bfl_modules: set[str] = set()
@@ -400,23 +408,18 @@ def _build_nvfp4_config_from_safetensors_files(
 
     for module_bfl in exclude_bfl_modules:
         raw_weight_name = f"{module_bfl}.weight"
+        exclude_modules.append(module_bfl)
         if mapping_fn is not None:
             mapped, _, _ = mapping_fn(raw_weight_name)
             if mapped != raw_weight_name:
-                exclude_modules.append(module_bfl)
+                exclude_modules.append(_module_name_from_weight_name(mapped))
                 continue
 
         if reverse_mapping_fn is not None:
             reverse_mapped, _, _ = reverse_mapping_fn(raw_weight_name)
             if reverse_mapped != raw_weight_name:
-                exclude_modules.append(
-                    reverse_mapped[: -len(".weight")]
-                    if reverse_mapped.endswith(".weight")
-                    else reverse_mapped
-                )
+                exclude_modules.append(_module_name_from_weight_name(reverse_mapped))
                 continue
-
-        exclude_modules.append(module_bfl)
 
     exclude_modules = sorted(set(exclude_modules))
 
