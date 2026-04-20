@@ -36,6 +36,10 @@ from sglang.srt.layers.attention.nsa.utils import (
     is_nsa_enable_prefill_cp,
     nsa_use_prefill_cp,
 )
+from sglang.srt.layers.utils.cp_utils import (
+    is_mla_prefill_cp_enabled,
+    mla_use_prefill_cp,
+)
 from sglang.srt.layers.dp_attention import (
     attn_tp_all_gather_into_tensor,
     attn_tp_reduce_scatter_tensor,
@@ -199,8 +203,7 @@ class ScatterMode(Enum):
 
     @staticmethod
     def model_input_output():
-        """The scatter mode for model forward pass input and output data"""
-        if is_nsa_enable_prefill_cp():
+        if is_nsa_enable_prefill_cp() or is_mla_prefill_cp_enabled():
             return ScatterMode.SCATTERED
 
         return ScatterMode.TP_ATTN_FULL
@@ -702,7 +705,7 @@ class LayerCommunicator:
             and forward_batch.dp_padding_mode.is_max_len()
         ):
             return True
-        if nsa_use_prefill_cp(forward_batch):
+        if nsa_use_prefill_cp(forward_batch) or mla_use_prefill_cp(forward_batch):
             return True
         if get_attn_tp_context().input_scattered and not self.is_last_layer:
             return True
