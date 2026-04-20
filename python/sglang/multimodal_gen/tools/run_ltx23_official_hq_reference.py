@@ -160,6 +160,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audio-rescale-scale", type=float, default=1.0)
     parser.add_argument("--v2a-guidance-scale", type=float, default=3.0)
     parser.add_argument("--audio-skip-step", type=int, default=0)
+    parser.add_argument(
+        "--streaming-prefetch-count",
+        type=int,
+        default=1,
+        help=(
+            "Official block-layer streaming prefetch count. "
+            "Use 1 on H100-class GPUs to keep the HQ helper under memory limits."
+        ),
+    )
     parser.add_argument("--probe-dir")
     return parser.parse_args()
 
@@ -446,7 +455,7 @@ def main() -> None:
             video=ModalitySpec(context=v_context_p, conditionings=stage_1_conditionings),
             audio=ModalitySpec(context=a_context_p),
             loop=stage1_probe_loop,
-            streaming_prefetch_count=None,
+            streaming_prefetch_count=args.streaming_prefetch_count,
             max_batch_size=1,
         )
         _maybe_dump_probe(
@@ -501,7 +510,7 @@ def main() -> None:
                 initial_latent=audio_state.latent,
             ),
             loop=res2s_audio_video_denoising_loop,
-            streaming_prefetch_count=None,
+            streaming_prefetch_count=args.streaming_prefetch_count,
         )
 
         # The decode path only needs the final latents plus the video/audio decoders.
