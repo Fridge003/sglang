@@ -1,5 +1,8 @@
 from sglang.srt.mem_cache.unified_cache_components.full_component import FullComponent
 from sglang.srt.mem_cache.unified_cache_components.mamba_component import MambaComponent
+from sglang.srt.mem_cache.unified_cache_components.shared_anchor_component import (
+    SharedAnchorComponent,
+)
 from sglang.srt.mem_cache.unified_cache_components.swa_component import SWAComponent
 from sglang.srt.mem_cache.unified_cache_components.tree_component import (
     _NUM_COMPONENT_TYPES,
@@ -21,6 +24,7 @@ __all__ = [
     "FullComponent",
     "CacheTransferPhase",
     "MambaComponent",
+    "SharedAnchorComponent",
     "SWAComponent",
     "TreeComponent",
     "_NUM_COMPONENT_TYPES",

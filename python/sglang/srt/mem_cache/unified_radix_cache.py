@@ -40,6 +40,7 @@ from sglang.srt.mem_cache.unified_cache_components import (
     EvictLayer,
     FullComponent,
     MambaComponent,
+    SharedAnchorComponent,
     SWAComponent,
     TreeComponent,
     get_and_increase_time_counter,
@@ -196,6 +197,7 @@ COMPONENT_REGISTRY: dict[ComponentType, type[TreeComponent]] = {
     ComponentType.FULL: FullComponent,
     ComponentType.MAMBA: MambaComponent,
     ComponentType.SWA: SWAComponent,
+    ComponentType.SHARED_ANCHOR: SharedAnchorComponent,
 }
 
 logger = logging.getLogger(__name__)

@@ -351,18 +351,34 @@ def attach_hybrid_pool_to_unified_cache(
 ) -> None:
     """Attach HostPoolGroup + HybridCacheController to UnifiedRadixCache."""
     from sglang.srt.mem_cache.base_prefix_cache import EvictParams
-    from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, MLATokenToKVPool
+    from sglang.srt.mem_cache.hicache_storage import PoolHitPolicy
+    from sglang.srt.mem_cache.memory_pool import (
+        HybridLinearKVPool,
+        MLATokenToKVPool,
+        NSATokenToKVPool,
+    )
+    from sglang.srt.mem_cache.memory_pool_host import NSAIndexerPoolHost
     from sglang.srt.mem_cache.unified_cache_components import ComponentType
 
     try:
         kvcache = params.token_to_kv_pool_allocator.get_kvcache()
-        if isinstance(kvcache, HybridLinearKVPool):
+        mamba_stack = isinstance(kvcache, HybridLinearKVPool)
+        shared_anchor_stack = isinstance(kvcache, NSATokenToKVPool)
+
+        if mamba_stack:
             full_kv_pool = kvcache.full_kv_pool
             use_mla = kvcache.use_mla
             assert set(cache.components.keys()) == {
                 ComponentType.FULL,
                 ComponentType.MAMBA,
             }, "HybridLinearKVPool currently only supports FULL + MAMBA in UnifiedRadixCache."
+        elif shared_anchor_stack:
+            full_kv_pool = kvcache
+            use_mla = True
+            assert set(cache.components.keys()) == {
+                ComponentType.FULL,
+                ComponentType.SHARED_ANCHOR,
+            }, "NSATokenToKVPool currently only supports FULL + SHARED_ANCHOR in UnifiedRadixCache."
         else:
             full_kv_pool = kvcache
             use_mla = isinstance(kvcache, MLATokenToKVPool)
@@ -370,7 +386,6 @@ def attach_hybrid_pool_to_unified_cache(
                 ComponentType.FULL
             }, "Non-hybrid KV pool currently only supports FULL-only UnifiedRadixCache."
 
-        mamba_stack = isinstance(kvcache, HybridLinearKVPool)
         if mamba_stack:
             full_layer_mapping = dict(kvcache.full_attention_layer_id_mapping)
             mamba_layer_mapping = dict(params.req_to_token_pool.mamba_map)
@@ -405,6 +420,40 @@ def attach_hybrid_pool_to_unified_cache(
                 runtime.cache_controller.layer_done_counter
             )
             transfer_layer_num = runtime.transfer_layer_num
+        elif shared_anchor_stack:
+            full_layer_mapping = {
+                layer_id: layer_id for layer_id in range(full_kv_pool.layer_num)
+            }
+            runtime = build_shared_anchor_stack(
+                params=params,
+                server_args=server_args,
+                kv_pool=full_kv_pool,
+                shared_pool_name=PoolName.INDEXER,
+                full_layer_mapping=full_layer_mapping,
+                page_size=cache.page_size,
+                tp_group=params.tp_cache_group,
+                load_cache_event=load_cache_event,
+                storage_backend=None,
+                use_mla=True,
+                pp_rank=params.pp_rank,
+                pp_size=params.pp_size,
+                shared_host_pool_factory=lambda kv_host_pool: NSAIndexerPoolHost(
+                    full_kv_pool,
+                    kv_host_pool,
+                    server_args.hicache_mem_layout,
+                    allocator_type=server_args.hicache_storage_backend,
+                ),
+            )
+            cache.full_kv_pool_host = runtime.host_pools[PoolName.KV]
+            cache.host_pool_group = runtime.host_pool_group
+            cache.cache_controller = runtime.cache_controller
+            cache.components[ComponentType.FULL]._full_kv_pool_host = (
+                cache.full_kv_pool_host
+            )
+            shared_anchor_component = cache.components[ComponentType.SHARED_ANCHOR]
+            shared_anchor_component.pool_name = PoolName.INDEXER
+            shared_anchor_component.hit_policy = PoolHitPolicy.ALL_PAGES
+            transfer_layer_num = runtime.transfer_layer_num
         else:
             full_layer_mapping = {
                 layer_id: layer_id for layer_id in range(full_kv_pool.layer_num)
@@ -436,7 +485,11 @@ def attach_hybrid_pool_to_unified_cache(
 
         logger.info(
             "Attached hybrid pool stack to UnifiedRadixCache: pools=%s, transfer_layer_num=%s",
-            "KV + MAMBA" if mamba_stack else "KV",
+            (
+                "KV + MAMBA"
+                if mamba_stack
+                else "KV + INDEXER" if shared_anchor_stack else "KV"
+            ),
             transfer_layer_num,
         )
     except Exception:

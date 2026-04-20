@@ -834,6 +834,7 @@ class Scheduler(
                 logger.info("Using experimental C++ radix tree implementation.")
                 self.tree_cache = RadixCacheCpp(params=params, server_args=server_args)
             elif envs.SGLANG_ENABLE_UNIFIED_RADIX_TREE.get():
+                from sglang.srt.mem_cache.memory_pool import NSATokenToKVPool
                 from sglang.srt.mem_cache.unified_cache_components import (
                     ComponentType,
                 )
@@ -846,6 +847,10 @@ class Scheduler(
                     tree_components.append(
                         ComponentType.SWA if self.is_hybrid_swa else ComponentType.MAMBA
                     )
+                if isinstance(
+                    params.token_to_kv_pool_allocator.get_kvcache(), NSATokenToKVPool
+                ):
+                    tree_components.append(ComponentType.SHARED_ANCHOR)
 
                 params.tree_components = tuple(tree_components)
                 self.tree_cache = UnifiedRadixCache(params)
