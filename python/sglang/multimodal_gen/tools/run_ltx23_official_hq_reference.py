@@ -504,6 +504,25 @@ def main() -> None:
             streaming_prefetch_count=None,
         )
 
+        # The decode path only needs the final latents plus the video/audio decoders.
+        # Release the large stage / prompt components first to keep H100-class cards
+        # from OOMing during tiled VAE decode.
+        del ctx_p, ctx_n
+        del v_context_p, a_context_p, v_context_n, a_context_n
+        del pos_video_encoding, pos_audio_encoding, pos_binary_mask
+        del neg_video_encoding, neg_audio_encoding, neg_binary_mask
+        del pos_video_feats, pos_audio_feats, neg_video_feats, neg_audio_feats
+        del pos_hidden_states, pos_attention_mask
+        del neg_hidden_states, neg_attention_mask
+        del pos_stacked_hidden_states, neg_stacked_hidden_states
+        del pos_preconnector, neg_preconnector
+        del stage_1_conditionings, stage_2_conditionings
+        del empty_latent, sigmas, distilled_sigmas
+        del upscaled_video_latent, noiser, stepper
+        del pipeline.stage_1, pipeline.stage_2
+        del pipeline.prompt_encoder, pipeline.image_conditioner, pipeline.upsampler
+        cleanup_memory()
+
         video = pipeline.video_decoder(
             video_state.latent.clone(), tiling_config, generator
         )
