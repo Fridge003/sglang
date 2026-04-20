@@ -20,7 +20,7 @@ from sglang.srt.managers.schedule_batch import (
     Req,
     ScheduleBatch,
 )
-from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.common import maybe_cache_unfinished_req, release_kv_cache
 from sglang.srt.server_args import get_global_server_args
 
 if TYPE_CHECKING:
@@ -201,7 +201,7 @@ class SchedulerOutputProcessorMixin:
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                     elif not batch.decoding_reqs or req not in batch.decoding_reqs:
-                        self.tree_cache.cache_unfinished_req(req)
+                        maybe_cache_unfinished_req(req, self.tree_cache)
                         if self.enable_hisparse:
                             self.hisparse_coordinator.admit_request_into_staging(req)
 
@@ -335,7 +335,7 @@ class SchedulerOutputProcessorMixin:
                         release_kv_cache(req, self.tree_cache)
                         req.time_stats.set_completion_time()
                     else:
-                        self.tree_cache.cache_unfinished_req(req)
+                        maybe_cache_unfinished_req(req, self.tree_cache)
                 else:
                     # being chunked reqs' prefill is not finished
                     req.is_chunked -= 1

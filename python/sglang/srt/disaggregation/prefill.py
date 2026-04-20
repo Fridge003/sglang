@@ -37,8 +37,6 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     get_kv_class,
     is_mla_backend,
-    kv_to_page_indices,
-    kv_to_page_num,
     poll_and_all_reduce_attn_cp_tp_group,
     prepare_abort,
 )
@@ -49,7 +47,12 @@ from sglang.srt.managers.schedule_batch import (
     Req,
     ScheduleBatch,
 )
-from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.common import (
+    kv_to_page_indices,
+    kv_to_page_num,
+    maybe_cache_unfinished_req,
+    release_kv_cache,
+)
 from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool, NSATokenToKVPool
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.observability.req_time_stats import set_schedule_time_batch
@@ -338,11 +341,7 @@ class PrefillBootstrapQueue:
             # Cal number of pages to send
             # if decode has a cached prefix, we need to send the delta indices
             # otherwise, send the entire request
-            decode_prefix_len = (
-                req.disagg_kv_sender.kv_mgr.req_to_decode_prefix_len.pop(
-                    req.bootstrap_room, 0
-                )
-            )
+            decode_prefix_len = req.disagg_kv_sender.pop_decode_prefix_len()
             req.start_send_idx = decode_prefix_len
             num_kv_indices_to_send = num_kv_indices - decode_prefix_len
             num_pages = kv_to_page_num(
@@ -524,7 +523,7 @@ class SchedulerDisaggregationPrefillMixin:
 
                 # There is no output_ids for prefill
                 req.output_ids.append(next_token_id)
-                self.tree_cache.cache_unfinished_req(req)  # update the tree and lock
+                maybe_cache_unfinished_req(req, self.tree_cache)
                 self.disagg_prefill_inflight_queue.append(req)
                 if self.spec_algorithm.is_eagle() and batch.spec_info is not None:
                     req.output_topk_p = batch.spec_info.topk_p[i]
@@ -735,7 +734,7 @@ class SchedulerDisaggregationPrefillMixin:
         chunked_req_to_exclude = set()
         if self.chunked_req:
             chunked_req_to_exclude.add(self.chunked_req)
-            self.tree_cache.cache_unfinished_req(self.chunked_req, chunked=True)
+            maybe_cache_unfinished_req(self.chunked_req, self.tree_cache, chunked=True)
             if self.enable_overlap:
                 # Delay KV transfer to process_batch_result_disagg_prefill when overlap is enabled to ensure results are resolved
                 self.chunked_req.tmp_end_idx = min(
@@ -840,14 +839,9 @@ class SchedulerDisaggregationPrefillMixin:
                 state_indices = kv_to_page_indices(state_indices, page_size)
 
         page_indices = kv_to_page_indices(kv_indices, page_size)
-        # Skip empty non-last chunks for all backends. For empty last chunks,
-        # only NIXL currently defines the aux/state-only completion path used
-        # by decode-side radix cache; keep a conservative early return for
-        # other backends until they implement the same semantics.
-        if len(page_indices) == 0:
-            if not last_chunk:
-                return
-            if self.transfer_backend != TransferBackend.NIXL:
-                return
+        if not req.disagg_kv_sender.should_send_kv_chunk(
+            len(page_indices), last_chunk
+        ):
+            return
         req.disagg_kv_sender.send(page_indices, state_indices)
         req.start_send_idx = end_idx

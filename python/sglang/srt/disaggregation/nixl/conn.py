@@ -1079,6 +1079,12 @@ class NixlKVSender(CommonKVSender):
         self.has_sent = False
         self.chunk_id = 0
 
+    def pop_decode_prefix_len(self) -> int:
+        return self.kv_mgr.req_to_decode_prefix_len.pop(self.bootstrap_room, 0)
+
+    def should_send_kv_chunk(self, num_pages: int, last_chunk: bool) -> bool:
+        return num_pages > 0 or last_chunk
+
     def send(
         self,
         kv_indices: npt.NDArray[np.int32],

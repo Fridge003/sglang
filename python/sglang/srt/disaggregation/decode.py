@@ -44,8 +44,6 @@ from sglang.srt.disaggregation.utils import (
     TransferBackend,
     get_kv_class,
     is_mla_backend,
-    kv_to_page_indices,
-    page_align_floor,
     poll_and_all_reduce,
     poll_and_all_reduce_with_staging,
     prepare_abort,
@@ -53,14 +51,18 @@ from sglang.srt.disaggregation.utils import (
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, ScheduleBatch
+from sglang.srt.managers.schedule_policy import match_prefix_for_req
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
     EvictParams,
-    MatchPrefixParams,
 )
-from sglang.srt.mem_cache.common import release_kv_cache
+from sglang.srt.mem_cache.common import (
+    kv_to_page_indices,
+    page_align_floor,
+    release_kv_cache,
+)
 from sglang.srt.mem_cache.memory_pool import (
     HybridLinearKVPool,
     HybridReqToTokenPool,
@@ -68,7 +70,6 @@ from sglang.srt.mem_cache.memory_pool import (
     NSATokenToKVPool,
     ReqToTokenPool,
 )
-from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.observability.req_time_stats import (
     set_schedule_time_batch,
@@ -440,22 +441,17 @@ class DecodePreallocQueue:
         Match a request against the decode-side radix cache, lock the matched
         node to prevent eviction, and return the matched prefix information.
         """
-        result = self.tree_cache.match_prefix(
-            MatchPrefixParams(
-                key=RadixKey(req.origin_input_ids, extra_key=req.extra_key),
-                req=req,
-                cow_mamba=self.tree_cache.supports_mamba(),
-            )
+        result = match_prefix_for_req(
+            self.tree_cache,
+            req,
+            req.origin_input_ids,
+            cow_mamba=self.tree_cache.supports_mamba(),
+            include_req=True,
         )
         prefix_indices = result.device_indices
         last_device_node = result.last_device_node
         # Always lock to match aggregated scheduling behavior
         self.tree_cache.inc_lock_ref(last_device_node)
-
-        # we do this to ensure that whenever dec_loc_ref is called
-        # on the Req object, we are not dereferencing a `None`. In the
-        # agg case, the scheduler does this already
-        req.last_node = last_device_node
 
         return prefix_indices, len(prefix_indices)
 
