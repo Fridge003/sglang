@@ -667,7 +667,6 @@ class LTX2Attention(nn.Module):
         if use_attention:
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
             k = k.view(*k.shape[:-1], self.local_heads, self.dim_head)
-
             if gather_context_kv_for_sp:
                 k_full = sequence_model_parallel_all_gather(k.contiguous(), dim=1)
                 v_full = sequence_model_parallel_all_gather(v.contiguous(), dim=1)
@@ -894,9 +893,15 @@ class LTX2TransformerBlock(nn.Module):
         )
 
         # 4. Feedforward layers
-        self.ff = LTX2FeedForward(dim, dim_out=dim, quant_config=quant_config)
+        self.ff = LTX2FeedForward(
+            dim,
+            dim_out=dim,
+            quant_config=quant_config,
+        )
         self.audio_ff = LTX2FeedForward(
-            audio_dim, dim_out=audio_dim, quant_config=quant_config
+            audio_dim,
+            dim_out=audio_dim,
+            quant_config=quant_config,
         )
 
         # 5. Modulation Parameters
@@ -971,7 +976,6 @@ class LTX2TransformerBlock(nn.Module):
         v2a_cross_attn_perturbation_mask: Optional[torch.Tensor] = None,
         audio_replicated_for_sp: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         batch_size = hidden_states.size(0)
 
         # 1. Video and Audio Self-Attention
@@ -1581,6 +1585,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_replicated_for_sp: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        ltx2_phase = kwargs.get("ltx2_phase")
 
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
@@ -1655,7 +1660,18 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         # 2. Patchify input projections
-        hidden_states, _ = self.patchify_proj(hidden_states)
+        patchify_proj_input = hidden_states
+        if (
+            ltx2_phase == "stage2"
+            and str(getattr(self.config.arch_config, "ltx_variant", "ltx_2"))
+            == "ltx_2_3"
+            and hidden_states.ndim == 3
+            and hidden_states.is_contiguous()
+        ):
+            patchify_proj_input = (
+                hidden_states.transpose(1, 2).contiguous().transpose(1, 2)
+            )
+        hidden_states, _ = self.patchify_proj(patchify_proj_input)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
