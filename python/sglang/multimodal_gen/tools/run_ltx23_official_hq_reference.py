@@ -39,6 +39,25 @@ def _clone_video_chunks(video: Iterator[torch.Tensor]) -> Iterator[torch.Tensor]
         yield chunk.clone()
 
 
+def _resolve_gemma_component_roots(gemma_root: Path) -> tuple[Path, Path, Path]:
+    text_encoder_root = gemma_root / "text_encoder"
+    tokenizer_root = gemma_root / "tokenizer"
+    if text_encoder_root.is_dir() and tokenizer_root.is_dir():
+        return text_encoder_root, tokenizer_root, tokenizer_root
+    model_candidates = sorted(gemma_root.rglob("model*.safetensors"))
+    tokenizer_candidates = sorted(gemma_root.rglob("tokenizer.model"))
+    processor_candidates = sorted(gemma_root.rglob("preprocessor_config.json"))
+    if not model_candidates or not tokenizer_candidates or not processor_candidates:
+        raise FileNotFoundError(
+            f"Could not resolve Gemma component roots under {gemma_root}"
+        )
+    return (
+        model_candidates[0].parent,
+        tokenizer_candidates[0].parent,
+        processor_candidates[0].parent,
+    )
+
+
 def _to_probe_payload(value: Any) -> Any:
     if torch.is_tensor(value):
         return value.detach().cpu()
@@ -176,7 +195,6 @@ def main() -> None:
     from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
     from ltx_core.text_encoders.gemma.tokenizer import LTXVGemmaTokenizer
     from ltx_core.types import VideoLatentShape, VideoPixelShape
-    from ltx_core.utils import find_matching_file
     from ltx_pipelines.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
     from ltx_pipelines.utils.constants import (
         DEFAULT_NEGATIVE_PROMPT,
@@ -191,9 +209,9 @@ def main() -> None:
 
     negative_prompt = args.negative_prompt or DEFAULT_NEGATIVE_PROMPT
 
-    gemma_model_root = find_matching_file(str(gemma_root), "model*.safetensors").parent
-    tokenizer_root = find_matching_file(str(gemma_root), "tokenizer.model").parent
-    processor_root = find_matching_file(str(gemma_root), "preprocessor_config.json").parent
+    gemma_model_root, tokenizer_root, processor_root = _resolve_gemma_component_roots(
+        gemma_root
+    )
 
     pipeline = TI2VidTwoStagesHQPipeline(
         checkpoint_path=args.checkpoint_path,
