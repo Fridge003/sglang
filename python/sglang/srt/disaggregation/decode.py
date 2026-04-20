@@ -1028,36 +1028,31 @@ class DecodePreallocQueue:
                 )
 
         if self.scheduler.enable_hisparse:
+            # HiSparse is incompatible with decode-side L1 radix cache. Keep
+            # this path on the upstream full-allocation semantics.
+            assert prefix_len == 0
+
             # Direct-to-host path: only allocate logical indices (no hisparse
             # device indices) and allocate host indices for RDMA destination.
             coordinator = self.scheduler.hisparse_coordinator
             device = self.token_to_kv_pool_allocator.device
-            last_loc = (
-                prefix_indices[-1:].to(dtype=torch.int64, device=device)
-                if prefix_len > 0
-                else torch.tensor([-1], dtype=torch.int64, device=device)
-            )
             kv_loc = self.token_to_kv_pool_allocator.alloc_logical_only(
-                prefix_lens=torch.tensor(
-                    [prefix_len], dtype=torch.int64, device=device
-                ),
-                prefix_lens_cpu=torch.tensor([prefix_len], dtype=torch.int64),
+                prefix_lens=torch.tensor([0], dtype=torch.int64, device=device),
+                prefix_lens_cpu=torch.tensor([0], dtype=torch.int64),
                 seq_lens=torch.tensor([fill_len], dtype=torch.int64, device=device),
                 seq_lens_cpu=torch.tensor([fill_len], dtype=torch.int64),
-                last_loc=last_loc,
-                extend_num_tokens=delta_len,
+                last_loc=torch.tensor([-1], dtype=torch.int64, device=device),
+                extend_num_tokens=fill_len,
             )
-            # Allocate host indices only for the transfer delta.
-            host_indices = coordinator.mem_pool_host.alloc(delta_len)
+            # Allocate host indices for the RDMA transfer target.
+            host_indices = coordinator.mem_pool_host.alloc(fill_len)
             if host_indices is None:
                 raise RuntimeError(
-                    f"HiSparse host mem pool alloc failed for {delta_len} tokens "
+                    f"HiSparse host mem pool alloc failed for {fill_len} tokens "
                     f"in _pre_alloc (req {req.rid})"
                 )
             host_indices = host_indices.to(device=coordinator.device)
-            coordinator.req_to_host_pool[
-                req.req_pool_idx, prefix_len : prefix_len + delta_len
-            ] = host_indices
+            coordinator.req_to_host_pool[req.req_pool_idx, :fill_len] = host_indices
         elif self.token_to_kv_pool_allocator.page_size == 1:
             kv_loc = self.token_to_kv_pool_allocator.alloc(delta_len)
         else:
