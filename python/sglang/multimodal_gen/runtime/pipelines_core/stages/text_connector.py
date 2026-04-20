@@ -4,6 +4,7 @@ from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_c
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
 
 
 class LTX2TextConnectorStage(PipelineStage):
@@ -47,6 +48,16 @@ class LTX2TextConnectorStage(PipelineStage):
 
         # Handle CFG: Concatenate negative and positive inputs
         if batch.do_classifier_free_guidance:
+            dump_probe_payload(
+                batch,
+                "text_connector/input_cfg",
+                {
+                    "positive_prompt_embeds": prompt_embeds,
+                    "negative_prompt_embeds": neg_prompt_embeds,
+                    "positive_attention_mask": prompt_attention_mask,
+                    "negative_attention_mask": neg_prompt_attention_mask,
+                },
+            )
 
             # Concatenate: [Negative, Positive]
             prompt_embeds = torch.cat([neg_prompt_embeds, prompt_embeds], dim=0)
@@ -68,6 +79,16 @@ class LTX2TextConnectorStage(PipelineStage):
                 )
             )
 
+        dump_probe_payload(
+            batch,
+            "text_connector/output_combined",
+            {
+                "connector_prompt_embeds": connector_prompt_embeds,
+                "connector_audio_prompt_embeds": connector_audio_prompt_embeds,
+                "connector_mask": connector_mask,
+            },
+        )
+
         # Split results if CFG was enabled
         if batch.do_classifier_free_guidance:
             neg_embeds, pos_embeds = connector_prompt_embeds.chunk(2, dim=0)
@@ -75,6 +96,19 @@ class LTX2TextConnectorStage(PipelineStage):
                 2, dim=0
             )
             neg_mask, pos_mask = connector_mask.chunk(2, dim=0)
+
+            dump_probe_payload(
+                batch,
+                "text_connector/output_split",
+                {
+                    "positive_prompt_embeds": pos_embeds,
+                    "negative_prompt_embeds": neg_embeds,
+                    "positive_audio_prompt_embeds": pos_audio_embeds,
+                    "negative_audio_prompt_embeds": neg_audio_embeds,
+                    "positive_attention_mask": pos_mask,
+                    "negative_attention_mask": neg_mask,
+                },
+            )
 
             batch.prompt_embeds = [pos_embeds]
             batch.audio_prompt_embeds = [pos_audio_embeds]
@@ -84,6 +118,15 @@ class LTX2TextConnectorStage(PipelineStage):
             batch.negative_audio_prompt_embeds = [neg_audio_embeds]
             batch.negative_attention_mask = neg_mask
         else:
+            dump_probe_payload(
+                batch,
+                "text_connector/output_positive",
+                {
+                    "prompt_embeds": connector_prompt_embeds,
+                    "audio_prompt_embeds": connector_audio_prompt_embeds,
+                    "attention_mask": connector_mask,
+                },
+            )
             # Update positive fields
             batch.prompt_embeds = [connector_prompt_embeds]
             batch.audio_prompt_embeds = [connector_audio_prompt_embeds]

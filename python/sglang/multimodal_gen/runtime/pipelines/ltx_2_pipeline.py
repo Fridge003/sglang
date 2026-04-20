@@ -171,7 +171,11 @@ def _add_ltx2_front_stages(pipeline: ComposedPipelineBase):
     )
 
 
-def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
+def _add_ltx2_stage1_generation_stages(
+    pipeline: ComposedPipelineBase,
+    *,
+    denoising_sampler_name: str = "euler",
+):
     pipeline.add_stage(LTX2SigmaPreparationStage())
     pipeline.add_standard_timestep_preparation_stage(
         prepare_extra_kwargs=[prepare_ltx2_mu]
@@ -191,6 +195,7 @@ def _add_ltx2_stage1_generation_stages(pipeline: ComposedPipelineBase):
                 scheduler=pipeline.get_module("scheduler"),
                 vae=pipeline.get_module("vae"),
                 audio_vae=pipeline.get_module("audio_vae"),
+                sampler_name=denoising_sampler_name,
                 pipeline=pipeline,
             ),
         ]
@@ -666,6 +671,9 @@ class LTX2TwoStageDeviceManager:
 class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     pipeline_name = "LTX2TwoStagePipeline"
     STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
+    STAGE_1_DISTILLED_LORA_STRENGTH = 0.0
+    STAGE_2_DISTILLED_LORA_STRENGTH = 1.0
+    STAGE_1_DENOISING_SAMPLER_NAME = "euler"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -690,7 +698,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         upsampler_path = server_args.component_paths.get("spatial_upsampler")
         if not upsampler_path:
             raise ValueError(
-                "LTX2TwoStagePipeline requires --spatial-upsampler-path "
+                f"{self.pipeline_name} requires --spatial-upsampler-path "
                 "(component_paths['spatial_upsampler'])."
             )
         module, memory_usage = PipelineComponentLoader.load_component(
@@ -705,7 +713,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         distilled_lora_path = server_args.component_paths.get("distilled_lora")
         if not distilled_lora_path:
             raise ValueError(
-                "LTX2TwoStagePipeline requires --distilled-lora-path "
+                f"{self.pipeline_name} requires --distilled-lora-path "
                 "(component_paths['distilled_lora'])."
             )
         self._distilled_lora_path = distilled_lora_path
@@ -733,7 +741,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             lora_nickname="ltx2_stage2_distilled",
             lora_path=self._distilled_lora_path,
             target="transformer_2",
-            strength=1.0,
+            strength=self.STAGE_2_DISTILLED_LORA_STRENGTH,
             merge_weights=True,
         )
 
@@ -753,21 +761,49 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             "resident",
         )
 
+    def _can_short_circuit_lora_switch(self, phase: str) -> bool:
+        if phase == "stage1":
+            return (
+                self._stage1_lora_path is None
+                and self.STAGE_1_DISTILLED_LORA_STRENGTH == 0.0
+            )
+        if phase == "stage2":
+            return (
+                self._use_premerged_stage2_transformer and self._stage1_lora_path is None
+            )
+        return False
+
     def switch_lora_phase(self, phase: str) -> None:
         if phase == self._active_lora_phase:
             return
 
-        if self._device_manager.switch_phase(phase):
+        if self._device_manager.switch_phase(phase) and self._can_short_circuit_lora_switch(
+            phase
+        ):
             self._active_lora_phase = phase
             return
 
         if phase == "stage1":
+            lora_nicknames = []
+            lora_paths = []
+            lora_strengths = []
+            lora_targets = []
             if self._stage1_lora_path:
+                lora_nicknames.append("ltx2_stage1_base")
+                lora_paths.append(self._stage1_lora_path)
+                lora_strengths.append(self._stage1_lora_scale)
+                lora_targets.append("transformer")
+            if self.STAGE_1_DISTILLED_LORA_STRENGTH != 0.0:
+                lora_nicknames.append("ltx2_stage1_distilled")
+                lora_paths.append(self._distilled_lora_path)
+                lora_strengths.append(self.STAGE_1_DISTILLED_LORA_STRENGTH)
+                lora_targets.append("transformer")
+            if lora_nicknames:
                 self.set_lora(
-                    lora_nickname="ltx2_stage1_base",
-                    lora_path=self._stage1_lora_path,
-                    target="transformer",
-                    strength=self._stage1_lora_scale,
+                    lora_nickname=lora_nicknames,
+                    lora_path=lora_paths,
+                    target=lora_targets,
+                    strength=lora_strengths,
                 )
             else:
                 # Stage 1 must run on the base transformer weights. If stage 2 left the
@@ -784,22 +820,26 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_paths.append(self._stage1_lora_path)
                 lora_strengths.append(self._stage1_lora_scale)
                 lora_targets.append("transformer")
-            lora_nicknames.append("ltx2_stage2_distilled")
-            lora_paths.append(self._distilled_lora_path)
-            lora_strengths.append(1.0)
-            lora_targets.append("transformer")
-            self.set_lora(
-                lora_nickname=lora_nicknames,
-                lora_path=lora_paths,
-                target=lora_targets,
-                strength=lora_strengths,
-                # Official LTX-2.3 two-stage builds stage 2 with distilled LoRA fused
-                # into the transformer weights. Legacy LTX-2 should keep the
-                # preexisting unmerged behavior to avoid regressing stage 2 quality.
-                merge_weights=self._should_merge_stage2_distilled_lora(
-                    self.server_args
-                ),
-            )
+            if self.STAGE_2_DISTILLED_LORA_STRENGTH != 0.0:
+                lora_nicknames.append("ltx2_stage2_distilled")
+                lora_paths.append(self._distilled_lora_path)
+                lora_strengths.append(self.STAGE_2_DISTILLED_LORA_STRENGTH)
+                lora_targets.append("transformer")
+            if lora_nicknames:
+                self.set_lora(
+                    lora_nickname=lora_nicknames,
+                    lora_path=lora_paths,
+                    target=lora_targets,
+                    strength=lora_strengths,
+                    # Official LTX-2.3 two-stage builds stage 2 with distilled LoRA fused
+                    # into the transformer weights. Legacy LTX-2 should keep the
+                    # preexisting unmerged behavior to avoid regressing stage 2 quality.
+                    merge_weights=self._should_merge_stage2_distilled_lora(
+                        self.server_args
+                    ),
+                )
+            else:
+                self.deactivate_lora_weights(target="transformer")
         else:
             raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")
 
@@ -811,7 +851,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self.add_stage(
             LTX2LoRASwitchStage(pipeline=self, phase="stage1"),
         )
-        _add_ltx2_stage1_generation_stages(self)
+        _add_ltx2_stage1_generation_stages(
+            self,
+            denoising_sampler_name=self.STAGE_1_DENOISING_SAMPLER_NAME,
+        )
         self.add_stages(
             [
                 LTX2UpsampleStage(
@@ -843,4 +886,11 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         _add_ltx2_decoding_stage(self)
 
 
-EntryClass = [LTX2Pipeline, LTX2TwoStagePipeline]
+class LTX2TwoStageHQPipeline(LTX2TwoStagePipeline):
+    pipeline_name = "LTX2TwoStageHQPipeline"
+    STAGE_1_DISTILLED_LORA_STRENGTH = 0.25
+    STAGE_2_DISTILLED_LORA_STRENGTH = 0.5
+    STAGE_1_DENOISING_SAMPLER_NAME = "res2s"
+
+
+EntryClass = [LTX2Pipeline, LTX2TwoStagePipeline, LTX2TwoStageHQPipeline]

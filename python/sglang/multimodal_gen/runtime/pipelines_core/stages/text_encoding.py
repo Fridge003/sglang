@@ -24,6 +24,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
 
 logger = init_logger(__name__)
 
@@ -70,6 +71,8 @@ class TextEncodingStage(PipelineStage):
             server_args,
             encoder_index=all_indices,
             return_attention_mask=True,
+            batch=batch,
+            probe_label="positive",
         )
 
         for pe in prompt_embeds_list:
@@ -91,6 +94,8 @@ class TextEncodingStage(PipelineStage):
                 server_args,
                 encoder_index=all_indices,
                 return_attention_mask=True,
+                batch=batch,
+                probe_label="negative",
             )
 
             assert batch.negative_prompt_embeds is not None
@@ -154,6 +159,8 @@ class TextEncodingStage(PipelineStage):
         padding: bool | str | None = None,
         return_overflowing_tokens=None,
         return_length=None,
+        batch: Req | None = None,
+        probe_label: str | None = None,
     ):
         """
         Encode plain text using selected text encoder(s) and return embeddings.
@@ -296,6 +303,24 @@ class TextEncodingStage(PipelineStage):
             )
             if pooled_output is not None:
                 pooled_embeds_list.append(pooled_output.to(device=target_device))
+
+            if batch is not None and probe_label is not None:
+                hidden_states = getattr(outputs, "hidden_states", None)
+                stacked_hidden_states = None
+                if hidden_states is not None:
+                    stacked_hidden_states = torch.stack(list(hidden_states), dim=0)
+                dump_probe_payload(
+                    batch,
+                    f"text_encoding/{probe_label}/encoder_{i}",
+                    {
+                        "processed_text": processed_text_list,
+                        "input_ids": input_ids,
+                        "attention_mask": attention_mask,
+                        "stacked_hidden_states": stacked_hidden_states,
+                        "prompt_embeds": prompt_embeds,
+                        "pooled_output": pooled_output,
+                    },
+                )
 
             if return_attention_mask:
                 mask_to_store = (

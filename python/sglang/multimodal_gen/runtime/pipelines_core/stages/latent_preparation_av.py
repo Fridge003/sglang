@@ -15,8 +15,12 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
     VerificationResult,
 )
-from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.server_args import (
+    ServerArgs,
+    is_ltx2_two_stage_pipeline_name,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
 
 logger = init_logger(__name__)
 
@@ -62,7 +66,7 @@ class LTX2AVLatentPreparationStage(LatentPreparationStage):
         server_args: ServerArgs,
     ):
         if is_ltx23_native_variant(server_args.pipeline_config.vae_config.arch_config):
-            if server_args.pipeline_class_name == "LTX2TwoStagePipeline":
+            if is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name):
                 return server_args.pipeline_config.get_latent_dtype(
                     batch.prompt_embeds[0].dtype
                 )
@@ -175,6 +179,16 @@ class LTX2AVLatentPreparationStage(LatentPreparationStage):
 
         batch.latents = latents
         batch.raw_latent_shape = latents.shape
+        dump_probe_payload(
+            batch,
+            "latent_preparation/video",
+            {
+                "latents": latents,
+                "latent_ids": batch.latent_ids,
+                "raw_latent_shape": batch.raw_latent_shape,
+                "num_frames": batch.num_frames,
+            },
+        )
 
         # 2. Prepare Audio Latents (optional)
         # Default to True if not specified
@@ -209,5 +223,13 @@ class LTX2AVLatentPreparationStage(LatentPreparationStage):
         # Store in batch
         batch.audio_latents = audio_latents
         batch.raw_audio_latent_shape = audio_latents.shape
+        dump_probe_payload(
+            batch,
+            "latent_preparation/audio",
+            {
+                "audio_latents": audio_latents,
+                "raw_audio_latent_shape": batch.raw_audio_latent_shape,
+            },
+        )
 
         return batch
