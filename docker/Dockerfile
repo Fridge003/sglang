@@ -472,6 +472,13 @@ RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
+# Install Rust toolchain (for setuptools-rust-built extensions, e.g. sglang-grpc).
+# Minimum supported version: 1.85 (first stable with edition 2024).
+ENV PATH="/root/.cargo/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path \
+    && rustc --version && cargo --version
+
 # Install NVIDIA development tools
 RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     apt update -y \
@@ -523,7 +530,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pandas \
     matplotlib \
     tabulate \
-    termplotlib
+    termplotlib \
+    "runai-model-streamer[s3,gcs,azure]>=0.15.7"
 
 RUN --mount=type=cache,target=/root/.cache/pip \
    python3 -m pip install "nvidia-cutlass-dsl>=4.4.1" "nvidia-cutlass-dsl-libs-base>=4.4.1" --force-reinstall --no-deps;
@@ -615,15 +623,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python3 -m pip install --no-deps -e "python[${BUILD_TYPE}]" \
     && kernels lock python \
     && ( success=0; for i in 1 2 3; do \
-        echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
-        kernels download python && \
-        success=1 && break; \
-        echo "sgl-kernel cubin download failed, retrying in 30s..." && sleep 30; \
+    echo "Attempt $i/3: downloading sgl-kernel cubins..." && \
+    kernels download python && \
+    success=1 && break; \
+    echo "sgl-kernel cubin download failed, retrying in 30s..." && sleep 30; \
     done; [ "$success" = "1" ] ) \
-    && mv python/kernels.lock /root/.cache/sglang \
+    && mkdir -p /root/.cache/sglang \
+    && mv python/kernels.lock /root/.cache/sglang/ \
     && find /usr/local/lib/python3.12/dist-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true \
-    && find /usr/local/lib/python3.12/dist-packages -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true \
-    && find /usr/local/lib/python3.12/dist-packages -name "*.pyc" -delete 2>/dev/null || true
+
 
 # Install pre-built gateway artifacts from parallel builder
 COPY --from=gateway_builder /build/sgl-model-gateway-bin /usr/local/bin/sgl-model-gateway
