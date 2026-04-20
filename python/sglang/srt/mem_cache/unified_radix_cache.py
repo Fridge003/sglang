@@ -5,7 +5,7 @@ import threading
 import time
 from collections import defaultdict
 from functools import partial
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
@@ -46,6 +46,7 @@ from sglang.srt.mem_cache.unified_cache_components import (
     get_and_increase_time_counter,
 )
 from sglang.srt.mem_cache.utils import convert_to_bigram_key
+from sglang.srt.session.streaming_session import StreamingSession
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -242,6 +243,13 @@ class UnifiedRadixCache(BasePrefixCache):
         else:
             self.key_convert_fn = lambda key: key
 
+        # Streaming session: embedded StreamingSession with self as inner.
+        # Always on -- zero overhead when no streaming session is open (the
+        # try_* entries short-circuit on non-streaming reqs / real TreeNodes).
+        # Dispatch methods below pre-check conditions so the session's
+        # internal fall-through to self.inner.xxx never fires -- no recursion.
+        self.session = StreamingSession(inner=self)
+
         self.tp_group = params.tp_cache_group
         self.tp_world_size = (
             1
@@ -249,7 +257,7 @@ class UnifiedRadixCache(BasePrefixCache):
             else torch.distributed.get_world_size(group=self.tp_group)
         )
 
-        # HiCache D↔H defaults (overridden by _init_hicache)
+        # HiCache D↔H defaults (overridden by init_hicache)
         self.cache_controller = None
         self.write_through_threshold = 256
 
@@ -272,6 +280,8 @@ class UnifiedRadixCache(BasePrefixCache):
         self.lru_lists = {
             ct: UnifiedLRUList(ct, self.tree_components) for ct in self.tree_components
         }
+        self.session.slots.clear()
+
         self.evictable_device_leaves: set[UnifiedTreeNode] = set()
         self.evictable_host_leaves: set[UnifiedTreeNode] = set()
         self.host_lru_lists = {
@@ -322,6 +332,10 @@ class UnifiedRadixCache(BasePrefixCache):
         )
 
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
+        result = self.session.try_match_prefix(params)
+        if result is not None:
+            return result
+
         key = params.key
         key, _ = maybe_bigram_convert(self.is_eagle, key)
         if self.disable or len(key) == 0:
@@ -370,7 +384,10 @@ class UnifiedRadixCache(BasePrefixCache):
             mamba_num_evicted=tracker.get(ComponentType.MAMBA, 0),
         )
 
-    def inc_lock_ref(self, node: UnifiedTreeNode) -> IncLockRefResult:
+    def inc_lock_ref(self, node: Any) -> IncLockRefResult:
+        result = self.session.try_inc_lock_ref(node)
+        if result is not None:
+            return result
         if self.disable:
             return IncLockRefResult()
         result = IncLockRefResult()
@@ -381,8 +398,11 @@ class UnifiedRadixCache(BasePrefixCache):
         return result
 
     def dec_lock_ref(
-        self, node: UnifiedTreeNode, params: Optional[DecLockRefParams] = None
+        self, node: Any, params: Optional[DecLockRefParams] = None
     ) -> DecLockRefResult:
+        result = self.session.try_dec_lock_ref(node, params)
+        if result is not None:
+            return result
         if self.disable:
             return DecLockRefResult()
         for component in self._components_tuple:
@@ -392,7 +412,10 @@ class UnifiedRadixCache(BasePrefixCache):
         # TODO: delta is not aggregated from components; no caller uses it yet.
         return DecLockRefResult()
 
-    def cache_finished_req(self, req: Req, is_insert: bool = True) -> None:
+    def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs) -> None:
+        if self.session.try_cache_finished_req(req, is_insert=is_insert, **kwargs):
+            return
+
         kv_committed_len = req.pop_committed_kv_cache()
 
         if self.disable:
@@ -461,7 +484,10 @@ class UnifiedRadixCache(BasePrefixCache):
                 req, is_finished=True, insert_result=result, insert_params=insert_params
             )
 
-    def cache_unfinished_req(self, req: Req, chunked=False) -> None:
+    def cache_unfinished_req(self, req: Req, chunked=False, **kwargs) -> None:
+        if self.session.try_cache_unfinished_req(req, chunked=chunked, **kwargs):
+            return
+
         token_ids = req.fill_ids
 
         if self.disable:
@@ -1382,6 +1408,26 @@ class UnifiedRadixCache(BasePrefixCache):
     def supports_mamba(self) -> bool:
         return ComponentType.MAMBA in self.components
 
+    # ---- Streaming session API (delegates to composed StreamingSession) ----
+
+    def supports_streaming_session(self) -> bool:
+        return True
+
+    def release_session(self, session_id: str) -> None:
+        self.session.release_session(session_id)
+
+    def session_held_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
+        return self.session.session_held_tokens(active_pool_idxs)
+
+    def session_held_full_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
+        return self.session.session_held_full_tokens(active_pool_idxs)
+
+    def session_held_swa_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
+        return self.session.session_held_swa_tokens(active_pool_idxs)
+
+    def session_held_req_count(self, active_pool_idxs: Optional[set] = None) -> int:
+        return self.session.session_held_req_count(active_pool_idxs)
+
     def evictable_size(self) -> int:
         return self.component_evictable_size_.get(BASE_COMPONENT_TYPE, 0)
 
@@ -1504,7 +1550,12 @@ class UnifiedRadixCache(BasePrefixCache):
     def sanity_check(self):
         """Verify tree invariants (A2-A5) and tracking invariants (INV-1~5).
         Collects all violations before reporting. Expensive — idle/test only."""
-        # TODO(hzh): This
+        # Skip when streaming sessions hold tree locks: the check asserts
+        # all nodes are unlocked during idle, which streaming sessions break
+        # by design (they hold a first-turn lock across turns).
+        if self.session.any_holding_kv():
+            return
+
         errors: list[str] = []
         E = errors.append
         all_nodes = self._collect_all_nodes()
