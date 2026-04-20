@@ -93,9 +93,10 @@ def _should_fallback_from_flashinfer_fp4(error: RuntimeError) -> bool:
 def _should_retry_flashinfer_fp4_with_cutlass_backend(
     backend: str | None, error: RuntimeError
 ) -> bool:
-    return backend not in {"cutlass", "trtllm"} and _should_fallback_from_flashinfer_fp4(
-        error
-    )
+    return backend not in {
+        "cutlass",
+        "trtllm",
+    } and _should_fallback_from_flashinfer_fp4(error)
 
 
 def _override_flashinfer_fp4_runtime_backend(backend: str, reason: str) -> None:
