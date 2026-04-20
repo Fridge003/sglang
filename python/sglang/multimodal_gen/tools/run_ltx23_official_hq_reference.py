@@ -169,6 +169,10 @@ def parse_args() -> argparse.Namespace:
             "Use 1 on H100-class GPUs to keep the HQ helper under memory limits."
         ),
     )
+    parser.add_argument("--vae-spatial-tile-size", type=int, default=512)
+    parser.add_argument("--vae-spatial-tile-overlap", type=int, default=64)
+    parser.add_argument("--vae-temporal-tile-size", type=int, default=64)
+    parser.add_argument("--vae-temporal-tile-overlap", type=int, default=24)
     parser.add_argument("--probe-dir")
     return parser.parse_args()
 
@@ -193,7 +197,12 @@ def main() -> None:
     from ltx_core.components.noisers import GaussianNoiser
     from ltx_core.components.schedulers import LTX2Scheduler
     from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
-    from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
+    from ltx_core.model.video_vae import (
+        SpatialTilingConfig,
+        TemporalTilingConfig,
+        TilingConfig,
+        get_video_chunks_number,
+    )
     from ltx_core.text_encoders.gemma.embeddings_processor import (
         EmbeddingsProcessorOutput,
         convert_to_additive_mask,
@@ -271,7 +280,16 @@ def main() -> None:
 
     pipeline.prompt_encoder._text_encoder_ctx = _hf_text_encoder_ctx
 
-    tiling_config = TilingConfig.default()
+    tiling_config = TilingConfig(
+        spatial_config=SpatialTilingConfig(
+            tile_size_in_pixels=args.vae_spatial_tile_size,
+            tile_overlap_in_pixels=args.vae_spatial_tile_overlap,
+        ),
+        temporal_config=TemporalTilingConfig(
+            tile_size_in_frames=args.vae_temporal_tile_size,
+            tile_overlap_in_frames=args.vae_temporal_tile_overlap,
+        ),
+    )
     video_guider_params = MultiModalGuiderParams(
         cfg_scale=args.video_cfg_guidance_scale,
         stg_scale=args.video_stg_guidance_scale,
