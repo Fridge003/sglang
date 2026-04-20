@@ -223,6 +223,16 @@ class LTX2DenoisingStage(DenoisingStage):
         return pred * factor
 
     @staticmethod
+    def _should_dump_stage1_probe_once(batch: Req, probe_key: str) -> bool:
+        if batch.extra.get("ltx2_phase") != "stage1":
+            return False
+        probe_state_key = f"_ltx2_{probe_key}_dumped"
+        if batch.extra.get(probe_state_key):
+            return False
+        batch.extra[probe_state_key] = True
+        return True
+
+    @staticmethod
     def _maybe_dump_stage1_step0_probe(
         batch: Req,
         *,
@@ -243,7 +253,9 @@ class LTX2DenoisingStage(DenoisingStage):
     ) -> None:
         if step_index != 0:
             return
-        if batch.extra.get("ltx2_phase") != "stage1":
+        if not LTX2DenoisingStage._should_dump_stage1_probe_once(
+            batch, "stage1_step0_probe"
+        ):
             return
         dump_probe_payload(
             batch,
@@ -274,7 +286,9 @@ class LTX2DenoisingStage(DenoisingStage):
     ) -> None:
         if step_index != 0:
             return
-        if batch.extra.get("ltx2_phase") != "stage1":
+        if not LTX2DenoisingStage._should_dump_stage1_probe_once(
+            batch, "stage1_transformer_step0_probe"
+        ):
             return
         dump_probe_payload(batch, "denoising/stage1_transformer_step0", payload)
 

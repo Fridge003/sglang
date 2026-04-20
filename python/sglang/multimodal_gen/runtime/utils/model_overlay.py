@@ -28,7 +28,7 @@ BUILTIN_MODEL_OVERLAY_REGISTRY: dict[str, dict[str, Any]] = {
     "Lightricks/LTX-2.3": {
         # TODO: consider move to lmsys hf repo
         "overlay_repo_id": "MickJ/LTX-2.3-overlay",
-        "overlay_revision": "main",
+        "overlay_revision": "cc5f89b688c3e8e46dddc26ad7bbefd767b9ec0a",
         "bundled_overlay_subdir": "ltx_2_3",
     },
 }
