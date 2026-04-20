@@ -2087,17 +2087,36 @@ def recv_msgpack_s2d(socket):
 async def async_recv_msgpack_d2t(socket):
     """Receive detokenizer→tokenizer message via async zmq msgpack.
 
-    The tokenizer socket receives both msgpack (from detokenizer) and pickle
-    (from scheduler for AbortReq, etc.) messages. Try msgpack first, fall back
-    to pickle.
+    All senders now use msgpack (both detokenizer and scheduler via
+    SenderWrapper with use_msgpack=True). Pickle fallback retained for
+    backward compat with older scheduler versions.
     """
     data = await socket.recv()
     try:
         return _d2t_decoder.decode(data)
     except (msgspec.DecodeError, msgspec.ValidationError):
-        import pickle as _pickle
+        pass
 
-        return _pickle.loads(data)
+    # Try as a tagged dict (dataclass control replies encoded by SenderWrapper)
+    try:
+        raw = msgspec.msgpack.decode(data)
+        if isinstance(raw, dict):
+            msg_type = raw.get("type", "")
+            if msg_type == "AbortReq":
+                req = AbortReq()
+                req.rid = raw.get("rid")
+                req.abort_all = raw.get("abort_all", False)
+                req.finished_reason = raw.get("finished_reason")
+                req.abort_message = raw.get("abort_message")
+                req.http_worker_ipc = raw.get("http_worker_ipc")
+                return req
+            return raw
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        pass
+
+    # Legacy pickle fallback
+    import pickle as _pickle
+    return _pickle.loads(data)
 
 
 def recv_msgpack_d2t(socket):
@@ -2106,9 +2125,113 @@ def recv_msgpack_d2t(socket):
     try:
         return _d2t_decoder.decode(data)
     except (msgspec.DecodeError, msgspec.ValidationError):
-        import pickle as _pickle
+        pass
 
-        return _pickle.loads(data)
+    # Try as a tagged dict (dataclass control replies encoded by SenderWrapper)
+    try:
+        raw = msgspec.msgpack.decode(data)
+        if isinstance(raw, dict):
+            msg_type = raw.get("type", "")
+            if msg_type == "AbortReq":
+                req = AbortReq()
+                req.rid = raw.get("rid")
+                req.abort_all = raw.get("abort_all", False)
+                req.finished_reason = raw.get("finished_reason")
+                req.abort_message = raw.get("abort_message")
+                req.http_worker_ipc = raw.get("http_worker_ipc")
+                return req
+            return raw
+    except (msgspec.DecodeError, msgspec.ValidationError):
+        pass
+
+    # Legacy pickle fallback
+    import pickle as _pickle
+    return _pickle.loads(data)
+
+
+# ---------------------------------------------------------------------------
+# Msgpack IPC helpers for tokenizer->scheduler channel (Rust frontend support)
+# ---------------------------------------------------------------------------
+
+
+def _sampling_params_from_dict(d):
+    """Reconstruct a SamplingParams from a msgpack-decoded dict."""
+    from sglang.srt.sampling.sampling_params import SamplingParams
+
+    stop_strs = d.get("stop_strs")
+    if stop_strs is None:
+        stop_strs = []
+    return SamplingParams(
+        max_new_tokens=d.get("max_new_tokens", 128),
+        stop=stop_strs,
+        stop_token_ids=d.get("stop_token_ids"),
+        temperature=d.get("temperature", 1.0),
+        top_p=d.get("top_p", 1.0),
+        top_k=d.get("top_k", -1),
+        min_p=d.get("min_p", 0.0),
+        frequency_penalty=d.get("frequency_penalty", 0.0),
+        presence_penalty=d.get("presence_penalty", 0.0),
+        repetition_penalty=d.get("repetition_penalty", 1.0),
+        min_new_tokens=d.get("min_new_tokens", 0),
+        n=d.get("n", 1),
+        json_schema=d.get("json_schema"),
+        regex=d.get("regex"),
+        ebnf=d.get("ebnf"),
+        structural_tag=d.get("structural_tag"),
+        ignore_eos=d.get("ignore_eos", False),
+        skip_special_tokens=d.get("skip_special_tokens", True),
+        spaces_between_special_tokens=d.get("spaces_between_special_tokens", True),
+        no_stop_trim=d.get("no_stop_trim", False),
+        custom_params=d.get("custom_params"),
+        stream_interval=d.get("stream_interval"),
+        logit_bias=d.get("logit_bias"),
+        sampling_seed=d.get("sampling_seed"),
+    )
+
+
+def _tokenized_req_from_dict(d):
+    """Reconstruct a TokenizedGenerateReqInput from a msgpack-decoded dict."""
+    sp_raw = d.get("sampling_params", {})
+    if isinstance(sp_raw, dict):
+        sp = _sampling_params_from_dict(sp_raw)
+    else:
+        sp = sp_raw  # already a SamplingParams (shouldn't happen from Rust)
+
+    # Normalize sampling params (normally done by TokenizerManager, but Rust frontend skips it).
+    # The Rust frontend pre-computes stop_str_max_len in token units using its tokenizer,
+    # so we use that value when available instead of falling back to character length.
+    pre_computed_max_len = sp_raw.get("stop_str_max_len") if isinstance(sp_raw, dict) else None
+    sp.normalize(None)
+    if pre_computed_max_len is not None:
+        sp.stop_str_max_len = pre_computed_max_len
+
+    req = TokenizedGenerateReqInput(
+        input_text=d.get("input_text", ""),
+        input_ids=d.get("input_ids", []),
+        mm_inputs=d.get("mm_inputs"),
+        sampling_params=sp,
+        return_logprob=d.get("return_logprob", False),
+        logprob_start_len=d.get("logprob_start_len", -1),
+        top_logprobs_num=d.get("top_logprobs_num", 0),
+        token_ids_logprob=d.get("token_ids_logprob", []),
+        stream=d.get("stream", False),
+    )
+    req.rid = d.get("rid")
+    req.http_worker_ipc = d.get("http_worker_ipc")
+
+    # Optional fields
+    for field in [
+        "return_hidden_states", "return_routed_experts", "routed_experts_start_len",
+        "input_embeds", "session_params", "lora_id", "custom_logit_processor",
+        "bootstrap_host", "bootstrap_port", "bootstrap_room", "bootstrap_pair_key",
+        "decode_tp_size", "require_reasoning", "routed_dp_rank",
+        "disagg_prefill_dp_rank", "priority", "extra_key", "routing_key",
+        "no_logs", "return_bytes", "return_entropy", "time_stats",
+    ]:
+        if field in d:
+            setattr(req, field, d[field])
+
+    return req
 
 
 def _check_all_req_types():
