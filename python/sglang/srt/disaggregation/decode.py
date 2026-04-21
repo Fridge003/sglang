@@ -248,7 +248,6 @@ class DecodeRequest:
 
 @dataclass
 class _PlannedPrealloc:
-    queue_index: int
     decode_req: DecodeRequest
     prefix_indices: Optional[torch.Tensor]
     prefix_len: int
@@ -778,13 +777,6 @@ class DecodePreallocQueue:
             required_tokens_for_request = (
                 required_alloc_tokens + self.num_reserved_decode_tokens
             )
-            effective_allocatable_tokens = allocatable_tokens
-            if self.scheduler.server_args.disaggregation_decode_enable_radix_cache:
-                effective_allocatable_tokens = self._allocatable_tokens(
-                    retractable_tokens=retractable_tokens,
-                    count_retracted=True,
-                    extra_reserved_reqs=len(planned_preallocs),
-                )
 
             if (
                 max(
@@ -797,19 +789,18 @@ class DecodePreallocQueue:
                     )
                     - retractable_tokens,
                 )
-                > effective_allocatable_tokens
+                > allocatable_tokens
             ):
                 if prefix_len > 0:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
-            if required_tokens_for_request > effective_allocatable_tokens:
+            if required_tokens_for_request > allocatable_tokens:
                 if prefix_len > 0:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
             planned_preallocs.append(
                 _PlannedPrealloc(
-                    queue_index=i,
                     decode_req=decode_req,
                     prefix_indices=prefix_indices,
                     prefix_len=prefix_len,
@@ -818,42 +809,15 @@ class DecodePreallocQueue:
                 )
             )
             hisparse_req_budget -= 1
-            allocatable_tokens = effective_allocatable_tokens - required_tokens_for_request
+            allocatable_tokens -= required_tokens_for_request
             indices_to_remove.add(i)
 
         self._batch_evict_for_prealloc(planned_preallocs)
 
-        evictable_planned_preallocs: List[_PlannedPrealloc] = []
-        remaining_available_tokens = self.token_to_kv_pool_allocator.available_size()
-        for planned_idx, planned in enumerate(planned_preallocs):
-            if remaining_available_tokens < planned.required_alloc_tokens:
-                for blocked_planned in planned_preallocs[planned_idx:]:
-                    if blocked_planned.prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(
-                            blocked_planned.decode_req.req.last_node
-                        )
-                    indices_to_remove.discard(blocked_planned.queue_index)
-                break
-
-            evictable_planned_preallocs.append(planned)
-            remaining_available_tokens -= planned.required_alloc_tokens
-
-        for planned_idx, planned in enumerate(evictable_planned_preallocs):
+        for planned in planned_preallocs:
             decode_req = planned.decode_req
             prefix_len = planned.prefix_len
             origin_input_len = planned.origin_input_len
-
-            if (
-                self.token_to_kv_pool_allocator.available_size()
-                < planned.required_alloc_tokens
-            ):
-                for blocked_planned in evictable_planned_preallocs[planned_idx:]:
-                    if blocked_planned.prefix_len > 0:
-                        self.tree_cache.dec_lock_ref(
-                            blocked_planned.decode_req.req.last_node
-                        )
-                    indices_to_remove.discard(blocked_planned.queue_index)
-                break
 
             dst_kv_indices = self._pre_alloc(
                 decode_req.req,
