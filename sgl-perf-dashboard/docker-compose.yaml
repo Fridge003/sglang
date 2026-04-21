@@ -1,0 +1,46 @@
+services:
+  dashboard-api:
+    build:
+      context: ./api
+    container_name: dashboard-api
+    restart: unless-stopped
+    environment:
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BUCKET: ${MINIO_BUCKET:-sglang-ci-logs}
+      MINIO_REGION: ${MINIO_REGION:-us-east-1}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPO: ${GITHUB_REPO:-sgl-project/sglang}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DB_PATH: /data/dashboard.db
+      RETENTION_DAYS: ${RETENTION_DAYS:-90}
+      INGESTER_INTERVAL_SECONDS: ${INGESTER_INTERVAL_SECONDS:-300}
+    volumes:
+      - ./dashboard-data:/data
+    networks:
+      - minio-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  dashboard-web:
+    build:
+      context: ./web
+    container_name: dashboard-web
+    restart: unless-stopped
+    environment:
+      API_INTERNAL_URL: http://dashboard-api:8000
+      NEXT_PUBLIC_API_URL: /api
+    networks:
+      - minio-net
+    depends_on:
+      - dashboard-api
+
+networks:
+  # Join the network Caddy + MinIO already use. Defined by the MinIO compose
+  # file. If running standalone, change `external: true` to false.
+  minio-net:
+    external: true

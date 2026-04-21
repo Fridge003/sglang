@@ -1,0 +1,29 @@
+# Local dev overrides. Usage:
+#   docker compose -f docker-compose.yaml -f docker-compose.dev.yaml up --build
+services:
+  dashboard-api:
+    volumes:
+      - ./api/src:/app/src        # hot-reload Python source
+    command: ["uvicorn", "dashboard.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    ports:
+      - "8000:8000"
+    networks:
+      - default                   # skip the external minio-net locally
+
+  dashboard-web:
+    build:
+      context: ./web
+      target: builder             # skip the standalone output stage
+    command: ["npm", "run", "dev"]
+    volumes:
+      - ./web/app:/app/app
+      - ./web/components:/app/components
+      - ./web/lib:/app/lib
+    ports:
+      - "3000:3000"
+    networks:
+      - default
+
+networks:
+  minio-net:
+    external: false
