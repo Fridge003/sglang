@@ -90,7 +90,7 @@ jobs:
     concurrency:
       group: nightly-hw-h100
       cancel-in-progress: false
-    timeout-minutes: 240
+    timeout-minutes: 60
     env:
       # Full jit_kernel test grids (see sglang.jit_kernel.utils.should_run_full_tests)
       SGLANG_JIT_KERNEL_RUN_FULL_TESTS: "1"
@@ -173,7 +173,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run test
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: |
           cd test
           python3 run_suite.py --hw cuda --suite nightly-4-gpu --nightly --continue-on-error
@@ -327,7 +327,7 @@ jobs:
 
       - name: Run common 8-GPU model tests
         if: always()
-        timeout-minutes: 300
+        timeout-minutes: 200
         env:
           TRACE_BASE_URL: https://raw.githubusercontent.com/sglang-bot/sglang-ci-data/main/traces/${{ github.run_id }}
           PERFETTO_RELAY_URL: ${{ vars.PERFETTO_RELAY_URL }}
@@ -428,7 +428,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run performance test for text models
-        timeout-minutes: 180
+        timeout-minutes: 30
         env:
           TRACE_BASE_URL: https://raw.githubusercontent.com/sglang-bot/sglang-ci-data/main/traces/${{ github.run_id }}
           PERFETTO_RELAY_URL: ${{ vars.PERFETTO_RELAY_URL }}
@@ -469,7 +469,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run eval test for VLM models (fixed MMMU-100)
-        timeout-minutes: 240
+        timeout-minutes: 120
         run: |
           cd test
           python3 run_suite.py --hw cuda --suite nightly-eval-vlm-2-gpu --nightly --continue-on-error --timeout-per-file 9000
@@ -497,7 +497,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run perf test for VLM models (MMMU)
-        timeout-minutes: 240
+        timeout-minutes: 30
         env:
           TRACE_BASE_URL: https://raw.githubusercontent.com/sglang-bot/sglang-ci-data/main/traces/${{ github.run_id }}
           PERFETTO_RELAY_URL: ${{ vars.PERFETTO_RELAY_URL }}
@@ -549,7 +549,7 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GPU_CONFIG: "1-gpu-h100"
 
-        timeout-minutes: 90
+        timeout-minutes: 60
         run: |
           cd python
           python3 sglang/multimodal_gen/test/run_suite.py \
@@ -610,7 +610,7 @@ jobs:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GPU_CONFIG: "2-gpu-h100"
 
-        timeout-minutes: 90
+        timeout-minutes: 210
         run: |
           cd python
           python3 sglang/multimodal_gen/test/run_suite.py \
@@ -661,7 +661,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run test
-        timeout-minutes: 300
+        timeout-minutes: 200
         run: |
           cd test
           python3 run_suite.py --hw cuda --suite nightly-4-gpu-b200 --nightly --continue-on-error --timeout-per-file 12000
@@ -691,7 +691,7 @@ jobs:
           bash scripts/ci/cuda/ci_install_dependency.sh
 
       - name: Run test
-        timeout-minutes: 120
+        timeout-minutes: 60
         env:
           GPU_CONFIG: "8-gpu-b200"
         run: |
@@ -708,7 +708,7 @@ jobs:
     concurrency:
       group: nightly-hw-h100
       cancel-in-progress: false
-    timeout-minutes: 240
+    timeout-minutes: 300
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
