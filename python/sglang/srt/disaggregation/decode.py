@@ -462,6 +462,7 @@ class DecodePreallocQueue:
         last_device_node = result.last_device_node
         # Always lock to match aggregated scheduling behavior
         self.tree_cache.inc_lock_ref(last_device_node)
+        req.last_node = last_device_node
 
         return prefix_indices, len(prefix_indices)
 
