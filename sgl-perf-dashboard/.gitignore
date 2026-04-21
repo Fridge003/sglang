@@ -25,3 +25,9 @@ build/
 .idea/
 .vscode/
 *.swp
+
+# Overrides — sglang root .gitignore has `**/lib/` (standard Python-project
+# rule to exclude virtualenv lib dirs). That pattern unintentionally matches
+# our frontend's web/lib/ TypeScript helpers, so re-include them here.
+!web/lib/
+!web/lib/**

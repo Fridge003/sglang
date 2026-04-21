@@ -1,7 +1,10 @@
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json ./
-RUN npm install --omit=optional
+# --legacy-peer-deps: some of our deps (recharts, lucide-react, etc.) still
+# declare react@^18 in peerDependencies while we're on react@19. Dropping this
+# flag once the ecosystem catches up is safe.
+RUN npm install --legacy-peer-deps --omit=optional
 
 FROM node:20-alpine AS builder
 WORKDIR /app
