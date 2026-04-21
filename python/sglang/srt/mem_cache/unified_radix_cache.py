@@ -1015,12 +1015,12 @@ class UnifiedRadixCache(BasePrefixCache):
         return tracker[component_type]
 
     def _is_device_leaf(self, node: UnifiedTreeNode) -> bool:
-        """D-leaf: Full device value present, no device child, unlocked, not root.
+        """D-leaf: Full device value present, no child with Full KV on device,
+        unlocked, not root.
 
         Only the Full (base) component is required; auxiliary components
         (Mamba, SWA) are not mandatory for D-leaf membership."""
         ct = BASE_COMPONENT_TYPE
-        cd = node.component_data[ct]
         if node is self.root_node or node.evicted:
             return False
         if any(cd.lock_ref > 0 for cd in node.component_data):
@@ -1207,8 +1207,21 @@ class UnifiedRadixCache(BasePrefixCache):
         result = self.inc_lock_ref(ancestor_node)
         kv_tokens = len(kv_xfer.host_indices)
 
-        # Skip if too small or exceeding memory quota
-        if kv_tokens < self.load_back_threshold or (
+        # Build aux transfers, keyed per component.
+        comp_xfers: dict[ComponentType, list] = {}
+        for comp in self._components_tuple:
+            if comp.component_type == BASE_COMPONENT_TYPE:
+                continue
+            t = comp.build_hicache_transfers(
+                last_hit_node, CacheTransferPhase.LOAD_BACK, req=req
+            )
+            if t:
+                comp_xfers[comp.component_type] = t
+
+        # Skip if there is nothing to load, or if the Full-KV transfer is too
+        # small / exceeds memory quota. Aux transfers should still run even
+        # when the Full-KV load is skipped by thresholding.
+        if (kv_tokens < self.load_back_threshold and not comp_xfers) or (
             mem_quota is not None and kv_tokens > mem_quota + result.delta
         ):
             self.dec_lock_ref(ancestor_node)
@@ -1221,17 +1234,6 @@ class UnifiedRadixCache(BasePrefixCache):
             if result.num_tokens_evicted < needed:
                 self.dec_lock_ref(ancestor_node)
                 return None
-
-        # Build aux transfers, keyed per component
-        comp_xfers: dict[ComponentType, list] = {}
-        for comp in self._components_tuple:
-            if comp.component_type == BASE_COMPONENT_TYPE:
-                continue
-            t = comp.build_hicache_transfers(
-                last_hit_node, CacheTransferPhase.LOAD_BACK, req=req
-            )
-            if t:
-                comp_xfers[comp.component_type] = t
 
         logger.info(
             "load_back: kv_tokens=%d, node_id=%d",
