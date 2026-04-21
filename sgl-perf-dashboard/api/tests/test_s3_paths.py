@@ -10,7 +10,8 @@ from dashboard.s3_paths import parse_config_name, parse_result_key, parse_seq_le
 def test_parse_result_key_manual_run():
     key = (
         "manual/24591826053-1/1k1k/dsr1-fp8-1k1k-max-tpt/"
-        "2026-04-18/4665/results_concurrency_1024_gpus_48_ctx_16_gen_32.json"
+        "2026-04-18/4665/sa-bench_isl_1024_osl_1024/"
+        "results_concurrency_1024_gpus_48_ctx_16_gen_32.json"
     )
     parsed = parse_result_key(key)
     assert parsed is not None
@@ -21,6 +22,7 @@ def test_parse_result_key_manual_run():
     assert parsed.config_name == "dsr1-fp8-1k1k-max-tpt"
     assert parsed.date == "2026-04-18"
     assert parsed.slurm_job_id == "4665"
+    assert parsed.bench_subdir == "sa-bench_isl_1024_osl_1024"
     assert parsed.concurrency == 1024
     assert parsed.num_gpus == 48
     assert parsed.prefill_gpus == 16
@@ -35,7 +37,8 @@ def test_parse_result_key_manual_run():
 def test_parse_result_key_cron_fp4():
     key = (
         "cron/24500000000-2/8k1k/dsr1-fp4-8k1k-mid-curve/"
-        "2026-04-19/5001/results_concurrency_4096_gpus_72_ctx_24_gen_48.json"
+        "2026-04-19/5001/sa-bench_isl_8192_osl_1024/"
+        "results_concurrency_4096_gpus_72_ctx_24_gen_48.json"
     )
     parsed = parse_result_key(key)
     assert parsed is not None
@@ -49,10 +52,20 @@ def test_parse_result_key_cron_fp4():
 
 
 def test_parse_result_key_rejects_non_result_files():
-    assert parse_result_key("cron/24.../.../2026-04-19/5001/server.log") is None
-    assert parse_result_key("cron/24.../.../2026-04-19/5001/agg_foo.json") is None
+    # Non-result filenames
+    assert parse_result_key("cron/24.../.../2026-04-19/5001/sub/server.log") is None
+    assert parse_result_key("cron/24.../.../2026-04-19/5001/sub/agg_foo.json") is None
+    # Too few path components
     assert parse_result_key("") is None
     assert parse_result_key("just/a/shallow/path.json") is None
+    # Missing the bench subdir (old 7-part layout)
+    assert (
+        parse_result_key(
+            "manual/24.../1k1k/dsr1-fp8-1k1k-max-tpt/2026-04-18/4665/"
+            "results_concurrency_1024_gpus_48_ctx_16_gen_32.json"
+        )
+        is None
+    )
 
 
 def test_parse_seq_len_variants():

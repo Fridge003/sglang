@@ -2,16 +2,20 @@
 
 The ingester relies on this to recover context (GitHub run ID, config name,
 concurrency, etc.) from S3 paths. Must stay in sync with
-`scripts/ci/slurm/launch_gb200.sh` — any change to the prefix layout there
-requires updating `parse_result_key()` here.
+`scripts/ci/slurm/launch_gb200.sh` and srt-slurm's postprocess stage — any
+change to the prefix layout there requires updating `parse_result_key()` here.
 
 Expected layout (as of 2026-04):
 
-    <trigger>/<run_id>-<attempt>/<seq_len>/<config_name>/<date>/<slurm_job_id>/
+    <trigger>/<run_id>-<attempt>/<seq_len>/<config>/<date>/<slurm_job_id>/<bench_subdir>/
     results_concurrency_<N>_gpus_<G>_ctx_<P>_gen_<D>.json
+
+`<bench_subdir>` is added by srt-slurm (sweep's per-benchmark folder —
+e.g., `sa-bench_isl_1024_osl_1024`, future `gsm8k_...` for evals).
 
 Example:
     manual/24591826053-1/1k1k/dsr1-fp8-1k1k-max-tpt/2026-04-18/4665/
+    sa-bench_isl_1024_osl_1024/
     results_concurrency_1024_gpus_48_ctx_16_gen_32.json
 """
 
@@ -49,6 +53,7 @@ class ParsedPath:
     config_name: str  # "dsr1-fp8-1k1k-max-tpt"
     date: str  # "YYYY-MM-DD" from srt-slurm
     slurm_job_id: str
+    bench_subdir: str  # e.g. "sa-bench_isl_1024_osl_1024"
     concurrency: int
     num_gpus: int
     prefill_gpus: int
@@ -96,31 +101,39 @@ def parse_config_name(config_name: str) -> tuple[str | None, str | None, str | N
 
 
 def parse_result_key(key: str) -> ParsedPath | None:
-    """Parse a MinIO object key like `manual/24.../.../results_...json`.
+    """Parse a MinIO object key like `manual/24.../.../sa-bench_.../results_...json`.
 
     Returns None if the key doesn't match the expected schema (e.g., it's a
     top-level index file, an agg_*.json, or some non-result artifact).
     """
     parts = key.split("/")
-    if len(parts) < 7:
+    if len(parts) < 8:
         return None
 
-    # <trigger>/<run-attempt>/<seq_len>/<config>/<date>/<slurm_job>/<filename>
-    # Index from the right so extra prefix depth is tolerated (e.g. bucket-within-bucket).
+    # Layout (from right):
+    #   -1 filename (results_concurrency_*.json)
+    #   -2 bench_subdir (sa-bench_isl_..._osl_...)
+    #   -3 slurm_job_id
+    #   -4 date (YYYY-MM-DD)
+    #   -5 config_name (e.g. dsr1-fp8-1k1k-max-tpt)
+    #   -6 seq_len (e.g. 1k1k)
+    #   -7 run-attempt (e.g. 24591826053-1)
+    #   -8 trigger (cron | manual)
     filename = parts[-1]
-    slurm_job_id = parts[-2]
-    date = parts[-3]
-    config_name = parts[-4]
-    seq_len = parts[-5]
-    run_attempt = parts[-6]
-    trigger = parts[-7]
+    bench_subdir = parts[-2]
+    slurm_job_id = parts[-3]
+    date = parts[-4]
+    config_name = parts[-5]
+    seq_len = parts[-6]
+    run_attempt = parts[-7]
+    trigger = parts[-8]
 
-    # Parse filename
+    # Filename must match the sa-bench result pattern
     fm = _RESULT_RE.match(filename)
     if not fm:
         return None
 
-    # Parse run-attempt ("24591826053-1")
+    # Run-attempt like "24591826053-1"
     if "-" not in run_attempt:
         return None
     try:
@@ -140,6 +153,7 @@ def parse_result_key(key: str) -> ParsedPath | None:
         config_name=config_name,
         date=date,
         slurm_job_id=slurm_job_id,
+        bench_subdir=bench_subdir,
         concurrency=int(fm.group("conc")),
         num_gpus=int(fm.group("gpus")),
         prefill_gpus=int(fm.group("prefill")),

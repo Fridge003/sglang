@@ -40,7 +40,10 @@ services:
       - dashboard-api
 
 networks:
-  # Join the network Caddy + MinIO already use. Defined by the MinIO compose
-  # file. If running standalone, change `external: true` to false.
+  # Join the network Caddy + MinIO already use. The MinIO compose lives in
+  # ~/minio/ on the ci-logs Brev box, so Docker Compose names its network
+  # `minio_minio-net` (project prefix + network name). We alias it as
+  # `minio-net` locally for shorter references in the services above.
   minio-net:
     external: true
+    name: minio_minio-net
