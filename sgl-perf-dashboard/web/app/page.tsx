@@ -4,7 +4,6 @@ import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
-// Home page — server-rendered, one round-trip for recent runs + config summaries.
 export const dynamic = "force-dynamic";
 
 async function loadHomeData() {
@@ -29,38 +28,55 @@ export default async function HomePage() {
   const { recentRuns, configs, health, error } = await loadHomeData();
 
   return (
-    <div className="space-y-8">
-      <section className="flex items-baseline justify-between">
-        <div>
-          <h1 className="text-3xl font-bold tracking-tight">GB200 Nightly</h1>
-          <p className="text-sm text-muted-foreground">
-            {health
-              ? `${health.runs.toLocaleString()} runs tracked · last ingest ${formatRelative(
-                  health.last_ingest_at,
-                )}`
-              : "dashboard loading"}
+    <div className="space-y-10 animate-fade-in-up">
+      {/* Header */}
+      <section className="flex flex-wrap items-end justify-between gap-4">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-semibold tracking-tight">GB200 Nightly</h1>
+          <p className="text-[13px] text-muted-foreground">
+            {health ? (
+              <>
+                <span className="tabular-numbers font-medium text-foreground">
+                  {health.runs.toLocaleString()}
+                </span>{" "}
+                runs tracked ·{" "}
+                <span className="tabular-numbers">
+                  {health.metrics.toLocaleString()}
+                </span>{" "}
+                metrics · last ingest {formatRelative(health.last_ingest_at)}
+              </>
+            ) : (
+              "loading…"
+            )}
           </p>
         </div>
-        {health && !health.github_enrichment && (
-          <Badge variant="outline" className="text-amber-500 border-amber-500/50">
-            GitHub enrichment disabled
-          </Badge>
-        )}
+        <div className="flex items-center gap-2">
+          {health && !health.github_enrichment && (
+            <Badge variant="warning">GitHub enrichment disabled</Badge>
+          )}
+          {health && (
+            <Badge variant="outline" className="font-mono">
+              status: {health.status}
+            </Badge>
+          )}
+        </div>
       </section>
 
       {error && <ErrorBanner message={error} />}
 
-      <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          Configs
-        </h2>
+      {/* Configs */}
+      <section className="space-y-3">
+        <SectionHeader
+          title="Configs"
+          hint={`${configs.length} tracked`}
+        />
         {configs.length === 0 ? (
           <EmptyState
             title="No configs yet"
             hint="Ingester hasn't seen any result JSONs — kick one off on the GB200 nightly workflow."
           />
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {configs.map((c) => (
               <ConfigCard key={c.config_name} config={c} />
             ))}
@@ -68,10 +84,22 @@ export default async function HomePage() {
         )}
       </section>
 
-      <section>
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-          Recent runs
-        </h2>
+      {/* Recent runs */}
+      <section className="space-y-3">
+        <SectionHeader
+          title="Recent runs"
+          hint={recentRuns.length > 0 ? `${recentRuns.length} shown` : undefined}
+          action={
+            recentRuns.length > 0 ? (
+              <Link
+                href="/runs"
+                className="text-[12px] text-muted-foreground transition hover:text-foreground"
+              >
+                view all →
+              </Link>
+            ) : null
+          }
+        />
         {recentRuns.length === 0 ? (
           <EmptyState title="No runs yet" hint="Runs appear here as they complete." />
         ) : (
@@ -82,20 +110,40 @@ export default async function HomePage() {
   );
 }
 
+function SectionHeader({
+  title,
+  hint,
+  action,
+}: {
+  title: string;
+  hint?: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-baseline justify-between">
+      <div className="flex items-baseline gap-2">
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+          {title}
+        </h2>
+        {hint && <span className="text-[11px] text-muted-foreground/70">· {hint}</span>}
+      </div>
+      {action}
+    </div>
+  );
+}
+
 function ConfigCard({ config }: { config: ConfigSummary }) {
   const isPassing = config.latest_status === "passed";
   return (
-    <Link
-      href={`/configs/${config.config_name}`}
-      className="group block transition hover:-translate-y-0.5"
-    >
-      <Card className="h-full transition group-hover:border-foreground/40">
+    <Link href={`/configs/${config.config_name}`} className="group block">
+      <Card className="h-full">
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
-            <CardTitle className="font-mono text-sm leading-tight">
+            <CardTitle className="font-mono text-[13px] leading-tight text-foreground/90">
               {config.config_name}
             </CardTitle>
             <Badge variant={isPassing ? "success" : "destructive"}>
+              <StatusDot passing={isPassing} />
               {config.latest_status ?? "—"}
             </Badge>
           </div>
@@ -105,9 +153,9 @@ function ConfigCard({ config }: { config: ConfigSummary }) {
             {formatRelative(config.latest_started_at)}
           </CardDescription>
         </CardHeader>
-        <CardContent className="flex flex-wrap gap-1.5">
+        <CardContent className="flex flex-wrap gap-1">
           {config.concurrency_levels.map((c) => (
-            <Badge key={c} variant="secondary" className="font-mono">
+            <Badge key={c} variant="secondary" className="font-mono text-[11px]">
               {c}
             </Badge>
           ))}
@@ -119,46 +167,53 @@ function ConfigCard({ config }: { config: ConfigSummary }) {
 
 function RunsTable({ runs }: { runs: RunSummary[] }) {
   return (
-    <div className="overflow-hidden rounded-xl border">
-      <table className="w-full text-sm">
-        <thead className="bg-muted/40 text-left text-xs uppercase tracking-wider text-muted-foreground">
+    <div className="overflow-hidden rounded-xl border border-border/60">
+      <table className="w-full text-[13px]">
+        <thead className="bg-muted/30 text-left text-[11px] font-medium uppercase tracking-[0.05em] text-muted-foreground">
           <tr>
-            <th className="px-4 py-2">Time</th>
-            <th className="px-4 py-2">Trigger</th>
-            <th className="px-4 py-2">Config</th>
-            <th className="px-4 py-2">Conc.</th>
-            <th className="px-4 py-2">Commit</th>
-            <th className="px-4 py-2">Author</th>
-            <th className="px-4 py-2">Status</th>
+            <th className="px-4 py-2.5">Time</th>
+            <th className="px-4 py-2.5">Trigger</th>
+            <th className="px-4 py-2.5">Config</th>
+            <th className="px-4 py-2.5 text-right">Conc.</th>
+            <th className="px-4 py-2.5">Commit</th>
+            <th className="px-4 py-2.5">Author</th>
+            <th className="px-4 py-2.5">Status</th>
           </tr>
         </thead>
         <tbody>
           {runs.map((r) => (
             <tr
               key={r.id}
-              className="border-t transition hover:bg-muted/30"
+              className="group border-t border-border/60 transition-colors hover:bg-muted/30"
             >
-              <td className="px-4 py-2">
+              <td className="px-4 py-2.5">
                 <Link
                   href={`/runs/${r.id}`}
-                  className="font-medium hover:underline"
+                  className="font-medium transition group-hover:text-primary"
                 >
                   {formatRelative(r.started_at)}
                 </Link>
               </td>
-              <td className="px-4 py-2">
-                <Badge variant="outline">{r.trigger}</Badge>
+              <td className="px-4 py-2.5">
+                <Badge variant="outline" className="font-mono lowercase">
+                  {r.trigger}
+                </Badge>
               </td>
-              <td className="px-4 py-2 font-mono text-xs">{r.config_name}</td>
-              <td className="px-4 py-2 font-mono text-xs">{r.concurrency}</td>
-              <td className="px-4 py-2 font-mono text-xs text-muted-foreground">
+              <td className="px-4 py-2.5 font-mono text-[12px] text-foreground/80">
+                {r.config_name}
+              </td>
+              <td className="px-4 py-2.5 text-right font-mono tabular-numbers text-[12px]">
+                {r.concurrency.toLocaleString()}
+              </td>
+              <td className="px-4 py-2.5 font-mono text-[12px] text-muted-foreground">
                 {r.commit_short_sha ?? "—"}
               </td>
-              <td className="px-4 py-2 text-muted-foreground">
+              <td className="px-4 py-2.5 text-muted-foreground">
                 {r.commit_author ?? "—"}
               </td>
-              <td className="px-4 py-2">
+              <td className="px-4 py-2.5">
                 <Badge variant={r.status === "passed" ? "success" : "destructive"}>
+                  <StatusDot passing={r.status === "passed"} />
                   {r.status}
                 </Badge>
               </td>
@@ -170,12 +225,23 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
   );
 }
 
+function StatusDot({ passing }: { passing: boolean }) {
+  return (
+    <span
+      className={`inline-block h-1.5 w-1.5 rounded-full ${
+        passing ? "bg-success" : "bg-destructive"
+      }`}
+      aria-hidden
+    />
+  );
+}
+
 function EmptyState({ title, hint }: { title: string; hint: string }) {
   return (
     <Card>
       <CardContent className="py-10 text-center">
-        <p className="font-medium">{title}</p>
-        <p className="mt-1 text-sm text-muted-foreground">{hint}</p>
+        <p className="text-[14px] font-medium">{title}</p>
+        <p className="mt-1 text-[13px] text-muted-foreground">{hint}</p>
       </CardContent>
     </Card>
   );
@@ -183,9 +249,9 @@ function EmptyState({ title, hint }: { title: string; hint: string }) {
 
 function ErrorBanner({ message }: { message: string }) {
   return (
-    <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm">
-      <p className="font-medium text-destructive">Dashboard is unreachable</p>
-      <p className="mt-1 font-mono text-xs text-muted-foreground">{message}</p>
+    <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-4">
+      <p className="text-[13px] font-medium text-destructive">Dashboard is unreachable</p>
+      <p className="mt-1 font-mono text-[11px] text-muted-foreground">{message}</p>
     </div>
   );
 }

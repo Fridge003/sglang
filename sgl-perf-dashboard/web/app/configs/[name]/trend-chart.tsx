@@ -24,29 +24,43 @@ export default function TrendChart({ data }: { data: TrendPoint[] }) {
   return (
     <div className="h-80 w-full">
       <ResponsiveContainer>
-        <LineChart data={rows} margin={{ top: 10, right: 24, bottom: 8, left: 0 }}>
-          <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="3 3" />
+        <LineChart data={rows} margin={{ top: 16, right: 24, bottom: 8, left: 0 }}>
+          <CartesianGrid
+            stroke="hsl(var(--border))"
+            strokeDasharray="2 4"
+            vertical={false}
+          />
           <XAxis
             dataKey="tsMs"
             type="number"
             domain={["dataMin", "dataMax"]}
-            tickFormatter={(ms) => new Date(ms).toLocaleDateString()}
+            tickFormatter={(ms) =>
+              new Date(ms).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+            }
             tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
             stroke="hsl(var(--border))"
+            tickLine={false}
+            axisLine={false}
           />
           <YAxis
             tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
             stroke="hsl(var(--border))"
             width={80}
+            tickLine={false}
+            axisLine={false}
+            tickFormatter={(v) => v.toLocaleString()}
           />
-          <Tooltip content={<CustomTooltip />} />
+          <Tooltip
+            content={<CustomTooltip />}
+            cursor={{ stroke: "hsl(var(--primary))", strokeWidth: 1, strokeOpacity: 0.3 }}
+          />
           <Line
             type="monotone"
             dataKey="value"
             stroke="hsl(var(--primary))"
             strokeWidth={2}
-            dot={{ r: 3, fill: "hsl(var(--primary))" }}
-            activeDot={{ r: 5 }}
+            dot={{ r: 3, fill: "hsl(var(--primary))", strokeWidth: 0 }}
+            activeDot={{ r: 5, strokeWidth: 2, stroke: "hsl(var(--background))" }}
           />
         </LineChart>
       </ResponsiveContainer>
@@ -59,20 +73,24 @@ function CustomTooltip(props: TooltipProps<number, string>) {
   if (!active || !payload?.length) return null;
   const row = payload[0].payload as ChartRow;
   return (
-    <div className="rounded-md border bg-background p-2 text-xs shadow-md">
-      <p className="font-semibold tabular-nums">{row.value.toLocaleString()}</p>
-      <p className="mt-1 text-muted-foreground">
+    <div className="min-w-[160px] rounded-lg border border-border/80 bg-card/95 p-2.5 text-[12px] shadow-lg backdrop-blur">
+      <p className="font-mono text-[15px] font-semibold tabular-numbers">
+        {row.value.toLocaleString()}
+      </p>
+      <p className="mt-1 text-[11px] text-muted-foreground">
         {new Date(row.tsMs).toLocaleString()}
       </p>
       {row.commit_short_sha && (
-        <p className="mt-1 font-mono text-muted-foreground">
+        <p className="mt-1 font-mono text-[11px] text-muted-foreground">
           {row.commit_short_sha}
-          {row.commit_author ? ` · ${row.commit_author}` : ""}
+          {row.commit_author && (
+            <span className="ml-1 text-muted-foreground/70">· {row.commit_author}</span>
+          )}
         </p>
       )}
       <Link
         href={`/runs/${row.run_id}`}
-        className="mt-1 inline-block text-primary hover:underline"
+        className="mt-2 inline-block text-[11px] text-primary transition hover:underline"
       >
         → run detail
       </Link>

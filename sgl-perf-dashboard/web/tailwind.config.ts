@@ -39,10 +39,27 @@ const config: Config = {
           DEFAULT: "hsl(var(--success))",
           foreground: "hsl(var(--success-foreground))",
         },
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          foreground: "hsl(var(--warning-foreground))",
+        },
       },
       fontFamily: {
-        sans: ["var(--font-sans)", "system-ui", "sans-serif"],
-        mono: ["var(--font-mono)", "ui-monospace", "monospace"],
+        sans: ["var(--font-geist-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["var(--font-geist-mono)", "ui-monospace", "monospace"],
+      },
+      fontSize: {
+        // Tighter scale — numeric metrics need to feel dense, not airy
+        "2xs": ["0.6875rem", { lineHeight: "1rem", letterSpacing: "0.02em" }],
+      },
+      keyframes: {
+        "fade-in-up": {
+          from: { opacity: "0", transform: "translateY(4px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "fade-in-up": "fade-in-up 200ms ease-out",
       },
     },
   },

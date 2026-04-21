@@ -3,7 +3,13 @@
  * backend container. SSR-friendly: works from both server and client components.
  */
 
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "/api";
+// Server components (SSR) run in Node, where fetch requires absolute URLs.
+// Client components run in the browser, where relative URLs resolve against
+// the current origin. Next.js rewrites `/api/*` to the backend container.
+const BASE =
+  typeof window === "undefined"
+    ? `${process.env.API_INTERNAL_URL ?? "http://dashboard-api:8000"}/api`
+    : process.env.NEXT_PUBLIC_API_URL ?? "/api";
 
 export interface Metric {
   name: string;

@@ -31,17 +31,20 @@ export default async function ConfigDetailPage({
     .catch(() => []);
 
   return (
-    <div className="space-y-6">
-      <section>
-        <h1 className="font-mono text-xl font-semibold">{name}</h1>
-        <p className="text-sm text-muted-foreground">
+    <div className="space-y-8 animate-fade-in-up">
+      <section className="border-b border-border/60 pb-6">
+        <h1 className="font-mono text-lg font-semibold leading-tight">{name}</h1>
+        <p className="mt-1 text-[13px] text-muted-foreground">
           {config.concurrency_levels.length} concurrency level
-          {config.concurrency_levels.length === 1 ? "" : "s"}
+          {config.concurrency_levels.length === 1 ? "" : "s"} · last run{" "}
+          {config.latest_started_at
+            ? new Date(config.latest_started_at).toLocaleString()
+            : "—"}
         </p>
       </section>
 
-      <section className="flex flex-wrap items-center gap-3">
-        <span className="text-xs uppercase tracking-wider text-muted-foreground">
+      <section className="flex flex-wrap items-center gap-2">
+        <span className="mr-1 text-[11px] uppercase tracking-wider text-muted-foreground">
           Concurrency
         </span>
         {config.concurrency_levels.map((c) => {
@@ -55,30 +58,37 @@ export default async function ConfigDetailPage({
             <a
               key={c}
               href={`?${qs.toString()}`}
-              className={`rounded-md border px-2.5 py-0.5 font-mono text-xs transition ${
+              className={`rounded-md border px-2 py-0.5 font-mono text-[12px] transition ${
                 active
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-border hover:border-foreground/40"
+                  ? "border-primary/60 bg-primary/10 text-primary"
+                  : "border-border/60 text-muted-foreground hover:border-border hover:text-foreground"
               }`}
             >
-              {c}
+              {c.toLocaleString()}
             </a>
           );
         })}
-        <span className="ml-4 text-xs text-muted-foreground">metric:</span>
+        <span className="ml-4 text-[11px] uppercase tracking-wider text-muted-foreground">
+          Metric
+        </span>
         <Badge variant="secondary" className="font-mono">{metric}</Badge>
-        <span className="text-xs text-muted-foreground">window: {windowDays}d</span>
+        <span className="ml-auto text-[11px] text-muted-foreground">
+          window: {windowDays}d
+        </span>
       </section>
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-sm">
-            {metric} · concurrency {concurrency}
+          <CardTitle className="font-mono">
+            {metric}{" "}
+            <span className="font-sans text-muted-foreground">
+              · concurrency {concurrency.toLocaleString()}
+            </span>
           </CardTitle>
         </CardHeader>
         <CardContent>
           {trend.length === 0 ? (
-            <p className="py-10 text-center text-sm text-muted-foreground">
+            <p className="py-16 text-center text-[13px] text-muted-foreground">
               No data in the last {windowDays} days for this metric + concurrency.
             </p>
           ) : (
