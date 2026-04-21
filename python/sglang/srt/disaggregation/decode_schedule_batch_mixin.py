@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sglang.srt.mem_cache.common import maybe_cache_unfinished_req
+from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, ForwardMode
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 
 logger = logging.getLogger(__name__)

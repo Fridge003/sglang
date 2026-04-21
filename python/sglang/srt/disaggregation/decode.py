@@ -753,9 +753,7 @@ class DecodePreallocQueue:
                     prefix_len = page_align_floor(prefix_len, page_size)
                     prefix_indices = prefix_indices[:prefix_len]
 
-                fill_len = origin_input_len + max(
-                    len(decode_req.req.output_ids) - 1, 0
-                )
+                fill_len = origin_input_len + max(len(decode_req.req.output_ids) - 1, 0)
                 required_alloc_tokens = self._required_alloc_tokens(
                     fill_len=fill_len, prefix_len=prefix_len
                 )
@@ -1485,7 +1483,9 @@ class SchedulerDisaggregationDecodeMixin:
                 # only sees committed KV (fill_ids includes one uncommitted token).
                 if req.kv_committed_len is not None:
                     req.fill_ids = req.fill_ids[: req.kv_committed_len]
-                    req.set_extend_input_len(len(req.fill_ids) - len(req.prefix_indices))
+                    req.set_extend_input_len(
+                        len(req.fill_ids) - len(req.prefix_indices)
+                    )
             else:
                 waiting_queue.append(req)
 

@@ -64,7 +64,9 @@ class MockReq:
 
     def __init__(self, fill_ids, req_pool_idx=0, cache_protected_len=0, last_node=None):
         self.fill_ids = list(fill_ids)
-        self.origin_input_ids = list(fill_ids[:-1]) if len(fill_ids) > 1 else list(fill_ids)
+        self.origin_input_ids = (
+            list(fill_ids[:-1]) if len(fill_ids) > 1 else list(fill_ids)
+        )
         self.output_ids = [fill_ids[-1]] if len(fill_ids) > 1 else []
         self.req_pool_idx = req_pool_idx
         self.cache_protected_len = cache_protected_len
