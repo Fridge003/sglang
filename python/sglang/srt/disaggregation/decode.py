@@ -1125,11 +1125,6 @@ class DecodePreallocQueue:
             self.req_to_token_pool.write(
                 (req.req_pool_idx, slice(0, prefix_len)), prefix_indices
             )
-        elif self.scheduler.server_args.disaggregation_decode_enable_radix_cache:
-            # Paths like resumed retracted requests can allocate from scratch
-            # without going through _match_prefix_and_lock. Use the root node so
-            # later cache bookkeeping keeps the aggregated-path no-op semantics.
-            req.last_node = self.tree_cache.root_node
 
         # TODO(retraction): when retraction is implemented with radix cache
         # awareness, a retracted request should re-match the tree here
