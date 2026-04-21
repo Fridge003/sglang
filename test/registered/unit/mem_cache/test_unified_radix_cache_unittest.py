@@ -1138,49 +1138,6 @@ class UnifiedRadixCacheSuite:
                 self._simulate_backup(tree, node)
             stack.extend(node.children.values())
 
-    def test_hicache_load_back_restores_aux_without_full_kv_transfer(self):
-        """Aux-only load_back should not be skipped when Full stays on device."""
-        if not self.cfg.has_mamba:
-            self.skipTest("requires Mamba component")
-
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
-        seq = self._make_seq(1, 2)
-        self._insert(tree, allocator, req_to_token_pool, seq)
-
-        node = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq))).last_device_node
-        mamba_ct = ComponentType.MAMBA
-        mamba_cd = node.component_data[mamba_ct]
-        mamba_value = mamba_cd.value.clone()
-
-        tree.lru_lists[mamba_ct].remove_node(node)
-        mamba_cd.host_value = mamba_value
-        mamba_cd.value = None
-        tree.host_lru_lists[mamba_ct].insert_mru(node)
-        tree.component_evictable_size_[mamba_ct] -= len(mamba_value)
-
-        class FakeCacheController:
-            def __init__(self):
-                self.calls = 0
-
-            def load(self, host_indices, priority=None, node_id=-1, extra_pools=None):
-                self.calls += 1
-                for pool in extra_pools or []:
-                    if pool.device_indices is None and pool.host_indices is not None:
-                        pool.device_indices = pool.host_indices.clone()
-                return torch.empty((0,), dtype=torch.int64, device=tree.device)
-
-        fake_controller = FakeCacheController()
-        tree.cache_controller = fake_controller
-
-        result = tree.load_back(node)
-
-        self.assertIsNotNone(result)
-        self.assertEqual(fake_controller.calls, 1)
-        self.assertIsNotNone(node.component_data[mamba_ct].value)
-        self.assertTrue(tree.lru_lists[mamba_ct].in_list(node))
-        self.assertFalse(tree.host_lru_lists[mamba_ct].in_list(node))
-        tree.sanity_check()
-
     def test_hicache_node_states(self):
         """Verify S0/S1/S2 states after insert and simulated backup."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)

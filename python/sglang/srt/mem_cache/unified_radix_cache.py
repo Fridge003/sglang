@@ -1549,8 +1549,11 @@ class UnifiedRadixCache(BasePrefixCache):
         return nodes
 
     def sanity_check(self):
-        """Verify tree invariants (A2-A5) and tracking invariants (INV-1~5).
-        Collects all violations before reporting. Expensive — idle/test only."""
+        """Verify tree invariants.
+
+        TODO(hzh): This method has relatively high latency; simplify the
+        check logic once the tree implementation stabilizes.
+        """
         # Skip when streaming sessions hold tree locks: the check asserts
         # all nodes are unlocked during idle, which streaming sessions break
         # by design (they hold a first-turn lock across turns).
@@ -1832,59 +1835,6 @@ class UnifiedRadixCache(BasePrefixCache):
             )
             for child in node.children.values():
                 stack.append((child, indent + 2))
-
-    def _reset_l1_only(self) -> None:
-        # TODO: This is a temporary method for debugging L2 HiCache, will be removed
-        # 1. Drain pending async operations
-        self.writing_check(write_back=True)
-        if self.cache_controller is not None:
-            self.cache_controller.ack_write_queue.clear()
-            self.cache_controller.ack_load_queue.clear()
-            self.cache_controller.write_queue.clear()
-            self.cache_controller.load_queue.clear()
-        self.ongoing_write_through.clear()
-        self.ongoing_load_back.clear()
-
-        # 2. Walk tree: release all device resources, keep component host_values
-        stack = [self.root_node]
-        while stack:
-            node = stack.pop()
-            for ct in self.tree_components:
-                cd = node.component_data[ct]
-                if node is not self.root_node:
-                    cd.value = None  # Release device reference
-                cd.lock_ref = 1 if node is self.root_node else 0
-                # cd.host_value / cd.host_lock_ref are preserved
-            stack.extend(node.children.values())
-
-        # Root keeps its empty-list value marker
-        self.root_node.component_data[BASE_COMPONENT_TYPE].value = []
-
-        # 3. Reset bookkeeping
-        self.component_evictable_size_ = {ct: 0 for ct in self.tree_components}
-        self.component_protected_size_ = {ct: 0 for ct in self.tree_components}
-        self.lru_lists = {
-            ct: UnifiedLRUList(ct, self.tree_components) for ct in self.tree_components
-        }
-
-        # 4. Reset device leaf set
-        self.evictable_device_leaves.clear()
-
-        # 5. Rebuild host leaf sets (all non-root backuped nodes are now evictable host leaves)
-        self.evictable_host_leaves = set()
-        self._rebuild_host_leaf_sets()
-
-        # 6. Rebuild host LRU lists for extra components
-        self.host_lru_lists = {
-            ct: UnifiedLRUList(ct, self.tree_components, use_host_ptr=True)
-            for ct in self.tree_components
-        }
-        self._rebuild_host_lru_lists()
-
-        logger.info(
-            "UnifiedRadixCache L1-only reset completed: "
-            "tree structure and L2 host data preserved"
-        )
 
     def _rebuild_host_leaf_sets(self) -> None:
         """Rebuild evictable_host_leaves after L1-only reset."""
