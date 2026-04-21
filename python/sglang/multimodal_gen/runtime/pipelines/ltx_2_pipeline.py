@@ -120,12 +120,18 @@ def build_official_ltx2_sigmas(
     stretch: bool = True,
     terminal: float = 0.1,
     default_number_of_tokens: int = MAX_SHIFT_ANCHOR,
+    number_of_tokens: int | None = None,
 ) -> list[float]:
     sigmas = torch.linspace(1.0, 0.0, steps + 1, dtype=torch.float32)
 
     mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR)
     b = base_shift - mm * BASE_SHIFT_ANCHOR
-    sigma_shift = float(default_number_of_tokens) * mm + b
+    tokens = (
+        int(number_of_tokens)
+        if number_of_tokens is not None
+        else int(default_number_of_tokens)
+    )
+    sigma_shift = float(tokens) * mm + b
 
     non_zero_mask = sigmas != 0
     shifted = torch.where(
@@ -148,7 +154,19 @@ class LTX2SigmaPreparationStage(PipelineStage):
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         batch.extra["ltx2_phase"] = "stage1"
         if is_ltx23_native_variant(server_args.pipeline_config.vae_config.arch_config):
-            batch.sigmas = build_official_ltx2_sigmas(int(batch.num_inference_steps))
+            latent_num_frames = (int(batch.num_frames) - 1) // int(
+                server_args.pipeline_config.vae_temporal_compression
+            ) + 1
+            latent_height = int(batch.height) // int(
+                server_args.pipeline_config.vae_scale_factor
+            )
+            latent_width = int(batch.width) // int(
+                server_args.pipeline_config.vae_scale_factor
+            )
+            batch.sigmas = build_official_ltx2_sigmas(
+                int(batch.num_inference_steps),
+                number_of_tokens=latent_num_frames * latent_height * latent_width,
+            )
         else:
             batch.sigmas = np.linspace(
                 1.0,

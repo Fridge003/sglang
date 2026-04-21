@@ -32,7 +32,9 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument("--sample-width", type=int, default=768)
     parser.add_argument("--sample-height", type=int, default=512)
     parser.add_argument("--sample-num-frames", type=int, default=121)
+    parser.add_argument("--sample-fps", type=int, default=25)
     parser.add_argument("--sample-seed", type=int, default=10)
+    parser.add_argument("--sample-num-inference-steps", type=int)
     parser = ServerArgs.add_cli_args(parser)
     return parser.parse_known_args()
 
@@ -53,8 +55,10 @@ def main() -> None:
             "width": args.sample_width,
             "height": args.sample_height,
             "num_frames": args.sample_num_frames,
+            "fps": args.sample_fps,
             "seed": args.sample_seed,
             "request_id": generate_request_id(),
+            "num_inference_steps": args.sample_num_inference_steps,
         }
     )
 

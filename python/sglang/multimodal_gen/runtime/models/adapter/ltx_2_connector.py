@@ -598,13 +598,12 @@ class LTX2TextConnectors(nn.Module):
     ) -> torch.Tensor:
         return x * math.sqrt(target_dim / source_dim)
 
-    def forward(
+    def _prepare_attention_inputs(
         self,
         text_encoder_hidden_states: torch.Tensor,
         attention_mask: torch.Tensor,
         additive_mask: bool = False,
-    ):
-        # Convert to additive attention mask, if necessary
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not additive_mask:
             text_dtype = text_encoder_hidden_states.dtype
             attention_mask = (attention_mask - 1).reshape(
@@ -628,6 +627,12 @@ class LTX2TextConnectors(nn.Module):
                 # Pad with a large negative value to mask out the new tokens
                 attention_mask = F.pad(attention_mask, (0, pad_len), value=-1000000.0)
 
+        return text_encoder_hidden_states, attention_mask
+
+    def prepare_modal_hidden_states(
+        self,
+        text_encoder_hidden_states: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if (
             self.video_aggregate_embed is not None
             and self.audio_aggregate_embed is not None
@@ -664,6 +669,30 @@ class LTX2TextConnectors(nn.Module):
             video_hidden_states = self.text_proj_in(text_encoder_hidden_states)
             audio_hidden_states = video_hidden_states
 
+        return video_hidden_states, audio_hidden_states
+
+    def prepare_connector_inputs(
+        self,
+        text_encoder_hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        additive_mask: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        text_encoder_hidden_states, attention_mask = self._prepare_attention_inputs(
+            text_encoder_hidden_states=text_encoder_hidden_states,
+            attention_mask=attention_mask,
+            additive_mask=additive_mask,
+        )
+        video_hidden_states, audio_hidden_states = self.prepare_modal_hidden_states(
+            text_encoder_hidden_states
+        )
+        return video_hidden_states, audio_hidden_states, attention_mask
+
+    def forward_from_prepared_inputs(
+        self,
+        video_hidden_states: torch.Tensor,
+        audio_hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ):
         video_text_embedding, new_attn_mask = self.video_connector(
             video_hidden_states, attention_mask
         )
@@ -680,6 +709,25 @@ class LTX2TextConnectors(nn.Module):
         )
 
         return video_text_embedding, audio_text_embedding, new_attn_mask
+
+    def forward(
+        self,
+        text_encoder_hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor,
+        additive_mask: bool = False,
+    ):
+        video_hidden_states, audio_hidden_states, attention_mask = (
+            self.prepare_connector_inputs(
+                text_encoder_hidden_states=text_encoder_hidden_states,
+                attention_mask=attention_mask,
+                additive_mask=additive_mask,
+            )
+        )
+        return self.forward_from_prepared_inputs(
+            video_hidden_states=video_hidden_states,
+            audio_hidden_states=audio_hidden_states,
+            attention_mask=attention_mask,
+        )
 
 
 EntryClass = LTX2TextConnectors

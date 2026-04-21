@@ -175,6 +175,39 @@ class TestSamplingParamsSubclass(unittest.TestCase):
         )
 
 
+class TestLTX2Tokenization(unittest.TestCase):
+    def test_tokenize_prompt_strips_surrounding_whitespace_to_match_official(self):
+        class _Tokenizer:
+            def __init__(self):
+                self.padding_side = None
+                self.pad_token = None
+                self.eos_token = "<eos>"
+                self.calls = []
+
+            def __call__(self, prompt, **kwargs):
+                self.calls.append((prompt, kwargs))
+                return {"prompt": prompt, "kwargs": kwargs}
+
+        tokenizer = _Tokenizer()
+        config = LTX2PipelineConfig()
+
+        result = config.tokenize_prompt(
+            ["\n  first line  \n", "  second line\t"],
+            tokenizer,
+            {"max_length": 128},
+        )
+
+        self.assertEqual(
+            tokenizer.calls[0][0],
+            ["first line", "second line"],
+        )
+        self.assertEqual(tokenizer.padding_side, "left")
+        self.assertEqual(tokenizer.pad_token, tokenizer.eos_token)
+        self.assertEqual(result["prompt"], ["first line", "second line"])
+        self.assertTrue(result["kwargs"]["add_special_tokens"])
+        self.assertEqual(result["kwargs"]["max_length"], 128)
+
+
 class TestSamplingParamsCliArgs(unittest.TestCase):
     def _parse_cli_kwargs(self, argv: list[str]) -> dict:
         parser = argparse.ArgumentParser()

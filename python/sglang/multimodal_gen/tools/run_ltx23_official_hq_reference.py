@@ -12,6 +12,7 @@ import dataclasses
 import sys
 from contextlib import contextmanager
 from pathlib import Path
+from types import MethodType
 from typing import Any, Iterator
 
 import torch
@@ -37,6 +38,55 @@ def _prepend_official_repo_to_syspath(official_repo_root: Path) -> None:
 def _clone_video_chunks(video: Iterator[torch.Tensor]) -> Iterator[torch.Tensor]:
     for chunk in video:
         yield chunk.clone()
+
+
+def _apply_interleaved_rotary_emb(
+    x: torch.Tensor,
+    freqs: tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    cos, sin = freqs
+    x_real, x_imag = x.unflatten(2, (-1, 2)).unbind(-1)
+    x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(2)
+    return x * cos + x_rotated * sin
+
+
+def _apply_split_rotary_emb(
+    x: torch.Tensor,
+    freqs: tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    cos, sin = freqs
+    x_dtype = x.dtype
+    needs_reshape = False
+    if x.ndim != 4 and cos.ndim == 4:
+        b = x.shape[0]
+        _, h, t, _ = cos.shape
+        x = x.reshape(b, t, h, -1).swapaxes(1, 2)
+        needs_reshape = True
+
+    last = x.shape[-1]
+    if last % 2 != 0:
+        raise ValueError(
+            f"Expected x.shape[-1] to be even for split rotary, got {last}."
+        )
+    r = last // 2
+
+    split_x = x.reshape(*x.shape[:-1], 2, r)
+    first_x = split_x[..., :1, :]
+    second_x = split_x[..., 1:, :]
+
+    cos_u = cos.unsqueeze(-2)
+    sin_u = sin.unsqueeze(-2)
+
+    out = split_x * cos_u
+    first_out = out[..., :1, :]
+    second_out = out[..., 1:, :]
+    first_out.addcmul_(-sin_u, second_x)
+    second_out.addcmul_(sin_u, first_x)
+
+    out = out.reshape(*out.shape[:-2], last)
+    if needs_reshape:
+        out = out.swapaxes(1, 2).reshape(b, t, -1)
+    return out.to(dtype=x_dtype)
 
 
 def _resolve_gemma_component_roots(gemma_root: Path) -> tuple[Path, Path, Path]:
@@ -89,20 +139,510 @@ def _maybe_dump_probe(probe_dir: Path | None, relative_path: str, payload: Any) 
     torch.save(_to_probe_payload(payload), output_path)
 
 
+def _unwrap_tensor_output(value: Any) -> torch.Tensor:
+    if torch.is_tensor(value):
+        return value
+    if isinstance(value, (tuple, list)) and value and torch.is_tensor(value[0]):
+        return value[0]
+    raise TypeError(f"Expected tensor-like projection output, got {type(value)!r}")
+
+
+def _build_attention_qkv_probe_payload(
+    attn_module: Any,
+    x: torch.Tensor,
+    *,
+    context: torch.Tensor | None = None,
+    pe: tuple[torch.Tensor, torch.Tensor] | None = None,
+    k_pe: tuple[torch.Tensor, torch.Tensor] | None = None,
+) -> dict[str, torch.Tensor]:
+    context_ = x if context is None else context
+    raw_q = _unwrap_tensor_output(attn_module.to_q(x))
+    raw_k = _unwrap_tensor_output(attn_module.to_k(context_))
+    raw_v = _unwrap_tensor_output(attn_module.to_v(context_))
+
+    q = raw_q
+    k = raw_k
+    q_norm = getattr(attn_module, "q_norm", None)
+    k_norm = getattr(attn_module, "k_norm", None)
+    if q_norm is not None:
+        q = q_norm(q)
+    if k_norm is not None:
+        k = k_norm(k)
+
+    payload: dict[str, torch.Tensor] = {
+        "q_proj": raw_q,
+        "k_proj": raw_k,
+        "v_proj": raw_v,
+        "q_post_qk_norm": q,
+        "k_post_qk_norm": k,
+    }
+
+    if pe is not None:
+        cos, sin = pe
+        k_cos, k_sin = pe if k_pe is None else k_pe
+        if cos.dim() == 3:
+            q = _apply_interleaved_rotary_emb(q, (cos, sin))
+            k = _apply_interleaved_rotary_emb(k, (k_cos, k_sin))
+        else:
+            q = _apply_split_rotary_emb(q, (cos, sin))
+            k = _apply_split_rotary_emb(k, (k_cos, k_sin))
+        payload["q_post_rope"] = q
+        payload["k_post_rope"] = k
+
+    return payload
+
+
+def _selected_probe_block_indices(num_blocks: int) -> list[int]:
+    if num_blocks <= 0:
+        return []
+    last_idx = num_blocks - 1
+    selected = {0, last_idx}
+    for idx in (16, 24, 28, 32):
+        if last_idx >= idx:
+            selected.add(idx)
+    return sorted(idx for idx in selected if 0 <= idx < num_blocks)
+
+
+def _block_probe_relative_path(block_idx: int, num_blocks: int) -> str:
+    last_idx = num_blocks - 1
+    if block_idx == last_idx:
+        return "denoising/stage1_transformer_block_last"
+    return f"denoising/stage1_transformer_block{block_idx}"
+
+
 class _Stage1TransformerProbe:
     def __init__(self, transformer: Any, probe_dir: Path | None):
         self._transformer = transformer
         self._probe_dir = probe_dir
         self._did_dump = False
+        self._probe_counts: dict[str, int] = {}
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._transformer, name)
+
+    def _resolve_velocity_model(self) -> Any | None:
+        model = self._transformer
+        seen: set[int] = set()
+        while model is not None and id(model) not in seen:
+            seen.add(id(model))
+            velocity_model = getattr(model, "velocity_model", None)
+            if velocity_model is not None:
+                return velocity_model
+            model = getattr(model, "_model", None)
+        return None
+
+    def _dump_call_indexed_probe(self, relative_path: str, payload: Any) -> None:
+        if self._probe_dir is None:
+            return
+        call_idx = self._probe_counts.get(relative_path, 0)
+        self._probe_counts[relative_path] = call_idx + 1
+        if call_idx == 0:
+            _maybe_dump_probe(self._probe_dir, relative_path, payload)
+        _maybe_dump_probe(
+            self._probe_dir,
+            f"{relative_path}_call{call_idx}",
+            payload,
+        )
+
+    def _install_block_wrapper(self, block: Any, relative_path: str) -> Any | None:
+        if block is None:
+            return None
+
+        had_instance_forward = "forward" in block.__dict__
+        original_instance_forward = block.__dict__.get("forward")
+        probe = self
+
+        def _wrapped_forward(
+            wrapped_block: Any,
+            video: Any | None,
+            audio: Any | None,
+            perturbations: Any | None = None,
+        ) -> tuple[Any | None, Any | None]:
+            from ltx_core.guidance.perturbations import (
+                BatchedPerturbationConfig,
+                PerturbationType,
+            )
+            from ltx_core.utils import rms_norm
+
+            if video is None and audio is None:
+                raise ValueError("At least one of video or audio must be provided")
+
+            batch_size = (video or audio).x.shape[0]
+            if perturbations is None:
+                perturbations = BatchedPerturbationConfig.empty(batch_size)
+
+            vx = video.x if video is not None else None
+            ax = audio.x if audio is not None else None
+
+            run_vx = video is not None and video.enabled and vx.numel() > 0
+            run_ax = audio is not None and audio.enabled and ax.numel() > 0
+            run_a2v = run_vx and (audio is not None and ax.numel() > 0)
+            run_v2a = run_ax and (video is not None and vx.numel() > 0)
+            norm_vx = None
+            norm_ax = None
+
+            probe._dump_call_indexed_probe(
+                f"{relative_path}_input",
+                {"video": vx, "audio": ax},
+            )
+
+            if run_vx:
+                vshift_msa, vscale_msa, vgate_msa = wrapped_block.get_ada_values(
+                    wrapped_block.scale_shift_table,
+                    vx.shape[0],
+                    video.timesteps,
+                    slice(0, 3),
+                )
+                norm_vx = (
+                    rms_norm(vx, eps=wrapped_block.norm_eps) * (1 + vscale_msa)
+                    + vshift_msa
+                )
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_video_self_attn_qkv",
+                    _build_attention_qkv_probe_payload(
+                        wrapped_block.attn1,
+                        norm_vx,
+                        pe=video.positional_embeddings,
+                    ),
+                )
+                del vshift_msa, vscale_msa
+                all_perturbed = perturbations.all_in_batch(
+                    PerturbationType.SKIP_VIDEO_SELF_ATTN, wrapped_block.idx
+                )
+                none_perturbed = not perturbations.any_in_batch(
+                    PerturbationType.SKIP_VIDEO_SELF_ATTN, wrapped_block.idx
+                )
+                v_mask = (
+                    perturbations.mask_like(
+                        PerturbationType.SKIP_VIDEO_SELF_ATTN,
+                        wrapped_block.idx,
+                        vx,
+                    )
+                    if not all_perturbed and not none_perturbed
+                    else None
+                )
+                vx = (
+                    vx
+                    + wrapped_block.attn1(
+                        norm_vx,
+                        pe=video.positional_embeddings,
+                        mask=video.self_attention_mask,
+                        perturbation_mask=v_mask,
+                        all_perturbed=all_perturbed,
+                    )
+                    * vgate_msa
+                )
+                del vgate_msa, v_mask
+
+            if run_ax:
+                ashift_msa, ascale_msa, agate_msa = wrapped_block.get_ada_values(
+                    wrapped_block.audio_scale_shift_table,
+                    ax.shape[0],
+                    audio.timesteps,
+                    slice(0, 3),
+                )
+                norm_ax = (
+                    rms_norm(ax, eps=wrapped_block.norm_eps) * (1 + ascale_msa)
+                    + ashift_msa
+                )
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_pre_self_attn_norm",
+                    {"video": norm_vx if run_vx else None, "audio": norm_ax},
+                )
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_audio_self_attn_qkv",
+                    _build_attention_qkv_probe_payload(
+                        wrapped_block.audio_attn1,
+                        norm_ax,
+                        pe=audio.positional_embeddings,
+                    ),
+                )
+                del ashift_msa, ascale_msa
+                all_perturbed = perturbations.all_in_batch(
+                    PerturbationType.SKIP_AUDIO_SELF_ATTN, wrapped_block.idx
+                )
+                none_perturbed = not perturbations.any_in_batch(
+                    PerturbationType.SKIP_AUDIO_SELF_ATTN, wrapped_block.idx
+                )
+                a_mask = (
+                    perturbations.mask_like(
+                        PerturbationType.SKIP_AUDIO_SELF_ATTN,
+                        wrapped_block.idx,
+                        ax,
+                    )
+                    if not all_perturbed and not none_perturbed
+                    else None
+                )
+                ax = (
+                    ax
+                    + wrapped_block.audio_attn1(
+                        norm_ax,
+                        pe=audio.positional_embeddings,
+                        mask=audio.self_attention_mask,
+                        perturbation_mask=a_mask,
+                        all_perturbed=all_perturbed,
+                    )
+                    * agate_msa
+                )
+                del agate_msa, norm_ax, a_mask
+                if norm_vx is not None:
+                    del norm_vx
+            elif run_vx:
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_pre_self_attn_norm",
+                    {"video": norm_vx, "audio": None},
+                )
+                del norm_vx
+
+            probe._dump_call_indexed_probe(
+                f"{relative_path}_post_self_attn",
+                {"video": vx, "audio": ax},
+            )
+
+            if run_vx:
+                vx = vx + wrapped_block._apply_text_cross_attention(
+                    vx,
+                    video.context,
+                    wrapped_block.attn2,
+                    wrapped_block.scale_shift_table,
+                    getattr(wrapped_block, "prompt_scale_shift_table", None),
+                    video.timesteps,
+                    video.prompt_timestep,
+                    video.context_mask,
+                    cross_attention_adaln=wrapped_block.cross_attention_adaln,
+                )
+
+            if run_ax:
+                ax = ax + wrapped_block._apply_text_cross_attention(
+                    ax,
+                    audio.context,
+                    wrapped_block.audio_attn2,
+                    wrapped_block.audio_scale_shift_table,
+                    getattr(wrapped_block, "audio_prompt_scale_shift_table", None),
+                    audio.timesteps,
+                    audio.prompt_timestep,
+                    audio.context_mask,
+                    cross_attention_adaln=wrapped_block.cross_attention_adaln,
+                )
+
+            probe._dump_call_indexed_probe(
+                f"{relative_path}_post_prompt_cross_attn",
+                {"video": vx, "audio": ax},
+            )
+
+            if run_a2v or run_v2a:
+                vx_norm3 = rms_norm(vx, eps=wrapped_block.norm_eps)
+                ax_norm3 = rms_norm(ax, eps=wrapped_block.norm_eps)
+
+                if run_a2v and not perturbations.all_in_batch(
+                    PerturbationType.SKIP_A2V_CROSS_ATTN, wrapped_block.idx
+                ):
+                    scale_ca_video_a2v, shift_ca_video_a2v, gate_out_a2v = (
+                        wrapped_block.get_av_ca_ada_values(
+                            wrapped_block.scale_shift_table_a2v_ca_video,
+                            vx.shape[0],
+                            video.cross_scale_shift_timestep,
+                            video.cross_gate_timestep,
+                            slice(0, 2),
+                        )
+                    )
+                    vx_scaled = (
+                        vx_norm3 * (1 + scale_ca_video_a2v) + shift_ca_video_a2v
+                    )
+                    del scale_ca_video_a2v, shift_ca_video_a2v
+                    scale_ca_audio_a2v, shift_ca_audio_a2v, _ = (
+                        wrapped_block.get_av_ca_ada_values(
+                            wrapped_block.scale_shift_table_a2v_ca_audio,
+                            ax.shape[0],
+                            audio.cross_scale_shift_timestep,
+                            audio.cross_gate_timestep,
+                            slice(0, 2),
+                        )
+                    )
+                    ax_scaled = (
+                        ax_norm3 * (1 + scale_ca_audio_a2v) + shift_ca_audio_a2v
+                    )
+                    del scale_ca_audio_a2v, shift_ca_audio_a2v
+                    a2v_mask = perturbations.mask_like(
+                        PerturbationType.SKIP_A2V_CROSS_ATTN,
+                        wrapped_block.idx,
+                        vx,
+                    )
+                    vx = vx + (
+                        wrapped_block.audio_to_video_attn(
+                            vx_scaled,
+                            context=ax_scaled,
+                            pe=video.cross_positional_embeddings,
+                            k_pe=audio.cross_positional_embeddings,
+                        )
+                        * gate_out_a2v
+                        * a2v_mask
+                    )
+                    del gate_out_a2v, a2v_mask, vx_scaled, ax_scaled
+
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_post_a2v_cross_attn",
+                    {"video": vx, "audio": ax},
+                )
+
+                if run_v2a and not perturbations.all_in_batch(
+                    PerturbationType.SKIP_V2A_CROSS_ATTN, wrapped_block.idx
+                ):
+                    scale_ca_audio_v2a, shift_ca_audio_v2a, gate_out_v2a = (
+                        wrapped_block.get_av_ca_ada_values(
+                            wrapped_block.scale_shift_table_a2v_ca_audio,
+                            ax.shape[0],
+                            audio.cross_scale_shift_timestep,
+                            audio.cross_gate_timestep,
+                            slice(2, 4),
+                        )
+                    )
+                    ax_scaled = (
+                        ax_norm3 * (1 + scale_ca_audio_v2a) + shift_ca_audio_v2a
+                    )
+                    del scale_ca_audio_v2a, shift_ca_audio_v2a
+                    scale_ca_video_v2a, shift_ca_video_v2a, _ = (
+                        wrapped_block.get_av_ca_ada_values(
+                            wrapped_block.scale_shift_table_a2v_ca_video,
+                            vx.shape[0],
+                            video.cross_scale_shift_timestep,
+                            video.cross_gate_timestep,
+                            slice(2, 4),
+                        )
+                    )
+                    vx_scaled = (
+                        vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
+                    )
+                    del scale_ca_video_v2a, shift_ca_video_v2a
+                    v2a_mask = perturbations.mask_like(
+                        PerturbationType.SKIP_V2A_CROSS_ATTN,
+                        wrapped_block.idx,
+                        ax,
+                    )
+                    ax = ax + (
+                        wrapped_block.video_to_audio_attn(
+                            ax_scaled,
+                            context=vx_scaled,
+                            pe=audio.cross_positional_embeddings,
+                            k_pe=video.cross_positional_embeddings,
+                        )
+                        * gate_out_v2a
+                        * v2a_mask
+                    )
+                    del gate_out_v2a, v2a_mask, ax_scaled, vx_scaled
+
+                del vx_norm3, ax_norm3
+            else:
+                probe._dump_call_indexed_probe(
+                    f"{relative_path}_post_a2v_cross_attn",
+                    {"video": vx, "audio": ax},
+                )
+
+            probe._dump_call_indexed_probe(
+                f"{relative_path}_post_v2a_cross_attn",
+                {"video": vx, "audio": ax},
+            )
+
+            if run_vx:
+                vshift_mlp, vscale_mlp, vgate_mlp = wrapped_block.get_ada_values(
+                    wrapped_block.scale_shift_table,
+                    vx.shape[0],
+                    video.timesteps,
+                    slice(3, 6),
+                )
+                vx_scaled = (
+                    rms_norm(vx, eps=wrapped_block.norm_eps) * (1 + vscale_mlp)
+                    + vshift_mlp
+                )
+                vx = vx + wrapped_block.ff(vx_scaled) * vgate_mlp
+                del vshift_mlp, vscale_mlp, vgate_mlp, vx_scaled
+
+            if run_ax:
+                ashift_mlp, ascale_mlp, agate_mlp = wrapped_block.get_ada_values(
+                    wrapped_block.audio_scale_shift_table,
+                    ax.shape[0],
+                    audio.timesteps,
+                    slice(3, 6),
+                )
+                ax_scaled = (
+                    rms_norm(ax, eps=wrapped_block.norm_eps) * (1 + ascale_mlp)
+                    + ashift_mlp
+                )
+                ax = ax + wrapped_block.audio_ff(ax_scaled) * agate_mlp
+                del ashift_mlp, ascale_mlp, agate_mlp, ax_scaled
+
+            probe._dump_call_indexed_probe(
+                f"{relative_path}_post_ff",
+                {"video": vx, "audio": ax},
+            )
+
+            video_out = dataclasses.replace(video, x=vx) if video is not None else None
+            audio_out = dataclasses.replace(audio, x=ax) if audio is not None else None
+            probe._dump_call_indexed_probe(
+                relative_path,
+                {"video": video_out, "audio": audio_out},
+            )
+            return video_out, audio_out
+
+        block.forward = MethodType(_wrapped_forward, block)
+
+        def _restore() -> None:
+            if had_instance_forward:
+                block.forward = original_instance_forward
+            else:
+                delattr(block, "forward")
+
+        return _restore
+
+    def _install_block_wrappers(self, velocity_model: Any) -> list[Any]:
+        blocks = getattr(velocity_model, "transformer_blocks", None)
+        if not blocks:
+            return []
+        restores = []
+        for block_idx in _selected_probe_block_indices(len(blocks)):
+            restore = self._install_block_wrapper(
+                blocks[block_idx],
+                _block_probe_relative_path(block_idx, len(blocks)),
+            )
+            if restore is not None:
+                restores.append(restore)
+        return restores
 
     def __call__(self, *args, **kwargs):
         video = kwargs.get("video")
         audio = kwargs.get("audio")
         perturbations = kwargs.get("perturbations")
-        model_video, model_audio = self._transformer(*args, **kwargs)
+        block_restores: list[Any] = []
+        if not self._did_dump:
+            velocity_model = self._resolve_velocity_model()
+            if velocity_model is not None:
+                block_restores = self._install_block_wrappers(velocity_model)
+                _maybe_dump_probe(
+                    self._probe_dir,
+                    "denoising/stage1_transformer_preprocessed",
+                    {
+                        "video": (
+                            None
+                            if video is None
+                            else velocity_model.video_args_preprocessor.prepare(
+                                video, audio
+                            )
+                        ),
+                        "audio": (
+                            None
+                            if audio is None
+                            else velocity_model.audio_args_preprocessor.prepare(
+                                audio, video
+                            )
+                        ),
+                        "perturbations": perturbations,
+                    },
+                )
+        try:
+            model_video, model_audio = self._transformer(*args, **kwargs)
+        finally:
+            for restore in reversed(block_restores):
+                restore()
         if not self._did_dump:
             _maybe_dump_probe(
                 self._probe_dir,
@@ -379,6 +919,19 @@ def main() -> None:
                     convert_to_additive_mask(neg_attention_mask, neg_video_feats.dtype),
                 )
             )
+
+        _maybe_dump_probe(
+            probe_dir,
+            "text_connector/feature_extractor_output_split",
+            {
+                "positive_video_hidden_states": pos_video_feats,
+                "negative_video_hidden_states": neg_video_feats,
+                "positive_audio_hidden_states": pos_audio_feats,
+                "negative_audio_hidden_states": neg_audio_feats,
+                "positive_attention_mask": pos_attention_mask,
+                "negative_attention_mask": neg_attention_mask,
+            },
+        )
 
         ctx_p = EmbeddingsProcessorOutput(
             pos_video_encoding, pos_audio_encoding, pos_binary_mask

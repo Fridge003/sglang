@@ -23,7 +23,10 @@ from sglang.multimodal_gen.runtime.server_args import (
     is_ltx2_two_stage_pipeline_name,
 )
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
-from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
+from sglang.multimodal_gen.runtime.utils.probe_utils import (
+    dump_probe_payload,
+    get_probe_request_dir,
+)
 
 logger = init_logger(__name__)
 
@@ -774,6 +777,16 @@ class LTX2DenoisingStage(DenoisingStage):
             )
 
         batch_size = int(latent_model_input.shape[0])
+        probe_request_dir = get_probe_request_dir(batch)
+        internal_probe_path = None
+        if (
+            step.step_index == 0
+            and batch.extra.get("ltx2_phase") == "stage1"
+            and probe_request_dir is not None
+        ):
+            internal_probe_path = str(
+                probe_request_dir / "denoising/stage1_transformer_preprocessed.pt"
+            )
         use_raw_sigma_timestep = (
             ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage
         )
@@ -807,6 +820,13 @@ class LTX2DenoisingStage(DenoisingStage):
 
         prompt_timestep_video = None
         prompt_timestep_audio = None
+        if ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage:
+            prompt_timestep_video = sigma.to(
+                device=ctx.latents.device, dtype=torch.float32
+            ).expand(batch_size)
+            prompt_timestep_audio = sigma.to(
+                device=ctx.audio_latents.device, dtype=torch.float32
+            ).expand(batch_size)
 
         # 4. Build attention masks that account for SP padding and replicated audio.
         if ctx.use_ltx23_legacy_one_stage:
@@ -899,6 +919,7 @@ class LTX2DenoisingStage(DenoisingStage):
             if not ctx.use_ltx23_legacy_one_stage:
                 kwargs.update(
                     {
+                        "_sglang_internal_probe_path": internal_probe_path,
                         "prompt_timestep": (
                             prompt_timestep_video
                             if prompt_timestep_video_input is None
@@ -1179,8 +1200,12 @@ class LTX2DenoisingStage(DenoisingStage):
             else:
                 timestep_audio_local = timestep_local
 
-            prompt_timestep_video_local = None
-            prompt_timestep_audio_local = None
+            prompt_timestep_video_local = sigma_value.to(
+                device=video_hidden_states.device, dtype=torch.float32
+            ).expand(local_batch_size)
+            prompt_timestep_audio_local = sigma_value.to(
+                device=audio_hidden_states.device, dtype=torch.float32
+            ).expand(local_batch_size)
 
             return {
                 "hidden_states": video_hidden_states,
@@ -1682,15 +1707,16 @@ class LTX2DenoisingStage(DenoisingStage):
                                     audio_num_frames=int(step_inputs["audio_num_frames"]),
                                     video_coords=video_coords_chunk,
                                     audio_coords=audio_coords_chunk,
-                                    video_self_attention_mask=video_self_attention_mask_chunk,
-                                    audio_self_attention_mask=audio_self_attention_mask_chunk,
-                                    a2v_cross_attention_mask=a2v_cross_attention_mask_chunk,
-                                    v2a_cross_attention_mask=v2a_cross_attention_mask_chunk,
-                                    audio_replicated_for_sp=ctx.replicate_audio_for_sp,
-                                    perturbation_configs=perturbation_config_chunk,
-                                    return_latents=False,
-                                    return_dict=False,
-                                )
+                                video_self_attention_mask=video_self_attention_mask_chunk,
+                                audio_self_attention_mask=audio_self_attention_mask_chunk,
+                                a2v_cross_attention_mask=a2v_cross_attention_mask_chunk,
+                                v2a_cross_attention_mask=v2a_cross_attention_mask_chunk,
+                                audio_replicated_for_sp=ctx.replicate_audio_for_sp,
+                                _sglang_internal_probe_path=internal_probe_path,
+                                perturbation_configs=perturbation_config_chunk,
+                                return_latents=False,
+                                return_dict=False,
+                            )
                                 batched_video_chunks.append(video_chunk)
                                 batched_audio_chunks.append(audio_chunk)
 
@@ -1724,6 +1750,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 a2v_cross_attention_mask=batched_a2v_cross_attention_mask,
                                 v2a_cross_attention_mask=batched_v2a_cross_attention_mask,
                                 audio_replicated_for_sp=ctx.replicate_audio_for_sp,
+                                _sglang_internal_probe_path=internal_probe_path,
                                 perturbation_configs=perturbation_configs,
                                 return_latents=False,
                                 return_dict=False,

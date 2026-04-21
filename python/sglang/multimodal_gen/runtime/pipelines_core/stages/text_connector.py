@@ -1,5 +1,6 @@
 import torch
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.managers.forward_context import set_forward_context
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
@@ -68,16 +69,69 @@ class LTX2TextConnectorStage(PipelineStage):
         # Prepare additive mask for connectors (as per Diffusers implementation)
         dtype = prompt_embeds.dtype
 
-        additive_attention_mask = (1 - prompt_attention_mask.to(dtype)) * -1000000.0
+        additive_attention_mask = (prompt_attention_mask.to(torch.int64) - 1).to(
+            dtype
+        ) * torch.finfo(dtype).max
+
+        should_dump_feature_extractor_outputs = bool(envs.SGLANG_DIFFUSION_PROBE_DIR)
+        if should_dump_feature_extractor_outputs:
+            (
+                connector_video_hidden_states,
+                connector_audio_hidden_states,
+                connector_attention_mask,
+            ) = self.connectors.prepare_connector_inputs(
+                prompt_embeds, additive_attention_mask, additive_mask=True
+            )
+            if batch.do_classifier_free_guidance:
+                neg_video_hidden_states, pos_video_hidden_states = (
+                    connector_video_hidden_states.chunk(2, dim=0)
+                )
+                neg_audio_hidden_states, pos_audio_hidden_states = (
+                    connector_audio_hidden_states.chunk(2, dim=0)
+                )
+                neg_attention_mask, pos_attention_mask = connector_attention_mask.chunk(
+                    2, dim=0
+                )
+                dump_probe_payload(
+                    batch,
+                    "text_connector/feature_extractor_output_split",
+                    {
+                        "positive_video_hidden_states": pos_video_hidden_states,
+                        "negative_video_hidden_states": neg_video_hidden_states,
+                        "positive_audio_hidden_states": pos_audio_hidden_states,
+                        "negative_audio_hidden_states": neg_audio_hidden_states,
+                        "positive_attention_mask": pos_attention_mask,
+                        "negative_attention_mask": neg_attention_mask,
+                    },
+                )
+            else:
+                dump_probe_payload(
+                    batch,
+                    "text_connector/feature_extractor_output_positive",
+                    {
+                        "video_hidden_states": connector_video_hidden_states,
+                        "audio_hidden_states": connector_audio_hidden_states,
+                        "attention_mask": connector_attention_mask,
+                    },
+                )
 
         # Call connectors
         # Expects: prompt_embeds, attention_mask, additive_mask=True
         with set_forward_context(current_timestep=None, attn_metadata=None):
-            connector_prompt_embeds, connector_audio_prompt_embeds, connector_mask = (
-                self.connectors(
-                    prompt_embeds, additive_attention_mask, additive_mask=True
+            if should_dump_feature_extractor_outputs:
+                connector_prompt_embeds, connector_audio_prompt_embeds, connector_mask = (
+                    self.connectors.forward_from_prepared_inputs(
+                        video_hidden_states=connector_video_hidden_states,
+                        audio_hidden_states=connector_audio_hidden_states,
+                        attention_mask=connector_attention_mask,
+                    )
                 )
-            )
+            else:
+                connector_prompt_embeds, connector_audio_prompt_embeds, connector_mask = (
+                    self.connectors(
+                        prompt_embeds, additive_attention_mask, additive_mask=True
+                    )
+                )
 
         dump_probe_payload(
             batch,
