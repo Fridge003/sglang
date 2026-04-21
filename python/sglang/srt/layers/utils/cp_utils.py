@@ -391,6 +391,7 @@ def prepare_context_parallel_metadata(
     cp_rank,
     cp_size,
     seqs_len,
+    extend_lens=None,
 ):
     from sglang.srt.layers.attention.nsa.utils import (
         is_nsa_prefill_cp_round_robin_split,
@@ -449,12 +450,26 @@ def prepare_context_parallel_metadata(
     # NOTE: forward_batch.seq_lens_cpu includes cached prefix + extend tokens.
     # In CP we only split the extend tokens, but cache_seqlens passed to FA must
     # include the cached prefix.
+    #
+    # `kv_len` is `len(input_ids)`, which `prepare_mlp_sync_batch` pads up to
+    # `ceil_align(tokens, attn_cp_size)`. `seqs_len[0]` (forward_batch.seq_lens_cpu)
+    # stays at the unpadded value, so `seqs_len[0] - kv_len` undercounts
+    # `prefix_len` by the padding amount and shifts the FA causal horizon.
+    # Prefer `extend_lens[0]` (the unpadded extend length) when the caller
+    # threads it through; fall back to the legacy formula otherwise.
     prefix_len = 0
     try:
-        if seqs_len is not None and len(seqs_len) == 1:
+        if (
+            extend_lens is not None
+            and len(extend_lens) == 1
+            and seqs_len is not None
+            and len(seqs_len) == 1
+        ):
+            prefix_len = int(seqs_len[0]) - int(extend_lens[0])
+        elif seqs_len is not None and len(seqs_len) == 1:
             prefix_len = int(seqs_len[0]) - int(kv_len_origin.item())
-            if prefix_len < 0:
-                prefix_len = 0
+        if prefix_len < 0:
+            prefix_len = 0
     except Exception:
         prefix_len = 0
     # get zigzag index
