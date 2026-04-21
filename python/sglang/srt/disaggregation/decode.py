@@ -757,6 +757,14 @@ class DecodePreallocQueue:
                 required_alloc_tokens = self._required_alloc_tokens(
                     fill_len=fill_len, prefix_len=prefix_len
                 )
+                # Matching may lock previously-evictable radix pages, so refresh
+                # the admission budget against the post-lock pool state before we
+                # decide whether this request still fits.
+                allocatable_tokens = self._allocatable_tokens(
+                    retractable_tokens=retractable_tokens,
+                    count_retracted=True,
+                    extra_reserved_reqs=len(preallocated_reqs),
+                )
             else:
                 prefix_indices = None
                 prefix_len = 0

@@ -29,6 +29,7 @@ from unittest.mock import MagicMock
 
 import torch
 
+from sglang.srt.disaggregation.decode import DecodePreallocQueue
 from sglang.srt.mem_cache.base_prefix_cache import (
     InsertParams,
     MatchPrefixParams,
@@ -281,6 +282,68 @@ class TestDecodeLockRefScenarios(unittest.TestCase):
         self.assertEqual(cache.root_node.lock_ref, root_lock_before)
         self.assertEqual(cache.protected_size(), 0)
         self.assertEqual(cache.evictable_size(), 0)
+
+    def test_pop_preallocated_rechecks_budget_after_lock(self):
+        queue = DecodePreallocQueue.__new__(DecodePreallocQueue)
+
+        req = MagicMock()
+        req.rid = "req-1"
+        req.origin_input_ids = list(range(8))
+        req.output_ids = [99]
+        req.last_node = object()
+        req.finished_reason = None
+        req.cache_protected_len = 0
+        req.sampling_params.max_new_tokens = 16
+
+        decode_req = MagicMock()
+        decode_req.req = req
+        decode_req.waiting_for_input = True
+
+        queue.queue = [decode_req]
+        queue.pending_reqs = []
+        queue.retracted_queue = []
+        queue.num_reserved_decode_tokens = 0
+        queue._resolve_pending_reqs = MagicMock()
+        queue._update_handshake_waiters = MagicMock()
+        queue._match_prefix_and_lock = MagicMock(
+            return_value=(torch.arange(4, dtype=torch.int64), 4)
+        )
+        queue._pre_alloc = MagicMock(
+            side_effect=AssertionError("_pre_alloc should not run")
+        )
+        queue.transfer_queue = MagicMock(queue=[], enable_staging=False)
+        queue.tree_cache = MagicMock()
+        queue.tree_cache.dec_lock_ref = MagicMock()
+        queue.req_to_token_pool = MagicMock()
+        queue.req_to_token_pool.available_size.return_value = 1
+        queue.req_to_metadata_buffer_idx_allocator = MagicMock()
+        queue.req_to_metadata_buffer_idx_allocator.available_size.return_value = 1
+        queue.token_to_kv_pool_allocator = MagicMock()
+        queue.token_to_kv_pool_allocator.page_size = 4
+
+        running_batch = MagicMock()
+        running_batch.reqs = []
+        server_args = MagicMock()
+        server_args.disaggregation_decode_enable_radix_cache = True
+        scheduler = MagicMock()
+        scheduler.running_batch = running_batch
+        scheduler.server_args = server_args
+        scheduler.enable_hisparse = False
+        scheduler.waiting_queue = []
+        scheduler.last_batch = None
+        scheduler.stream_output = MagicMock()
+        queue.scheduler = scheduler
+
+        # Initial budget says the request fits; post-lock budget says it does not.
+        queue._allocatable_tokens = MagicMock(side_effect=[8, 3])
+
+        preallocated, failed = queue.pop_preallocated()
+
+        self.assertEqual(preallocated, [])
+        self.assertEqual(failed, [])
+        queue._pre_alloc.assert_not_called()
+        queue.tree_cache.dec_lock_ref.assert_called_once_with(req.last_node)
+        self.assertEqual(queue._allocatable_tokens.call_count, 2)
 
     def test_repeated_incremental_no_leak(self):
         """Multiple incremental transfers shouldn't leak lock_refs."""
