@@ -29,7 +29,6 @@ from unittest.mock import MagicMock
 
 import torch
 
-from sglang.srt.disaggregation.decode import DecodePreallocQueue, DecodeRequest
 from sglang.srt.mem_cache.base_prefix_cache import (
     InsertParams,
     MatchPrefixParams,
@@ -316,122 +315,6 @@ class TestDecodeLockRefScenarios(unittest.TestCase):
         # After all iterations, root lock should be 1, no protected nodes
         self.assertEqual(cache.root_node.lock_ref, 1)
         self.assertEqual(cache.protected_size(), 0)
-
-
-class _MockSamplingParams:
-    def __init__(self, max_new_tokens=0):
-        self.max_new_tokens = max_new_tokens
-
-
-class _MockTimeStats:
-    def set_decode_transfer_queue_entry_time(self):
-        return None
-
-
-class _MockDecodeReq:
-    def __init__(self, rid, req_pool_idx, origin_input_ids):
-        self.rid = rid
-        self.req_pool_idx = req_pool_idx
-        self.origin_input_ids = list(origin_input_ids)
-        self.output_ids = []
-        self.sampling_params = _MockSamplingParams(max_new_tokens=0)
-        self.finished_reason = None
-        self.return_logprob = False
-        self.time_stats = _MockTimeStats()
-        self.cache_protected_len = 0
-        self.bootstrap_room = 0
-
-
-class TestDecodeBatchEviction(unittest.TestCase):
-    def test_pop_preallocated_batches_eviction_once(self):
-        queue = DecodePreallocQueue.__new__(DecodePreallocQueue)
-
-        available_tokens = {"value": 2}
-        req_to_token = torch.full((2, 8), -1, dtype=torch.int64)
-
-        req_to_token_pool = MagicMock()
-        req_to_token_pool.available_size.return_value = 8
-        req_to_token_pool.req_to_token = req_to_token
-
-        metadata_alloc = MagicMock()
-        metadata_alloc.available_size.return_value = 8
-        metadata_alloc.alloc.side_effect = [0, 1]
-
-        token_allocator = MagicMock()
-        token_allocator.available_size.side_effect = lambda: available_tokens["value"]
-        token_allocator.page_size = 1
-
-        tree_cache = MagicMock()
-        tree_cache.evictable_size.return_value = 6
-        tree_cache.protected_size.return_value = 0
-
-        def _evict(params):
-            available_tokens["value"] += params.num_tokens
-            return MagicMock(num_tokens_evicted=params.num_tokens)
-
-        tree_cache.evict.side_effect = _evict
-
-        scheduler = MagicMock()
-        scheduler.running_batch.reqs = []
-        scheduler.waiting_queue = []
-        scheduler.last_batch = None
-        scheduler.enable_hisparse = False
-        scheduler.server_args.disaggregation_decode_enable_radix_cache = True
-        scheduler.stream_output = MagicMock()
-        scheduler.sliding_window_size = 0
-
-        transfer_queue = MagicMock()
-        transfer_queue.queue = []
-        transfer_queue.enable_staging = False
-
-        queue.req_to_token_pool = req_to_token_pool
-        queue.req_to_metadata_buffer_idx_allocator = metadata_alloc
-        queue.token_to_kv_pool_allocator = token_allocator
-        queue.token_to_kv_pool = object()
-        queue.scheduler = scheduler
-        queue.transfer_queue = transfer_queue
-        queue.tree_cache = tree_cache
-        queue.num_reserved_decode_tokens = 0
-        queue.queue = [
-            DecodeRequest(
-                req=_MockDecodeReq("r1", 0, [1, 2, 3, 4]),
-                kv_receiver=MagicMock(),
-                waiting_for_input=True,
-            ),
-            DecodeRequest(
-                req=_MockDecodeReq("r2", 1, [5, 6, 7, 8]),
-                kv_receiver=MagicMock(),
-                waiting_for_input=True,
-            ),
-        ]
-        queue.retracted_queue = []
-        queue.pending_reqs = []
-        queue._resolve_pending_reqs = MagicMock()
-        queue._update_handshake_waiters = MagicMock()
-        queue._match_prefix_and_lock = MagicMock(
-            side_effect=[
-                (torch.empty((0,), dtype=torch.int64), 0),
-                (torch.empty((0,), dtype=torch.int64), 0),
-            ]
-        )
-
-        def _pre_alloc(req, prefix_indices=None, prefix_len=None, *, allow_evict=True):
-            base = req.req_pool_idx * 10
-            kv_loc = torch.tensor([base, base + 1, base + 2, base + 3], dtype=torch.int64)
-            req_to_token[req.req_pool_idx, :4] = kv_loc
-            return kv_loc
-
-        queue._pre_alloc = _pre_alloc
-
-        preallocated, failed = queue.pop_preallocated()
-
-        self.assertEqual(len(preallocated), 2)
-        self.assertEqual(len(failed), 0)
-        self.assertEqual(tree_cache.evict.call_count, 1)
-        self.assertEqual(tree_cache.evict.call_args.args[0].num_tokens, 6)
-        self.assertEqual(queue.queue, [])
-        for decode_req in preallocated:
-            decode_req.kv_receiver.send_metadata.assert_called_once()
 
 
 if __name__ == "__main__":

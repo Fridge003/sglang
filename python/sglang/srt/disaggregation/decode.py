@@ -246,15 +246,6 @@ class DecodeRequest:
         return self.req.seqlen
 
 
-@dataclass
-class _PlannedPrealloc:
-    decode_req: DecodeRequest
-    prefix_indices: Optional[torch.Tensor]
-    prefix_len: int
-    required_alloc_tokens: int
-    origin_input_len: int
-
-
 class DecodePreallocQueue:
     """
     Store the requests that are preallocating.
@@ -692,7 +683,6 @@ class DecodePreallocQueue:
 
         failed_reqs = []
         preallocated_reqs = []
-        planned_preallocs: List[_PlannedPrealloc] = []
         indices_to_remove = set()
 
         # We need to make sure that the sum of inflight tokens and allocatable tokens is greater than maximum input+output length of each inflight request
@@ -799,31 +789,14 @@ class DecodePreallocQueue:
                     self.tree_cache.dec_lock_ref(decode_req.req.last_node)
                 break
 
-            planned_preallocs.append(
-                _PlannedPrealloc(
-                    decode_req=decode_req,
-                    prefix_indices=prefix_indices,
-                    prefix_len=prefix_len,
-                    required_alloc_tokens=required_alloc_tokens,
-                    origin_input_len=origin_input_len,
-                )
-            )
+            dst_kv_indices = self._pre_alloc(decode_req.req, prefix_indices, prefix_len)
             hisparse_req_budget -= 1
-            allocatable_tokens -= required_tokens_for_request
-            indices_to_remove.add(i)
-
-        self._batch_evict_for_prealloc(planned_preallocs)
-
-        for planned in planned_preallocs:
-            decode_req = planned.decode_req
-            prefix_len = planned.prefix_len
-            origin_input_len = planned.origin_input_len
-
-            dst_kv_indices = self._pre_alloc(
-                decode_req.req,
-                planned.prefix_indices,
-                prefix_len,
-                allow_evict=False,
+            # Recompute from actual pool state for the next queue entry.
+            # This accounts for page rounding and newly locked evictable cache.
+            allocatable_tokens = self._allocatable_tokens(
+                retractable_tokens=retractable_tokens,
+                count_retracted=True,
+                extra_reserved_reqs=len(preallocated_reqs) + 1,
             )
             decode_req.req.cache_protected_len = prefix_len
 
@@ -908,6 +881,7 @@ class DecodePreallocQueue:
                     decode_req.req.bootstrap_room, decode_req
                 )
             preallocated_reqs.append(decode_req)
+            indices_to_remove.add(i)
             decode_req.req.time_stats.set_decode_transfer_queue_entry_time()
 
         self.queue = [
@@ -999,76 +973,11 @@ class DecodePreallocQueue:
         )
         return num_new_pages * page_size
 
-    def _evict_for_prealloc(
-        self,
-        required_alloc_tokens: int,
-        *,
-        req: Optional[Req] = None,
-        fill_len: Optional[int] = None,
-        prefix_len: Optional[int] = None,
-        delta_len: Optional[int] = None,
-    ) -> None:
-        if not self.scheduler.server_args.disaggregation_decode_enable_radix_cache:
-            return
-
-        available_size = self.token_to_kv_pool_allocator.available_size()
-        if available_size >= required_alloc_tokens:
-            return
-
-        num_to_evict = required_alloc_tokens - available_size
-        result = self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
-        available_after = self.token_to_kv_pool_allocator.available_size()
-        if available_after >= required_alloc_tokens:
-            return
-
-        if req is None:
-            logger.warning(
-                "Batch eviction insufficient: needed %s tokens, available %s after "
-                "evicting %s/%s tokens. evictable_size=%s, protected_size=%s",
-                required_alloc_tokens,
-                available_after,
-                result.num_tokens_evicted,
-                num_to_evict,
-                self.tree_cache.evictable_size(),
-                self.tree_cache.protected_size(),
-            )
-            return
-
-        logger.warning(
-            "Eviction insufficient: needed %s tokens, available %s after "
-            "evicting %s/%s tokens. evictable_size=%s, protected_size=%s, "
-            "fill_len=%s, prefix_len=%s, delta_len=%s, page_size=%s, req=%s",
-            required_alloc_tokens,
-            available_after,
-            result.num_tokens_evicted,
-            num_to_evict,
-            self.tree_cache.evictable_size(),
-            self.tree_cache.protected_size(),
-            fill_len,
-            prefix_len,
-            delta_len,
-            self.token_to_kv_pool_allocator.page_size,
-            req.rid,
-        )
-
-    def _batch_evict_for_prealloc(
-        self, planned_preallocs: List[_PlannedPrealloc]
-    ) -> None:
-        if not planned_preallocs:
-            return
-
-        total_required_alloc_tokens = sum(
-            planned.required_alloc_tokens for planned in planned_preallocs
-        )
-        self._evict_for_prealloc(total_required_alloc_tokens)
-
     def _pre_alloc(
         self,
         req: Req,
         prefix_indices: Optional[torch.Tensor] = None,
         prefix_len: Optional[int] = None,
-        *,
-        allow_evict: bool = True,
     ) -> torch.Tensor:
         """Pre-allocate the memory for req_to_token and token_kv_pool"""
         if prefix_len is None:
@@ -1097,14 +1006,26 @@ class DecodePreallocQueue:
             fill_len=fill_len, prefix_len=prefix_len
         )
 
-        if allow_evict:
-            self._evict_for_prealloc(
-                required_alloc_tokens,
-                req=req,
-                fill_len=fill_len,
-                prefix_len=prefix_len,
-                delta_len=delta_len,
+        # Evict cached entries if the pool doesn't have enough free pages.
+        if (
+            self.scheduler.server_args.disaggregation_decode_enable_radix_cache
+            and self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens
+        ):
+            num_to_evict = (
+                required_alloc_tokens - self.token_to_kv_pool_allocator.available_size()
             )
+            result = self.tree_cache.evict(EvictParams(num_tokens=num_to_evict))
+            if self.token_to_kv_pool_allocator.available_size() < required_alloc_tokens:
+                logger.warning(
+                    f"Eviction insufficient: needed {required_alloc_tokens} tokens, "
+                    f"available {self.token_to_kv_pool_allocator.available_size()} "
+                    f"after evicting {result.num_tokens_evicted}/{num_to_evict} tokens. "
+                    f"evictable_size={self.tree_cache.evictable_size()}, "
+                    f"protected_size={self.tree_cache.protected_size()}, "
+                    f"fill_len={fill_len}, prefix_len={prefix_len}, delta_len={delta_len}, "
+                    f"page_size={self.token_to_kv_pool_allocator.page_size}, "
+                    f"req={req.rid}"
+                )
 
         if self.scheduler.enable_hisparse:
             # HiSparse is incompatible with decode-side L1 radix cache. Keep
