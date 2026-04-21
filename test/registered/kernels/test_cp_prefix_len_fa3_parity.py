@@ -7,7 +7,6 @@ full-sequence FA3 reference computed over the unpadded `(prefix + extend)`
 KV. Any discrepancy indicates the metadata function emitted wrong
 `cache_seqlens` for at least one rank.
 """
-import inspect
 import unittest
 from unittest.mock import patch
 
@@ -76,18 +75,10 @@ class TestCPPrefixLenFA3Parity(CustomTestCase):
 
         seqs_len = [prefix_len + extend_len]
         extend_lens = [extend_len]
-        accepts_extend_lens = (
-            "extend_lens"
-            in inspect.signature(prepare_context_parallel_metadata).parameters
-        )
 
         def _call_meta(rank: int):
-            if accepts_extend_lens:
-                return prepare_context_parallel_metadata(
-                    padded_extend, rank, cp_size, seqs_len, extend_lens=extend_lens
-                )
             return prepare_context_parallel_metadata(
-                padded_extend, rank, cp_size, seqs_len
+                padded_extend, rank, cp_size, seqs_len, extend_lens=extend_lens
             )
 
         # Exercise the non-NSA branch; the NSA branch uses a separate
