@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from sglang.multimodal_gen.configs.sample.ltx_2 import LTX23SamplingParams
+from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
+from sglang.multimodal_gen.configs.sample.ltx_2 import (
+    LTX23HQSamplingParams,
+    LTX23SamplingParams,
+)
+from sglang.multimodal_gen.registry import get_pipeline_config_classes
 from sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline import (
     _add_ltx2_stage1_generation_stages,
     build_official_ltx2_sigmas,
@@ -84,6 +89,27 @@ def test_ltx2_hq_stage1_guider_defaults_merge_request_overrides():
     assert merged["audio_modality_scale"] == 2.5
     assert merged["video_rescale_scale"] == 0.45
     assert merged["audio_cfg_scale"] == 7.0
+
+
+def test_ltx23_hq_sampling_params_defaults_match_official_hq_parser():
+    params = LTX23HQSamplingParams()
+
+    assert params.height == 1088
+    assert params.width == 1920
+    assert params.num_inference_steps == 15
+    assert params.video_rescale_scale == 0.45
+    assert params.audio_rescale_scale == 1.0
+    assert params.video_stg_blocks == []
+    assert params.audio_stg_blocks == []
+
+
+def test_ltx23_hq_pipeline_registers_pipeline_specific_sampling_params():
+    config_classes = get_pipeline_config_classes("LTX2TwoStageHQPipeline")
+
+    assert config_classes is not None
+    pipeline_config_cls, sampling_params_cls = config_classes
+    assert pipeline_config_cls is LTX2PipelineConfig
+    assert sampling_params_cls is LTX23HQSamplingParams
 
 
 def test_ltx2_hq_uses_batched_guided_passes_but_ti2v_keeps_split_path():

@@ -571,18 +571,26 @@ class SamplingParams:
     def from_user_sampling_params_args(
         model_path: str, server_args: "ServerArgs", *args, **kwargs
     ):
+        pipeline_class_name = getattr(server_args, "pipeline_class_name", None)
         try:
-            sampling_params = SamplingParams.from_pretrained(
-                model_path, backend=server_args.backend, model_id=server_args.model_id
-            )
+            sampling_params = None
+            if pipeline_class_name:
+                from sglang.multimodal_gen.registry import get_pipeline_config_classes
+
+                config_classes = get_pipeline_config_classes(pipeline_class_name)
+                if config_classes is not None:
+                    _, sampling_params_cls = config_classes
+                    sampling_params = sampling_params_cls()
+
+            if sampling_params is None:
+                sampling_params = SamplingParams.from_pretrained(
+                    model_path, backend=server_args.backend, model_id=server_args.model_id
+                )
         except (AttributeError, ValueError) as e:
             # Handle safetensors files or other cases where model_index.json is not available
             # Use appropriate SamplingParams based on pipeline_class_name from registry
             if os.path.isfile(model_path) and model_path.endswith(".safetensors"):
                 # Determine which sampling params to use based on pipeline_class_name
-                pipeline_class_name = getattr(server_args, "pipeline_class_name", None)
-
-                # Try to get SamplingParams from registry
                 from sglang.multimodal_gen.registry import get_pipeline_config_classes
 
                 config_classes = (

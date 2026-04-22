@@ -87,3 +87,26 @@ class LTX23SamplingParams(LTX2SamplingParams):
         if stage1_guider_params:
             extra["ltx2_stage1_guider_params"] = stage1_guider_params
         return extra
+
+
+@dataclasses.dataclass
+class LTX23HQSamplingParams(LTX23SamplingParams):
+    """Sampling parameters matching official LTX-2.3 HQ two-stage defaults."""
+
+    height: int = 1088
+    width: int = 1920
+    num_inference_steps: int = 15
+
+    video_cfg_scale: float | None = 3.0
+    video_stg_scale: float | None = 0.0
+    video_rescale_scale: float | None = 0.45
+    video_modality_scale: float | None = 3.0
+    video_skip_step: int | None = 0
+    video_stg_blocks: list[int] | None = dataclasses.field(default_factory=list)
+
+    audio_cfg_scale: float | None = 7.0
+    audio_stg_scale: float | None = 0.0
+    audio_rescale_scale: float | None = 1.0
+    audio_modality_scale: float | None = 3.0
+    audio_skip_step: int | None = 0
+    audio_stg_blocks: list[int] | None = dataclasses.field(default_factory=list)

@@ -17,6 +17,7 @@ from sglang.multimodal_gen.configs.sample.flux import (
     Flux2SamplingParams,
     FluxSamplingParams,
 )
+from sglang.multimodal_gen.configs.sample.ltx_2 import LTX23HQSamplingParams
 from sglang.multimodal_gen.configs.sample.qwenimage import QwenImageSamplingParams
 from sglang.multimodal_gen.configs.sample.sampling_params import (
     SamplingParams,
@@ -267,6 +268,7 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
         server_args = MagicMock()
         server_args.backend = "sglang"
         server_args.model_id = None
+        server_args.pipeline_class_name = None
         server_args.pipeline_config = MagicMock()
 
         with patch.object(
@@ -296,6 +298,24 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
         self.assertNotIn("height", implicit_fields)
         self.assertIn("width", explicit_fields)
         self.assertIn("height", explicit_fields)
+
+    def test_explicit_pipeline_class_uses_pipeline_specific_sampling_params(self):
+        server_args = MagicMock()
+        server_args.backend = "sglang"
+        server_args.model_id = None
+        server_args.pipeline_class_name = "LTX2TwoStageHQPipeline"
+        server_args.pipeline_config = MagicMock()
+
+        params = SamplingParams.from_user_sampling_params_args(
+            "Lightricks/LTX-2.3",
+            server_args=server_args,
+            prompt="p",
+        )
+
+        self.assertIsInstance(params, LTX23HQSamplingParams)
+        self.assertEqual(params.width, 1920)
+        self.assertEqual(params.height, 1088)
+        self.assertEqual(params.num_inference_steps, 15)
 
 
 if __name__ == "__main__":
