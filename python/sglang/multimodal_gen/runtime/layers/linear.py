@@ -162,6 +162,52 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return output
 
 
+def should_use_fp32_row_parallel_accum(
+    layer: "RowParallelLinear", input_parallel: torch.Tensor
+) -> bool:
+    return (
+        bool(getattr(layer, "accumulate_in_fp32", False))
+        and isinstance(layer.quant_method, UnquantizedLinearMethod)
+        and input_parallel.dtype in (torch.float16, torch.bfloat16)
+        and layer.weight.dtype == input_parallel.dtype
+    )
+
+
+def apply_fp32_row_parallel_linear(
+    layer: "RowParallelLinear",
+    input_parallel: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return F.linear(
+        input_parallel.float(),
+        layer.weight.float(),
+        None if bias is None else bias.float(),
+    )
+
+
+def should_use_fp32_column_parallel_accum(
+    layer: "ColumnParallelLinear", input_: torch.Tensor
+) -> bool:
+    return (
+        bool(getattr(layer, "accumulate_in_fp32", False))
+        and isinstance(layer.quant_method, UnquantizedLinearMethod)
+        and input_.dtype in (torch.float16, torch.bfloat16)
+        and layer.weight.dtype == input_.dtype
+    )
+
+
+def apply_fp32_column_parallel_linear(
+    layer: "ColumnParallelLinear",
+    input_: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return F.linear(
+        input_.float(),
+        layer.weight.float(),
+        None if bias is None else bias.float(),
+    )
+
+
 class LinearBase(torch.nn.Module):
     """Base linear layer.
 
@@ -327,6 +373,7 @@ class ColumnParallelLinear(LinearBase):
         output_size: int,
         bias: bool = True,
         gather_output: bool = False,
+        accumulate_in_fp32: bool = False,
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -352,6 +399,7 @@ class ColumnParallelLinear(LinearBase):
         )
 
         self.gather_output = gather_output
+        self.accumulate_in_fp32 = accumulate_in_fp32
 
         if output_sizes is None:
             output_sizes = [output_size]
@@ -421,7 +469,15 @@ class ColumnParallelLinear(LinearBase):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        use_fp32_column_parallel_accum = should_use_fp32_column_parallel_accum(
+            self, input_
+        )
+        if use_fp32_column_parallel_accum:
+            output_parallel = apply_fp32_column_parallel_linear(
+                self, input_, bias=bias
+            )
+        else:
+            output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(
@@ -429,6 +485,8 @@ class ColumnParallelLinear(LinearBase):
             )
         else:
             output = output_parallel
+        if use_fp32_column_parallel_accum:
+            output = output.to(dtype=input_.dtype)
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
@@ -962,6 +1020,7 @@ class RowParallelLinear(LinearBase):
         skip_bias_add: bool = False,
         params_dtype: torch.dtype | None = None,
         reduce_results: bool = True,
+        accumulate_in_fp32: bool = False,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         tp_group: dist.ProcessGroup = None,
@@ -980,6 +1039,7 @@ class RowParallelLinear(LinearBase):
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
+        self.accumulate_in_fp32 = accumulate_in_fp32
 
         assert self.quant_method is not None
         self.quant_method.create_weights(
@@ -1060,13 +1120,23 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+        use_fp32_row_parallel_accum = should_use_fp32_row_parallel_accum(
+            self, input_parallel
+        )
+        if use_fp32_row_parallel_accum:
+            output_parallel = apply_fp32_row_parallel_linear(
+                self, input_parallel, bias=bias_
+            )
+        else:
+            output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(
                 output_parallel, tp_group=self.tp_group
             )
         else:
             output = output_parallel
+        if use_fp32_row_parallel_accum:
+            output = output.to(dtype=input_parallel.dtype)
 
         output_bias = self.bias if self.skip_bias_add else None
 

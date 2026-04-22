@@ -439,11 +439,12 @@ class LTX2DenoisingStage(DenoisingStage):
         ctx: LTX2DenoisingContext,
         server_args: ServerArgs,
     ) -> bool:
-        """Use only cond/neg pair batching for native LTX-2.3 two-stage single-card runs.
+        """Use only cond/neg pair batching for native LTX-2.3 two-stage runs.
 
         Keeping perturbed/modality passes in the same large batch changes stage-1 guider
-        numerics enough to drift from the sequential reference. For the current safe path,
-        only batch the CFG pair and keep the extra guider branches as separate forwards.
+        numerics enough to drift from the sequential reference. Keep the CFG pair
+        batched, but leave the extra guider branches as separate forwards across
+        both single-GPU and TP runs so stage-1 semantics stay aligned.
         """
         if not is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name):
             return False
@@ -453,9 +454,7 @@ class LTX2DenoisingStage(DenoisingStage):
             return False
         if get_sp_world_size() != 1:
             return False
-        if int(server_args.num_gpus) != 1:
-            return False
-        return int(server_args.tp_size or 1) == 1
+        return True
 
     @classmethod
     def _ltx2_calculate_guided_x0(

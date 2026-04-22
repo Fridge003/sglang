@@ -20,7 +20,7 @@ from sglang.multimodal_gen.runtime.distributed import (
 )
 from sglang.multimodal_gen.runtime.distributed.communication_op import (
     sequence_model_parallel_all_gather,
-    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_all_gather,
 )
 from sglang.multimodal_gen.runtime.layers.attention import LocalAttention, USPAttention
 from sglang.multimodal_gen.runtime.layers.linear import (
@@ -382,7 +382,11 @@ class LTX2TextProjection(nn.Module):
             out_features = hidden_size
 
         self.linear_1 = ColumnParallelLinear(
-            in_features, hidden_size, bias=True, gather_output=True
+            in_features,
+            hidden_size,
+            bias=True,
+            gather_output=False,
+            accumulate_in_fp32=True,
         )
         if act_fn == "gelu_tanh":
             self.act_1 = nn.GELU(approximate="tanh")
@@ -391,8 +395,12 @@ class LTX2TextProjection(nn.Module):
         else:
             raise ValueError(f"Unknown activation function: {act_fn}")
 
-        self.linear_2 = ColumnParallelLinear(
-            hidden_size, out_features, bias=True, gather_output=True
+        self.linear_2 = RowParallelLinear(
+            hidden_size,
+            out_features,
+            bias=True,
+            input_is_parallel=True,
+            accumulate_in_fp32=True,
         )
 
     def forward(self, caption: torch.Tensor) -> torch.Tensor:
@@ -444,6 +452,7 @@ class LTX2AdaLayerNormSingle(nn.Module):
             embedding_coefficient * embedding_dim,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
         )
 
     def forward(
@@ -465,31 +474,42 @@ class LTX2TPRMSNormAcrossHeads(nn.Module):
         self.local_hidden_size = local_hidden_size
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(local_hidden_size))
-
-        tp_rank = get_tp_rank()
+        self.tp_rank = get_tp_rank()
 
         def _weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
             shard = loaded_weight.narrow(
-                0, tp_rank * local_hidden_size, local_hidden_size
+                0, self.tp_rank * local_hidden_size, local_hidden_size
             )
             param.data.copy_(shard.to(dtype=param.dtype, device=param.device))
 
         setattr(self.weight, "weight_loader", _weight_loader)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Keep track of the original dtype. We do the statistics in fp32 for
-        # numerical stability, but cast the output back to the input dtype to
-        orig_dtype = x.dtype
         if get_tp_world_size() == 1:
-            var = x.float().pow(2).mean(dim=-1, keepdim=True)
+            x_full = x
+            weight_full = self.weight
+            output_start = 0
+            output_width = self.full_hidden_size
         else:
-            local_sumsq = x.float().pow(2).sum(dim=-1, keepdim=True)
-            global_sumsq = tensor_model_parallel_all_reduce(local_sumsq)
-            var = global_sumsq / float(self.full_hidden_size)
+            x_full = tensor_model_parallel_all_gather(x.contiguous(), dim=-1)
+            weight_full = tensor_model_parallel_all_gather(
+                self.weight.contiguous(), dim=0
+            )
+            output_start = self.tp_rank * self.local_hidden_size
+            output_width = self.local_hidden_size
 
-        inv_rms_fp32 = torch.rsqrt(var + self.eps)
-        y = (x.float() * inv_rms_fp32).to(dtype=orig_dtype)
-        return y * self.weight.to(dtype=orig_dtype)
+        y_fp32 = (
+            F.rms_norm(
+                x_full.float(),
+                (self.full_hidden_size,),
+                None,
+                self.eps,
+            )
+            * weight_full.float()
+        )
+        if output_width != self.full_hidden_size:
+            y_fp32 = y_fp32.narrow(-1, output_start, output_width)
+        return y_fp32.to(dtype=x.dtype)
 
 
 class LTX2Attention(nn.Module):
@@ -541,6 +561,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_k = ColumnParallelLinear(
@@ -548,6 +569,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_v = ColumnParallelLinear(
@@ -555,6 +577,7 @@ class LTX2Attention(nn.Module):
             self.inner_dim,
             bias=True,
             gather_output=False,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
         self.to_gate_logits: ColumnParallelLinear | None = None
@@ -564,6 +587,7 @@ class LTX2Attention(nn.Module):
                 self.heads,
                 bias=True,
                 gather_output=False,
+                accumulate_in_fp32=True,
                 quant_config=quant_config,
             )
 
@@ -591,6 +615,7 @@ class LTX2Attention(nn.Module):
                 self.query_dim,
                 bias=True,
                 input_is_parallel=True,
+                accumulate_in_fp32=True,
                 quant_config=quant_config,
             ),
             nn.Identity(),
@@ -763,11 +788,16 @@ class LTX2FeedForward(nn.Module):
         inner_dim = int(dim * mult)
 
         self.proj_in = ColumnParallelLinear(
-            dim, inner_dim, bias=True, gather_output=True, quant_config=quant_config
+            dim, inner_dim, bias=True, gather_output=False, quant_config=quant_config
         )
         self.act = nn.GELU(approximate="tanh")
-        self.proj_out = ColumnParallelLinear(
-            inner_dim, dim_out, bias=True, gather_output=True, quant_config=quant_config
+        self.proj_out = RowParallelLinear(
+            inner_dim,
+            dim_out,
+            bias=True,
+            input_is_parallel=True,
+            accumulate_in_fp32=True,
+            quant_config=quant_config,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1493,6 +1523,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             arch.out_channels,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 
@@ -1504,6 +1535,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             arch.audio_out_channels,
             bias=True,
             gather_output=True,
+            accumulate_in_fp32=True,
             quant_config=quant_config,
         )
 
@@ -1585,8 +1617,6 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_replicated_for_sp: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        ltx2_phase = kwargs.get("ltx2_phase")
-
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
 
@@ -1660,18 +1690,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         # 2. Patchify input projections
-        patchify_proj_input = hidden_states
-        if (
-            ltx2_phase == "stage2"
-            and str(getattr(self.config.arch_config, "ltx_variant", "ltx_2"))
-            == "ltx_2_3"
-            and hidden_states.ndim == 3
-            and hidden_states.is_contiguous()
-        ):
-            patchify_proj_input = (
-                hidden_states.transpose(1, 2).contiguous().transpose(1, 2)
-            )
-        hidden_states, _ = self.patchify_proj(patchify_proj_input)
+        hidden_states, _ = self.patchify_proj(hidden_states)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
