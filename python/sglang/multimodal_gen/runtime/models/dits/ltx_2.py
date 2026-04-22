@@ -1617,6 +1617,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         audio_replicated_for_sp: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        ltx2_phase = kwargs.get("ltx2_phase")
+
         batch_size = hidden_states.size(0)
         audio_timestep = audio_timestep if audio_timestep is not None else timestep
 
@@ -1690,7 +1692,18 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
 
         # 2. Patchify input projections
-        hidden_states, _ = self.patchify_proj(hidden_states)
+        patchify_proj_input = hidden_states
+        if (
+            ltx2_phase == "stage2"
+            and str(getattr(self.config.arch_config, "ltx_variant", "ltx_2"))
+            == "ltx_2_3"
+            and hidden_states.ndim == 3
+            and hidden_states.is_contiguous()
+        ):
+            patchify_proj_input = (
+                hidden_states.transpose(1, 2).contiguous().transpose(1, 2)
+            )
+        hidden_states, _ = self.patchify_proj(patchify_proj_input)
         audio_hidden_states, _ = self.audio_patchify_proj(audio_hidden_states)
         # 3. Prepare timestep embeddings
         # 3.1. Prepare global modality (video and audio) timestep embedding and modulation parameters
