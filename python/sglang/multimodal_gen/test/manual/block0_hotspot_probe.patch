@@ -1,0 +1,432 @@
+diff --git a/packages/ltx-core/src/ltx_core/model/transformer/attention.py b/packages/ltx-core/src/ltx_core/model/transformer/attention.py
+index a061344..0edccf9 100644
+--- a/packages/ltx-core/src/ltx_core/model/transformer/attention.py
++++ b/packages/ltx-core/src/ltx_core/model/transformer/attention.py
+@@ -1,3 +1,4 @@
++import os
+ from enum import Enum
+ from typing import Protocol
+ 
+@@ -25,6 +26,22 @@ class AttentionCallable(Protocol):
+     ) -> torch.Tensor: ...
+ 
+ 
++def _sglang_probe_dump_payload(path: str | None, payload: dict[str, torch.Tensor | None]) -> None:
++    if not path:
++        return
++    if os.path.exists(path):
++        return
++    os.makedirs(os.path.dirname(path), exist_ok=True)
++    torch.save(
++        {
++            key: value.detach().to("cpu")
++            for key, value in payload.items()
++            if isinstance(value, torch.Tensor)
++        },
++        path,
++    )
++
++
+ class PytorchAttention(AttentionCallable):
+     def __call__(
+         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, heads: int, mask: torch.Tensor | None = None
+@@ -186,6 +203,7 @@ class Attention(torch.nn.Module):
+         k_pe: torch.Tensor | None = None,
+         perturbation_mask: torch.Tensor | None = None,
+         all_perturbed: bool = False,
++        probe_path: str | None = None,
+     ) -> torch.Tensor:
+         """Multi-head attention with optional RoPE, perturbation masking, and per-head gating.
+         When ``perturbation_mask`` is all zeros, the expensive query/key path
+@@ -214,22 +232,38 @@ class Attention(torch.nn.Module):
+         context = x if context is None else context
+         use_attention = not all_perturbed
+ 
+-        v = self.to_v(context)
++        raw_v = self.to_v(context)
++        v = raw_v
++        raw_q: torch.Tensor | None = None
++        raw_k: torch.Tensor | None = None
++        q_post_qk_norm: torch.Tensor | None = None
++        k_post_qk_norm: torch.Tensor | None = None
++        q_post_rope: torch.Tensor | None = None
++        k_post_rope: torch.Tensor | None = None
++        attn_kernel_out: torch.Tensor | None = None
++        pre_to_out: torch.Tensor | None = None
+ 
+         if not use_attention:
+             out = v
+         else:
+-            q = self.to_q(x)
+-            k = self.to_k(context)
++            raw_q = self.to_q(x)
++            raw_k = self.to_k(context)
++            q = raw_q
++            k = raw_k
+ 
+             q = self.q_norm(q)
+             k = self.k_norm(k)
++            q_post_qk_norm = q
++            k_post_qk_norm = k
+ 
+             if pe is not None:
+                 q = apply_rotary_emb(q, pe, self.rope_type)
+                 k = apply_rotary_emb(k, pe if k_pe is None else k_pe, self.rope_type)
++            q_post_rope = q
++            k_post_rope = k
+ 
+             out = self.attention_function(q, k, v, self.heads, mask)  # (B, T, H*D)
++            attn_kernel_out = out
+ 
+             if perturbation_mask is not None:
+                 out = out * perturbation_mask + v * (1 - perturbation_mask)
+@@ -246,4 +280,32 @@ class Attention(torch.nn.Module):
+             # Reshape back to (B, T, H*D)
+             out = out.view(b, t, self.heads * self.dim_head)
+ 
+-        return self.to_out(out)
++        pre_to_out = out
++        out_proj = self.to_out(out)
++        _sglang_probe_dump_payload(
++            probe_path,
++            {
++                "x_input": x,
++                "context_input": context,
++                "mask": mask,
++                "q_proj": raw_q,
++                "k_proj": raw_k,
++                "v_proj": raw_v,
++                "q_post_qk_norm": q_post_qk_norm,
++                "k_post_qk_norm": k_post_qk_norm,
++                "q_post_rope": q_post_rope,
++                "k_post_rope": k_post_rope,
++                "attn_kernel_out": attn_kernel_out,
++                "pre_to_out": pre_to_out,
++                "out_proj": out_proj,
++                "to_q_weight": self.to_q.weight,
++                "to_q_bias": self.to_q.bias,
++                "to_k_weight": self.to_k.weight,
++                "to_k_bias": self.to_k.bias,
++                "to_v_weight": self.to_v.weight,
++                "to_v_bias": self.to_v.bias,
++                "to_out_weight": self.to_out[0].weight,
++                "to_out_bias": self.to_out[0].bias,
++            },
++        )
++        return out_proj
+diff --git a/packages/ltx-core/src/ltx_core/model/transformer/feed_forward.py b/packages/ltx-core/src/ltx_core/model/transformer/feed_forward.py
+index a55b5a7..a3f7b3c 100644
+--- a/packages/ltx-core/src/ltx_core/model/transformer/feed_forward.py
++++ b/packages/ltx-core/src/ltx_core/model/transformer/feed_forward.py
+@@ -1,3 +1,5 @@
++import os
++
+ import torch
+ 
+ from ltx_core.model.transformer.gelu_approx import GELUApprox
+@@ -11,5 +13,23 @@ class FeedForward(torch.nn.Module):
+ 
+         self.net = torch.nn.Sequential(project_in, torch.nn.Identity(), torch.nn.Linear(inner_dim, dim_out))
+ 
+-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+-        return self.net(x)
++    def forward(self, x: torch.Tensor, probe_path: str | None = None) -> torch.Tensor:
++        proj_in = self.net[0].proj(x)
++        act = torch.nn.functional.gelu(proj_in, approximate="tanh")
++        out_proj = self.net[2](act)
++        if probe_path and not os.path.exists(probe_path):
++            os.makedirs(os.path.dirname(probe_path), exist_ok=True)
++            torch.save(
++                {
++                    "ff_input": x.detach().to("cpu"),
++                    "proj_in": proj_in.detach().to("cpu"),
++                    "act": act.detach().to("cpu"),
++                    "out_proj": out_proj.detach().to("cpu"),
++                    "proj_in_weight": self.net[0].proj.weight.detach().to("cpu"),
++                    "proj_in_bias": self.net[0].proj.bias.detach().to("cpu"),
++                    "proj_out_weight": self.net[2].weight.detach().to("cpu"),
++                    "proj_out_bias": self.net[2].bias.detach().to("cpu"),
++                },
++                probe_path,
++            )
++        return out_proj
+diff --git a/packages/ltx-core/src/ltx_core/model/transformer/transformer.py b/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
+index af8b606..9e0123d 100644
+--- a/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
++++ b/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
+@@ -1,3 +1,4 @@
++import os
+ from dataclasses import dataclass, replace
+ 
+ import torch
+@@ -11,6 +12,75 @@ from ltx_core.model.transformer.transformer_args import TransformerArgs
+ from ltx_core.utils import rms_norm
+ 
+ 
++_SGLANG_SUBLAYER_PROBE_CALL_COUNTS: dict[tuple[int, str], int] = {}
++
++
++def _sglang_sublayer_probe_dump(name: str, block_idx: int, vx: torch.Tensor | None, ax: torch.Tensor | None) -> None:
++    """Dump block sub-layer output for sglang parity audit.
++
++    Enabled only when SGLANG_LTX_SUBLAYER_PROBE_DIR is set. Dumps only blocks listed in
++    SGLANG_LTX_SUBLAYER_PROBE_BLOCKS (comma-separated ints; default "0"). Each call gets
++    an index so multi-step / multi-pass runs don't clobber step 0. Filename is
++    `block{idx:02d}_{name}_call{n:03d}.pt`. Silent no-op otherwise.
++    """
++    probe_dir = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_DIR")
++    if not probe_dir:
++        return
++    blocks_env = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_BLOCKS", "0")
++    try:
++        allowed = {int(s) for s in blocks_env.split(",") if s.strip()}
++    except ValueError:
++        return
++    if block_idx not in allowed:
++        return
++    try:
++        max_calls = int(os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_MAX_CALLS", "3"))
++    except ValueError:
++        max_calls = 3
++    call_key = (block_idx, name)
++    call_idx = _SGLANG_SUBLAYER_PROBE_CALL_COUNTS.get(call_key, 0)
++    if call_idx >= max_calls:
++        return
++    _SGLANG_SUBLAYER_PROBE_CALL_COUNTS[call_key] = call_idx + 1
++    os.makedirs(probe_dir, exist_ok=True)
++    payload: dict[str, torch.Tensor] = {}
++    if vx is not None:
++        payload["video"] = vx.detach().to("cpu")
++    if ax is not None:
++        payload["audio"] = ax.detach().to("cpu")
++    path = os.path.join(probe_dir, f"block{block_idx:02d}_{name}_call{call_idx:03d}.pt")
++    torch.save(payload, path)
++
++
++def _sglang_sublayer_probe_path(name: str, block_idx: int) -> str | None:
++    probe_dir = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_DIR")
++    if not probe_dir:
++        return None
++    blocks_env = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_BLOCKS", "0")
++    try:
++        allowed = {int(s) for s in blocks_env.split(",") if s.strip()}
++    except ValueError:
++        return None
++    if block_idx not in allowed:
++        return None
++    os.makedirs(probe_dir, exist_ok=True)
++    return os.path.join(probe_dir, f"block{block_idx:02d}_{name}.pt")
++
++
++def _sglang_probe_dump_payload(name: str, block_idx: int, payload: dict[str, torch.Tensor | None]) -> None:
++    path = _sglang_sublayer_probe_path(name, block_idx)
++    if not path or os.path.exists(path):
++        return
++    torch.save(
++        {
++            key: value.detach().to("cpu")
++            for key, value in payload.items()
++            if isinstance(value, torch.Tensor)
++        },
++        path,
++    )
++
++
+ @dataclass
+ class TransformerConfig:
+     dim: int
+@@ -166,6 +236,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
+         prompt_timestep: torch.Tensor | None,
+         context_mask: torch.Tensor | None,
+         cross_attention_adaln: bool = False,
++        probe_path: str | None = None,
+     ) -> torch.Tensor:
+         """Apply text cross-attention, with optional AdaLN modulation."""
+         if cross_attention_adaln:
+@@ -181,8 +252,14 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 prompt_timestep,
+                 context_mask,
+                 self.norm_eps,
++                probe_path=probe_path,
+             )
+-        return attn(rms_norm(x, eps=self.norm_eps), context=context, mask=context_mask)
++        return attn(
++            rms_norm(x, eps=self.norm_eps),
++            context=context,
++            mask=context_mask,
++            probe_path=probe_path,
++        )
+ 
+     def forward(  # noqa: PLR0915
+         self,
+@@ -233,17 +310,6 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 * vgate_msa
+             )
+             del vgate_msa, norm_vx, v_mask
+-            vx = vx + self._apply_text_cross_attention(
+-                vx,
+-                video.context,
+-                self.attn2,
+-                self.scale_shift_table,
+-                getattr(self, "prompt_scale_shift_table", None),
+-                video.timesteps,
+-                video.prompt_timestep,
+-                video.context_mask,
+-                cross_attention_adaln=self.cross_attention_adaln,
+-            )
+ 
+         if run_ax:
+             ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+@@ -271,6 +337,23 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 * agate_msa
+             )
+             del agate_msa, norm_ax, a_mask
++
++        _sglang_sublayer_probe_dump("post_self_attn", self.idx, vx, ax)
++
++        if run_vx:
++            vx = vx + self._apply_text_cross_attention(
++                vx,
++                video.context,
++                self.attn2,
++                self.scale_shift_table,
++                getattr(self, "prompt_scale_shift_table", None),
++                video.timesteps,
++                video.prompt_timestep,
++                video.context_mask,
++                cross_attention_adaln=self.cross_attention_adaln,
++            )
++
++        if run_ax:
+             ax = ax + self._apply_text_cross_attention(
+                 ax,
+                 audio.context,
+@@ -281,8 +364,11 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 audio.prompt_timestep,
+                 audio.context_mask,
+                 cross_attention_adaln=self.cross_attention_adaln,
++                probe_path=_sglang_sublayer_probe_path("prompt_cross_audio_qkv", self.idx),
+             )
+ 
++        _sglang_sublayer_probe_dump("post_prompt_cross_attn", self.idx, vx, ax)
++
+         # Audio - Video cross attention.
+         if run_a2v or run_v2a:
+             vx_norm3 = rms_norm(vx, eps=self.norm_eps)
+@@ -321,6 +407,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 )
+                 del gate_out_a2v, a2v_mask, vx_scaled, ax_scaled
+ 
++            _sglang_sublayer_probe_dump("post_a2v_cross_attn", self.idx, vx, ax)
++
+             if run_v2a and not perturbations.all_in_batch(PerturbationType.SKIP_V2A_CROSS_ATTN, self.idx):
+                 scale_ca_audio_v2a, shift_ca_audio_v2a, gate_out_v2a = self.get_av_ca_ada_values(
+                     self.scale_shift_table_a2v_ca_audio,
+@@ -340,14 +428,34 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 )
+                 vx_scaled = vx_norm3 * (1 + scale_ca_video_v2a) + shift_ca_video_v2a
+                 del scale_ca_video_v2a, shift_ca_video_v2a
++                _sglang_probe_dump_payload(
++                    "v2a_inputs",
++                    self.idx,
++                    {
++                        "audio_query": ax_scaled,
++                        "video_context": vx_scaled,
++                        "v2a_gate": gate_out_v2a,
++                        "v2a_mask": perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, self.idx, ax),
++                    },
++                )
+                 v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, self.idx, ax)
++                v2a_delta = self.video_to_audio_attn(
++                    ax_scaled,
++                    context=vx_scaled,
++                    pe=audio.cross_positional_embeddings,
++                    k_pe=video.cross_positional_embeddings,
++                    probe_path=_sglang_sublayer_probe_path("v2a_attn_qkv", self.idx),
++                )
++                _sglang_probe_dump_payload(
++                    "v2a_delta",
++                    self.idx,
++                    {
++                        "audio_delta": v2a_delta,
++                        "audio_gated_delta": v2a_delta * gate_out_v2a,
++                    },
++                )
+                 ax = ax + (
+-                    self.video_to_audio_attn(
+-                        ax_scaled,
+-                        context=vx_scaled,
+-                        pe=audio.cross_positional_embeddings,
+-                        k_pe=video.cross_positional_embeddings,
+-                    )
++                    v2a_delta
+                     * gate_out_v2a
+                     * v2a_mask
+                 )
+@@ -355,6 +463,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+ 
+             del vx_norm3, ax_norm3
+ 
++        _sglang_sublayer_probe_dump("post_v2a_cross_attn", self.idx, vx, ax)
++
+         if run_vx:
+             vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
+                 self.scale_shift_table, vx.shape[0], video.timesteps, slice(3, 6)
+@@ -369,10 +479,34 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 self.audio_scale_shift_table, ax.shape[0], audio.timesteps, slice(3, 6)
+             )
+             ax_scaled = rms_norm(ax, eps=self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
+-            ax = ax + self.audio_ff(ax_scaled) * agate_mlp
++            _sglang_probe_dump_payload(
++                "audio_ff_inputs",
++                self.idx,
++                {
++                    "audio_ff_input": ax_scaled,
++                    "audio_shift": ashift_mlp,
++                    "audio_scale": ascale_mlp,
++                    "audio_gate": agate_mlp,
++                },
++            )
++            audio_ff_delta = self.audio_ff(
++                ax_scaled,
++                probe_path=_sglang_sublayer_probe_path("audio_ff_internal", self.idx),
++            )
++            _sglang_probe_dump_payload(
++                "audio_ff_delta",
++                self.idx,
++                {
++                    "audio_delta": audio_ff_delta,
++                    "audio_gated_delta": audio_ff_delta * agate_mlp,
++                },
++            )
++            ax = ax + audio_ff_delta * agate_mlp
+ 
+             del ashift_mlp, ascale_mlp, agate_mlp, ax_scaled
+ 
++        _sglang_sublayer_probe_dump("post_ff", self.idx, vx, ax)
++
+         return replace(video, x=vx) if video is not None else None, replace(audio, x=ax) if audio is not None else None
+ 
+ 
+@@ -387,6 +521,7 @@ def apply_cross_attention_adaln(
+     prompt_timestep: torch.Tensor,
+     context_mask: torch.Tensor | None = None,
+     norm_eps: float = 1e-6,
++    probe_path: str | None = None,
+ ) -> torch.Tensor:
+     batch_size = x.shape[0]
+     shift_kv, scale_kv = (
+@@ -395,4 +530,12 @@ def apply_cross_attention_adaln(
+     ).unbind(dim=2)
+     attn_input = rms_norm(x, eps=norm_eps) * (1 + q_scale) + q_shift
+     encoder_hidden_states = context * (1 + scale_kv) + shift_kv
+-    return attn(attn_input, context=encoder_hidden_states, mask=context_mask) * q_gate
++    return (
++        attn(
++            attn_input,
++            context=encoder_hidden_states,
++            mask=context_mask,
++            probe_path=probe_path,
++        )
++        * q_gate
++    )

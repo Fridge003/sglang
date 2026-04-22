@@ -821,6 +821,9 @@ class LTX2Attention(nn.Module):
 
         if internal_probe_path is not None:
             probe_payload: dict[str, torch.Tensor | None] = {
+                "x_input": x,
+                "context_input": context_,
+                "mask": mask,
                 "q_proj": raw_q,
                 "k_proj": raw_k,
                 "v_proj": raw_v,
@@ -831,6 +834,12 @@ class LTX2Attention(nn.Module):
                 "attn_kernel_out": attn_kernel_out,
                 "pre_to_out": pre_to_out,
                 "out_proj": out_proj_probe,
+                "to_q_weight": self.to_q.weight,
+                "to_q_bias": self.to_q.bias,
+                "to_k_weight": self.to_k.weight,
+                "to_k_bias": self.to_k.bias,
+                "to_v_weight": self.to_v.weight,
+                "to_v_bias": self.to_v.bias,
                 "to_out_weight": self.to_out[0].weight,
                 "to_out_bias": self.to_out[0].bias,
             }
@@ -892,7 +901,9 @@ class LTX2FeedForward(nn.Module):
             inner_dim, dim_out, bias=True, gather_output=True, quant_config=quant_config
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, internal_probe_path: str | None = None
+    ) -> torch.Tensor:
         if envs.SGLANG_DIFFUSION_LTX2_FF_FP32:
             in_dtype = x.dtype
             orig_proj_in_w = self.proj_in.weight
@@ -900,18 +911,35 @@ class LTX2FeedForward(nn.Module):
             orig_proj_out_w = self.proj_out.weight
             orig_proj_out_b = self.proj_out.bias
             x_f = x.float()
-            x_f = torch.nn.functional.linear(
+            proj_in = torch.nn.functional.linear(
                 x_f, orig_proj_in_w.float(), orig_proj_in_b.float() if orig_proj_in_b is not None else None
             )
-            x_f = self.act(x_f)
-            x_f = torch.nn.functional.linear(
-                x_f, orig_proj_out_w.float(), orig_proj_out_b.float() if orig_proj_out_b is not None else None
+            act = self.act(proj_in)
+            proj_out = torch.nn.functional.linear(
+                act, orig_proj_out_w.float(), orig_proj_out_b.float() if orig_proj_out_b is not None else None
             )
-            return x_f.to(in_dtype)
-        x, _ = self.proj_in(x)
-        x = self.act(x)
-        x, _ = self.proj_out(x)
-        return x
+            output = proj_out.to(in_dtype)
+        else:
+            proj_in, _ = self.proj_in(x)
+            act = self.act(proj_in)
+            output, _ = self.proj_out(act)
+
+        if internal_probe_path is not None:
+            _maybe_dump_internal_probe(
+                internal_probe_path,
+                {
+                    "ff_input": x,
+                    "proj_in": proj_in,
+                    "act": act,
+                    "out_proj": output,
+                    "proj_in_weight": self.proj_in.weight,
+                    "proj_in_bias": self.proj_in.bias,
+                    "proj_out_weight": self.proj_out.weight,
+                    "proj_out_bias": self.proj_out.bias,
+                },
+            )
+
+        return output
 
 
 class LTX2TransformerBlock(nn.Module):
@@ -1239,6 +1267,11 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=mod_audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                internal_probe_path=_derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_audio_qkv",
+                ),
             )
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
@@ -1292,6 +1325,11 @@ class LTX2TransformerBlock(nn.Module):
                 norm_audio_hidden_states,
                 context=audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
+                internal_probe_path=_derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_audio_qkv",
+                ),
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
             _maybe_dump_internal_probe(
@@ -1411,6 +1449,19 @@ class LTX2TransformerBlock(nn.Module):
         mod_norm_audio_hidden_states = (
             norm_audio_hidden_states * (1 + audio_v2a_ca_scale) + audio_v2a_ca_shift
         )
+        _maybe_dump_internal_probe(
+            _derive_transformer_block_probe_file(
+                internal_probe_root_path,
+                internal_probe_basename,
+                "v2a_inputs",
+            ),
+            {
+                "audio_query": mod_norm_audio_hidden_states,
+                "video_context": mod_norm_hidden_states,
+                "v2a_gate": v2a_gate,
+                "v2a_mask": v2a_cross_attention_mask,
+            },
+        )
 
         if not skip_v2a_cross_attn:
             v2a_attn_hidden_states = self.video_to_audio_attn(
@@ -1420,11 +1471,27 @@ class LTX2TransformerBlock(nn.Module):
                 k_pe=ca_video_rotary_emb,
                 mask=v2a_cross_attention_mask,
                 gather_context_kv_for_sp=audio_replicated_for_sp,
+                internal_probe_path=_derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "v2a_attn_qkv",
+                ),
             )
             if v2a_cross_attn_perturbation_mask is not None:
                 v2a_attn_hidden_states = (
                     v2a_attn_hidden_states * v2a_cross_attn_perturbation_mask
                 )
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "v2a_delta",
+                ),
+                {
+                    "audio_delta": v2a_attn_hidden_states,
+                    "audio_gated_delta": v2a_gate * v2a_attn_hidden_states,
+                },
+            )
             audio_hidden_states = (
                 audio_hidden_states + v2a_gate * v2a_attn_hidden_states
             )
@@ -1451,7 +1518,38 @@ class LTX2TransformerBlock(nn.Module):
         norm_audio_hidden_states = (
             rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_mlp) + ashift_mlp
         )
-        audio_ff_output = self.audio_ff(norm_audio_hidden_states)
+        _maybe_dump_internal_probe(
+            _derive_transformer_block_probe_file(
+                internal_probe_root_path,
+                internal_probe_basename,
+                "audio_ff_inputs",
+            ),
+            {
+                "audio_ff_input": norm_audio_hidden_states,
+                "audio_shift": ashift_mlp,
+                "audio_scale": ascale_mlp,
+                "audio_gate": agate_mlp,
+            },
+        )
+        audio_ff_output = self.audio_ff(
+            norm_audio_hidden_states,
+            internal_probe_path=_derive_transformer_block_probe_file(
+                internal_probe_root_path,
+                internal_probe_basename,
+                "audio_ff_internal",
+            ),
+        )
+        _maybe_dump_internal_probe(
+            _derive_transformer_block_probe_file(
+                internal_probe_root_path,
+                internal_probe_basename,
+                "audio_ff_delta",
+            ),
+            {
+                "audio_delta": audio_ff_output,
+                "audio_gated_delta": audio_ff_output * agate_mlp,
+            },
+        )
         audio_hidden_states = audio_hidden_states + audio_ff_output * agate_mlp
         _maybe_dump_transformer_block_substep_probe(
             internal_probe_root_path,
