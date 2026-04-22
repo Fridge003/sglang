@@ -1,0 +1,120 @@
+diff --git a/packages/ltx-core/src/ltx_core/model/transformer/transformer.py b/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
+index af8b606..0ae8540 100644
+--- a/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
++++ b/packages/ltx-core/src/ltx_core/model/transformer/transformer.py
+@@ -1,3 +1,4 @@
++import os
+ from dataclasses import dataclass, replace
+ 
+ import torch
+@@ -11,6 +12,32 @@ from ltx_core.model.transformer.transformer_args import TransformerArgs
+ from ltx_core.utils import rms_norm
+ 
+ 
++def _sglang_sublayer_probe_dump(name: str, block_idx: int, vx: torch.Tensor | None, ax: torch.Tensor | None) -> None:
++    """Dump block sub-layer output for sglang parity audit.
++
++    Enabled only when SGLANG_LTX_SUBLAYER_PROBE_DIR is set. Dumps only blocks listed in
++    SGLANG_LTX_SUBLAYER_PROBE_BLOCKS (comma-separated ints; default "0"). Silent no-op otherwise.
++    """
++    probe_dir = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_DIR")
++    if not probe_dir:
++        return
++    blocks_env = os.environ.get("SGLANG_LTX_SUBLAYER_PROBE_BLOCKS", "0")
++    try:
++        allowed = {int(s) for s in blocks_env.split(",") if s.strip()}
++    except ValueError:
++        return
++    if block_idx not in allowed:
++        return
++    os.makedirs(probe_dir, exist_ok=True)
++    payload: dict[str, torch.Tensor] = {}
++    if vx is not None:
++        payload["video"] = vx.detach().to("cpu")
++    if ax is not None:
++        payload["audio"] = ax.detach().to("cpu")
++    path = os.path.join(probe_dir, f"block{block_idx:02d}_{name}.pt")
++    torch.save(payload, path)
++
++
+ @dataclass
+ class TransformerConfig:
+     dim: int
+@@ -233,17 +260,6 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 * vgate_msa
+             )
+             del vgate_msa, norm_vx, v_mask
+-            vx = vx + self._apply_text_cross_attention(
+-                vx,
+-                video.context,
+-                self.attn2,
+-                self.scale_shift_table,
+-                getattr(self, "prompt_scale_shift_table", None),
+-                video.timesteps,
+-                video.prompt_timestep,
+-                video.context_mask,
+-                cross_attention_adaln=self.cross_attention_adaln,
+-            )
+ 
+         if run_ax:
+             ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+@@ -271,6 +287,23 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 * agate_msa
+             )
+             del agate_msa, norm_ax, a_mask
++
++        _sglang_sublayer_probe_dump("post_self_attn", self.idx, vx, ax)
++
++        if run_vx:
++            vx = vx + self._apply_text_cross_attention(
++                vx,
++                video.context,
++                self.attn2,
++                self.scale_shift_table,
++                getattr(self, "prompt_scale_shift_table", None),
++                video.timesteps,
++                video.prompt_timestep,
++                video.context_mask,
++                cross_attention_adaln=self.cross_attention_adaln,
++            )
++
++        if run_ax:
+             ax = ax + self._apply_text_cross_attention(
+                 ax,
+                 audio.context,
+@@ -283,6 +316,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 cross_attention_adaln=self.cross_attention_adaln,
+             )
+ 
++        _sglang_sublayer_probe_dump("post_prompt_cross_attn", self.idx, vx, ax)
++
+         # Audio - Video cross attention.
+         if run_a2v or run_v2a:
+             vx_norm3 = rms_norm(vx, eps=self.norm_eps)
+@@ -321,6 +356,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+                 )
+                 del gate_out_a2v, a2v_mask, vx_scaled, ax_scaled
+ 
++            _sglang_sublayer_probe_dump("post_a2v_cross_attn", self.idx, vx, ax)
++
+             if run_v2a and not perturbations.all_in_batch(PerturbationType.SKIP_V2A_CROSS_ATTN, self.idx):
+                 scale_ca_audio_v2a, shift_ca_audio_v2a, gate_out_v2a = self.get_av_ca_ada_values(
+                     self.scale_shift_table_a2v_ca_audio,
+@@ -355,6 +392,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+ 
+             del vx_norm3, ax_norm3
+ 
++        _sglang_sublayer_probe_dump("post_v2a_cross_attn", self.idx, vx, ax)
++
+         if run_vx:
+             vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
+                 self.scale_shift_table, vx.shape[0], video.timesteps, slice(3, 6)
+@@ -373,6 +412,8 @@ class BasicAVTransformerBlock(torch.nn.Module):
+ 
+             del ashift_mlp, ascale_mlp, agate_mlp, ax_scaled
+ 
++        _sglang_sublayer_probe_dump("post_ff", self.idx, vx, ax)
++
+         return replace(video, x=vx) if video is not None else None, replace(audio, x=ax) if audio is not None else None
+ 
+ 
