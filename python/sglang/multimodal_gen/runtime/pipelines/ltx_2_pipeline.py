@@ -695,6 +695,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
     STAGE_1_DISTILLED_LORA_STRENGTH = 0.0
     STAGE_2_DISTILLED_LORA_STRENGTH = 1.0
     STAGE_1_DENOISING_SAMPLER_NAME = "euler"
+    STAGE_2_DENOISING_SAMPLER_NAME = "euler"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -901,6 +902,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                     vae=self.get_module("vae"),
                     audio_vae=self.get_module("audio_vae"),
                     pipeline=self,
+                    sampler_name=self.STAGE_2_DENOISING_SAMPLER_NAME,
                 ),
             ]
         )
@@ -914,6 +916,7 @@ class LTX2TwoStageHQPipeline(LTX2TwoStagePipeline):
     STAGE_1_DISTILLED_LORA_STRENGTH = 0.25
     STAGE_2_DISTILLED_LORA_STRENGTH = 0.5
     STAGE_1_DENOISING_SAMPLER_NAME = "res2s"
+    STAGE_2_DENOISING_SAMPLER_NAME = "res2s"
 
 
 EntryClass = [LTX2Pipeline, LTX2TwoStagePipeline, LTX2TwoStageHQPipeline]

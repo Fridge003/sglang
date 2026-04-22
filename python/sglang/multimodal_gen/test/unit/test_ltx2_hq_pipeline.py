@@ -8,6 +8,8 @@ from sglang.multimodal_gen.configs.sample.ltx_2 import (
 )
 from sglang.multimodal_gen.registry import get_pipeline_config_classes
 from sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline import (
+    LTX2TwoStageHQPipeline,
+    LTX2TwoStagePipeline,
     _add_ltx2_stage1_generation_stages,
     build_official_ltx2_sigmas,
 )
@@ -188,3 +190,81 @@ def test_add_ltx2_stage1_generation_stages_threads_res2s_sampler():
     assert pipeline.prepare_extra_kwargs is not None
     assert len(denoising_ctor_calls) == 1
     assert denoising_ctor_calls[0]["sampler_name"] == "res2s"
+
+
+class _FakeTwoStagePipeline:
+    def __init__(self, stage1_sampler_name: str, stage2_sampler_name: str):
+        self.STAGE_1_DENOISING_SAMPLER_NAME = stage1_sampler_name
+        self.STAGE_2_DENOISING_SAMPLER_NAME = stage2_sampler_name
+        self.single_stages = []
+        self.bulk_stages = []
+
+    def add_stage(self, stage):
+        self.single_stages.append(stage)
+
+    def add_stages(self, stages):
+        self.bulk_stages.extend(stages)
+
+    def get_module(self, name):
+        return f"module:{name}"
+
+
+def test_ltx2_two_stage_pipeline_threads_stage2_sampler_by_variant():
+    refinement_ctor_calls = []
+
+    def _record_ctor(name):
+        def _ctor(*args, **kwargs):
+            if name == "refinement":
+                refinement_ctor_calls.append(kwargs)
+            return SimpleNamespace(name=name, kwargs=kwargs)
+
+        return _ctor
+
+    with (
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline._add_ltx2_front_stages"
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline._add_ltx2_stage1_generation_stages"
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline._add_ltx2_decoding_stage"
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline.LTX2HalveResolutionStage",
+            side_effect=_record_ctor("halve"),
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline.LTX2LoRASwitchStage",
+            side_effect=_record_ctor("lora_switch"),
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline.LTX2UpsampleStage",
+            side_effect=_record_ctor("upsample"),
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline.LTX2ImageEncodingStage",
+            side_effect=_record_ctor("image_encode"),
+        ),
+        patch(
+            "sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline.LTX2RefinementStage",
+            side_effect=_record_ctor("refinement"),
+        ),
+    ):
+        LTX2TwoStagePipeline.create_pipeline_stages(
+            _FakeTwoStagePipeline(
+                stage1_sampler_name=LTX2TwoStagePipeline.STAGE_1_DENOISING_SAMPLER_NAME,
+                stage2_sampler_name=LTX2TwoStagePipeline.STAGE_2_DENOISING_SAMPLER_NAME,
+            ),
+            server_args=None,
+        )
+        LTX2TwoStageHQPipeline.create_pipeline_stages(
+            _FakeTwoStagePipeline(
+                stage1_sampler_name=LTX2TwoStageHQPipeline.STAGE_1_DENOISING_SAMPLER_NAME,
+                stage2_sampler_name=LTX2TwoStageHQPipeline.STAGE_2_DENOISING_SAMPLER_NAME,
+            ),
+            server_args=None,
+        )
+
+    assert refinement_ctor_calls[0]["sampler_name"] == "euler"
+    assert refinement_ctor_calls[1]["sampler_name"] == "res2s"

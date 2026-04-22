@@ -14,6 +14,8 @@ try:
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
     from ltx_core.model.transformer.transformer import BasicAVTransformerBlock
     from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
+    from ltx_core.text_encoders.gemma.config import GEMMA3_CONFIG_FOR_LTX
+    from ltx_core.text_encoders.gemma.encoders import encoder_configurator as gemma_encoder_configurator
     from ltx_pipelines.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
     from ltx_pipelines.utils.constants import DEFAULT_NEGATIVE_PROMPT
     from ltx_pipelines.utils.media_io import encode_video
@@ -107,7 +109,21 @@ _STAGE2_BLOCK_PROBE_STATE: dict[str, object] = {
 }
 
 
+def _restore_missing_gemma_config_attrs(model: torch.nn.Module) -> None:
+    text_config = getattr(getattr(model, "config", None), "text_config", None)
+    if text_config is None:
+        return
+
+    defaults = GEMMA3_CONFIG_FOR_LTX.text_config
+    if not hasattr(text_config, "rope_local_base_freq"):
+        text_config.rope_local_base_freq = defaults.rope_local_base_freq
+    rope_scaling = getattr(text_config, "rope_scaling", None)
+    if not isinstance(rope_scaling, dict) or "rope_type" not in rope_scaling:
+        text_config.rope_scaling = dataclasses.asdict(defaults.rope_scaling)
+
+
 def _materialize_known_meta_buffers(model: torch.nn.Module, device: torch.device) -> None:
+    _restore_missing_gemma_config_attrs(model)
     module_map = dict(model.named_modules())
 
     for full_name, buffer in model.named_buffers():
@@ -146,6 +162,18 @@ def _patch_official_builder_for_gemma_buffers() -> None:
         _materialize_known_meta_buffers(meta_model, device)
         return original_return_model(self, meta_model, device)
 
+    original_create_and_populate = gemma_encoder_configurator.create_and_populate
+
+    def _patched_create_and_populate(module):
+        _restore_missing_gemma_config_attrs(module.model)
+        return original_create_and_populate(module)
+
+    gemma_encoder_configurator.create_and_populate = _patched_create_and_populate
+    gemma_encoder_configurator.GEMMA_MODEL_OPS = (
+        gemma_encoder_configurator.GEMMA_MODEL_OPS._replace(
+            mutator=_patched_create_and_populate
+        )
+    )
     SingleGPUModelBuilder._return_model = _patched_return_model
     SingleGPUModelBuilder._pr23366_meta_patch_applied = True
 
