@@ -79,3 +79,72 @@ class HealthStatus(BaseModel):
     metrics: int
     last_ingest_at: str | None
     github_enrichment: bool
+
+
+class RegressionSummary(BaseModel):
+    """One flagged anomaly, denormalized with the run context."""
+
+    id: int
+    run_id: int
+    metric_name: str
+    severity: str
+    delta_percent: float | None
+    z_score: float | None
+    baseline_window_days: int | None
+    detected_at: str
+    resolved_at: str | None
+    # Denormalized from runs
+    config_name: str
+    concurrency: int
+    commit_short_sha: str | None
+    commit_author: str | None
+    started_at: str
+    github_run_url: str
+
+
+class RegressionDetail(RegressionSummary):
+    """Single regression + context for diagnosis."""
+
+    commit_message: str | None
+    pr_number: int | None
+    pr_title: str | None
+    metric_current_value: float
+    metric_baseline_median: float | None
+    # Context: the last-passing run of same (config, concurrency, metric)
+    # — useful for showing "what commit was last good".
+    last_passing_run_id: int | None
+    last_passing_commit_sha: str | None
+    last_passing_commit_short_sha: str | None
+    last_passing_commit_author: str | None
+    last_passing_started_at: str | None
+
+
+class RunMetricDelta(BaseModel):
+    """One metric shown in a side-by-side run comparison."""
+
+    name: str
+    unit: str | None
+    a_value: float | None
+    b_value: float | None
+    delta_percent: float | None
+    is_regression: bool | None  # True when b is worse than a
+
+
+class CompareResult(BaseModel):
+    """Compare two runs. Metrics present in both sides get a delta."""
+
+    a: RunSummary
+    b: RunSummary
+    metric_deltas: list[RunMetricDelta]
+
+
+class CommitRunsResult(BaseModel):
+    """Lookup runs by commit SHA."""
+
+    sha: str
+    short_sha: str
+    commit_message: str | None
+    commit_author: str | None
+    pr_number: int | None
+    pr_title: str | None
+    runs: list[RunSummary]

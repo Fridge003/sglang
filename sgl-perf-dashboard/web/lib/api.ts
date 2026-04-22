@@ -77,6 +77,62 @@ export interface HealthStatus {
   github_enrichment: boolean;
 }
 
+export interface RegressionSummary {
+  id: number;
+  run_id: number;
+  metric_name: string;
+  severity: "critical" | "major" | "minor";
+  delta_percent: number | null;
+  z_score: number | null;
+  baseline_window_days: number | null;
+  detected_at: string;
+  resolved_at: string | null;
+  config_name: string;
+  concurrency: number;
+  commit_short_sha: string | null;
+  commit_author: string | null;
+  started_at: string;
+  github_run_url: string;
+}
+
+export interface RegressionDetail extends RegressionSummary {
+  commit_message: string | null;
+  pr_number: number | null;
+  pr_title: string | null;
+  metric_current_value: number;
+  metric_baseline_median: number | null;
+  last_passing_run_id: number | null;
+  last_passing_commit_sha: string | null;
+  last_passing_commit_short_sha: string | null;
+  last_passing_commit_author: string | null;
+  last_passing_started_at: string | null;
+}
+
+export interface RunMetricDelta {
+  name: string;
+  unit: string | null;
+  a_value: number | null;
+  b_value: number | null;
+  delta_percent: number | null;
+  is_regression: boolean | null;
+}
+
+export interface CompareResult {
+  a: RunSummary;
+  b: RunSummary;
+  metric_deltas: RunMetricDelta[];
+}
+
+export interface CommitRunsResult {
+  sha: string;
+  short_sha: string;
+  commit_message: string | null;
+  commit_author: string | null;
+  pr_number: number | null;
+  pr_title: string | null;
+  runs: RunSummary[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const url = `${BASE}${path}`;
   const resp = await fetch(url, {
@@ -95,6 +151,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthStatus>("/health"),
+  listRegressions: (status: "active" | "resolved" | "all" = "active") =>
+    request<RegressionSummary[]>(`/regressions?status=${status}`),
+  getRegression: (id: number) => request<RegressionDetail>(`/regressions/${id}`),
+  compare: (a: number, b: number) =>
+    request<CompareResult>(`/compare?a=${a}&b=${b}`),
+  getCommit: (sha: string) => request<CommitRunsResult>(`/commits/${sha}`),
   listRuns: (params?: {
     limit?: number;
     offset?: number;

@@ -31,6 +31,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               <Link href="/" className="transition hover:text-foreground">Home</Link>
               <Link href="/runs" className="transition hover:text-foreground">Runs</Link>
               <Link href="/configs" className="transition hover:text-foreground">Configs</Link>
+              <Link href="/regressions" className="transition hover:text-foreground">Regressions</Link>
             </nav>
           </div>
         </header>

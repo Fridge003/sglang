@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { api, type ConfigSummary, type RunSummary } from "@/lib/api";
+import { api, type ConfigSummary, type RegressionSummary, type RunSummary } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,24 +8,26 @@ export const dynamic = "force-dynamic";
 
 async function loadHomeData() {
   try {
-    const [recentRuns, configs, health] = await Promise.all([
+    const [recentRuns, configs, health, regressions] = await Promise.all([
       api.listRuns({ limit: 20 }),
       api.listConfigs(),
       api.health(),
+      api.listRegressions("active"),
     ]);
-    return { recentRuns, configs, health, error: null };
+    return { recentRuns, configs, health, regressions, error: null };
   } catch (err) {
     return {
       recentRuns: [],
       configs: [],
       health: null,
+      regressions: [] as RegressionSummary[],
       error: err instanceof Error ? err.message : String(err),
     };
   }
 }
 
 export default async function HomePage() {
-  const { recentRuns, configs, health, error } = await loadHomeData();
+  const { recentRuns, configs, health, regressions, error } = await loadHomeData();
 
   return (
     <div className="space-y-10 animate-fade-in-up">
@@ -63,6 +65,21 @@ export default async function HomePage() {
       </section>
 
       {error && <ErrorBanner message={error} />}
+
+      {/* Needs attention */}
+      {regressions.length > 0 && (
+        <section className="space-y-3">
+          <SectionHeader
+            title="Needs attention"
+            hint={`${regressions.length} active regression${regressions.length === 1 ? "" : "s"}`}
+          />
+          <div className="space-y-2">
+            {regressions.map((r) => (
+              <RegressionRow key={r.id} reg={r} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Configs */}
       <section className="space-y-3">
@@ -222,6 +239,67 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function RegressionRow({ reg }: { reg: RegressionSummary }) {
+  const severityVariant =
+    reg.severity === "critical"
+      ? "destructive"
+      : reg.severity === "major"
+        ? "destructive"
+        : "warning";
+  const delta = reg.delta_percent;
+  return (
+    <Link href={`/regressions/${reg.id}`} className="block">
+      <Card className="transition-colors hover:border-destructive/60">
+        <CardContent className="flex flex-wrap items-center gap-3 p-4">
+          <Badge variant={severityVariant} className="uppercase tracking-wider">
+            {reg.severity}
+          </Badge>
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-mono text-[13px]">
+              <span className="text-foreground/80">{reg.config_name}</span>
+              <span className="mx-1.5 text-muted-foreground">·</span>
+              <span className="text-foreground">{reg.metric_name}</span>
+              <span className="mx-1.5 text-muted-foreground">·</span>
+              <span className="text-muted-foreground">conc {reg.concurrency.toLocaleString()}</span>
+            </p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {delta !== null && (
+                <span className="font-mono tabular-numbers text-destructive">
+                  {delta > 0 ? "+" : ""}
+                  {delta.toFixed(1)}%
+                </span>
+              )}
+              {reg.z_score !== null && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="font-mono tabular-numbers">z={reg.z_score.toFixed(1)}</span>
+                </>
+              )}
+              <span className="mx-1 text-muted-foreground/60">·</span>
+              detected {formatRelative(reg.detected_at)}
+              {reg.commit_short_sha && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="font-mono">{reg.commit_short_sha}</span>
+                </>
+              )}
+              {reg.commit_author && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  {reg.commit_author}
+                </>
+              )}
+            </p>
+          </div>
+          <span className="text-[12px] text-muted-foreground transition group-hover:text-foreground">
+            investigate →
+          </span>
+        </CardContent>
+      </Card>
+    </Link>
   );
 }
 

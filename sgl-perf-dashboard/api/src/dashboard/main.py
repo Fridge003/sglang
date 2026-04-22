@@ -14,10 +14,15 @@ from dashboard import ingester
 from dashboard.config import settings
 from dashboard.db import connect, init_db
 from dashboard.models import (
+    CommitRunsResult,
+    CompareResult,
     ConfigSummary,
     HealthStatus,
     Metric,
+    RegressionDetail,
+    RegressionSummary,
     RunDetail,
+    RunMetricDelta,
     RunSummary,
     TrendPoint,
 )
@@ -216,6 +221,32 @@ def get_run(run_id: int) -> RunDetail:
     return _row_to_detail(row, metrics)
 
 
+@app.get("/api/runs/{run_id}/previous")
+def get_previous_run(run_id: int) -> dict[str, int | None]:
+    """Find the previous run at the same (config_name, concurrency) —
+    used by the UI to build a 'compare to previous' link.
+    """
+    with connect(settings.db_path) as conn:
+        current = conn.execute(
+            "SELECT config_name, concurrency, started_at FROM runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        prev = conn.execute(
+            """
+            SELECT id FROM runs
+            WHERE config_name = ?
+              AND concurrency = ?
+              AND started_at < ?
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (current["config_name"], current["concurrency"], current["started_at"]),
+        ).fetchone()
+    return {"previous_run_id": prev["id"] if prev else None}
+
+
 @app.get("/api/configs", response_model=list[ConfigSummary])
 def list_configs() -> list[ConfigSummary]:
     with connect(settings.db_path) as conn:
@@ -287,6 +318,223 @@ def config_trend(
         )
         for r in rows
     ]
+
+
+@app.get("/api/regressions", response_model=list[RegressionSummary])
+def list_regressions(
+    status: str = Query(default="active", regex="^(active|resolved|all)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[RegressionSummary]:
+    clauses: list[str] = []
+    if status == "active":
+        clauses.append("reg.resolved_at IS NULL")
+    elif status == "resolved":
+        clauses.append("reg.resolved_at IS NOT NULL")
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = f"""
+        SELECT reg.id, reg.run_id, reg.metric_name, reg.severity,
+               reg.delta_percent, reg.z_score, reg.baseline_window_days,
+               reg.detected_at, reg.resolved_at,
+               r.config_name, r.concurrency, r.commit_short_sha,
+               r.commit_author, r.started_at, r.github_run_url
+        FROM regressions reg
+        JOIN runs r ON r.id = reg.run_id
+        {where}
+        ORDER BY
+          CASE reg.severity WHEN 'critical' THEN 0 WHEN 'major' THEN 1 ELSE 2 END,
+          reg.detected_at DESC
+        LIMIT ?
+    """
+    with connect(settings.db_path) as conn:
+        rows = conn.execute(sql, [limit]).fetchall()
+    return [
+        RegressionSummary(
+            id=r["id"],
+            run_id=r["run_id"],
+            metric_name=r["metric_name"],
+            severity=r["severity"],
+            delta_percent=r["delta_percent"],
+            z_score=r["z_score"],
+            baseline_window_days=r["baseline_window_days"],
+            detected_at=r["detected_at"],
+            resolved_at=r["resolved_at"],
+            config_name=r["config_name"],
+            concurrency=r["concurrency"],
+            commit_short_sha=r["commit_short_sha"],
+            commit_author=r["commit_author"],
+            started_at=r["started_at"],
+            github_run_url=r["github_run_url"],
+        )
+        for r in rows
+    ]
+
+
+@app.get("/api/regressions/{reg_id}", response_model=RegressionDetail)
+def get_regression(reg_id: int) -> RegressionDetail:
+    with connect(settings.db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT reg.id, reg.run_id, reg.metric_name, reg.severity,
+                   reg.delta_percent, reg.z_score, reg.baseline_window_days,
+                   reg.detected_at, reg.resolved_at,
+                   r.config_name, r.concurrency, r.commit_sha, r.commit_short_sha,
+                   r.commit_message, r.commit_author, r.started_at, r.github_run_url,
+                   r.pr_number, r.pr_title
+            FROM regressions reg
+            JOIN runs r ON r.id = reg.run_id
+            WHERE reg.id = ?
+            """,
+            (reg_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="regression not found")
+
+        metric_row = conn.execute(
+            "SELECT value FROM metrics WHERE run_id = ? AND name = ?",
+            (row["run_id"], row["metric_name"]),
+        ).fetchone()
+
+        baseline_median = None
+        if metric_row and row["delta_percent"] is not None and metric_row["value"] != 0:
+            # value = median * (1 + delta_percent/100) → median = value / (1 + dp/100)
+            factor = 1 + (row["delta_percent"] / 100)
+            if factor != 0:
+                baseline_median = metric_row["value"] / factor
+
+        # Last passing run at same (config, concurrency) before this regression
+        last_good = conn.execute(
+            """
+            SELECT r.id, r.commit_sha, r.commit_short_sha, r.commit_author,
+                   r.started_at
+            FROM runs r
+            LEFT JOIN regressions reg
+              ON reg.run_id = r.id AND reg.metric_name = ?
+            WHERE r.config_name = ?
+              AND r.concurrency = ?
+              AND r.started_at < ?
+              AND r.status = 'passed'
+              AND reg.id IS NULL
+            ORDER BY r.started_at DESC
+            LIMIT 1
+            """,
+            (
+                row["metric_name"],
+                row["config_name"],
+                row["concurrency"],
+                row["started_at"],
+            ),
+        ).fetchone()
+
+    return RegressionDetail(
+        id=row["id"],
+        run_id=row["run_id"],
+        metric_name=row["metric_name"],
+        severity=row["severity"],
+        delta_percent=row["delta_percent"],
+        z_score=row["z_score"],
+        baseline_window_days=row["baseline_window_days"],
+        detected_at=row["detected_at"],
+        resolved_at=row["resolved_at"],
+        config_name=row["config_name"],
+        concurrency=row["concurrency"],
+        commit_short_sha=row["commit_short_sha"],
+        commit_author=row["commit_author"],
+        commit_message=row["commit_message"],
+        pr_number=row["pr_number"],
+        pr_title=row["pr_title"],
+        started_at=row["started_at"],
+        github_run_url=row["github_run_url"],
+        metric_current_value=metric_row["value"] if metric_row else 0.0,
+        metric_baseline_median=baseline_median,
+        last_passing_run_id=last_good["id"] if last_good else None,
+        last_passing_commit_sha=last_good["commit_sha"] if last_good else None,
+        last_passing_commit_short_sha=(
+            last_good["commit_short_sha"] if last_good else None
+        ),
+        last_passing_commit_author=last_good["commit_author"] if last_good else None,
+        last_passing_started_at=last_good["started_at"] if last_good else None,
+    )
+
+
+@app.get("/api/compare", response_model=CompareResult)
+def compare_runs(a: int = Query(..., ge=1), b: int = Query(..., ge=1)) -> CompareResult:
+    """Side-by-side diff of two runs. Metrics absent on one side get null values."""
+    with connect(settings.db_path) as conn:
+        row_a = conn.execute("SELECT * FROM runs WHERE id = ?", (a,)).fetchone()
+        row_b = conn.execute("SELECT * FROM runs WHERE id = ?", (b,)).fetchone()
+        if row_a is None or row_b is None:
+            raise HTTPException(status_code=404, detail="run(s) not found")
+        metrics_a = {
+            m["name"]: {"value": m["value"], "unit": m["unit"]}
+            for m in conn.execute(
+                "SELECT name, value, unit FROM metrics WHERE run_id = ?", (a,)
+            ).fetchall()
+        }
+        metrics_b = {
+            m["name"]: {"value": m["value"], "unit": m["unit"]}
+            for m in conn.execute(
+                "SELECT name, value, unit FROM metrics WHERE run_id = ?", (b,)
+            ).fetchall()
+        }
+
+    all_names = sorted(set(metrics_a.keys()) | set(metrics_b.keys()))
+    deltas: list[RunMetricDelta] = []
+    for name in all_names:
+        va = metrics_a.get(name)
+        vb = metrics_b.get(name)
+        a_val = va["value"] if va else None
+        b_val = vb["value"] if vb else None
+        unit = (va or vb or {}).get("unit")
+        delta_pct: float | None = None
+        is_regr: bool | None = None
+        if a_val is not None and b_val is not None and a_val != 0:
+            delta_pct = (b_val - a_val) / a_val * 100
+            from dashboard.anomaly import _is_regression
+
+            is_regr = _is_regression(name, delta_pct)
+        deltas.append(
+            RunMetricDelta(
+                name=name,
+                unit=unit,
+                a_value=a_val,
+                b_value=b_val,
+                delta_percent=delta_pct,
+                is_regression=is_regr,
+            )
+        )
+
+    return CompareResult(
+        a=_row_to_summary(row_a),
+        b=_row_to_summary(row_b),
+        metric_deltas=deltas,
+    )
+
+
+@app.get("/api/commits/{sha}", response_model=CommitRunsResult)
+def get_commit_runs(sha: str) -> CommitRunsResult:
+    """All runs testing this commit (match by full SHA OR short SHA prefix)."""
+    with connect(settings.db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM runs
+            WHERE commit_sha = ? OR commit_short_sha = ? OR commit_sha LIKE ?
+            ORDER BY started_at DESC
+            """,
+            (sha, sha[:7], f"{sha}%"),
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=404, detail="no runs found for commit")
+
+    first = rows[0]
+    return CommitRunsResult(
+        sha=first["commit_sha"] or sha,
+        short_sha=first["commit_short_sha"] or sha[:7],
+        commit_message=first["commit_message"],
+        commit_author=first["commit_author"],
+        pr_number=first["pr_number"],
+        pr_title=first["pr_title"],
+        runs=[_row_to_summary(r) for r in rows],
+    )
 
 
 @app.post("/api/admin/ingest")

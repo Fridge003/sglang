@@ -21,6 +21,7 @@ from typing import Any
 
 import boto3
 from botocore.client import Config as BotoConfig
+from dashboard import anomaly
 from dashboard.config import settings
 from dashboard.db import connect
 from dashboard.github_client import CommitInfo, GitHubClient, PRInfo
@@ -258,9 +259,13 @@ def run_once() -> dict[str, Any]:
         "inserted": 0,
         "enriched": 0,
         "metrics_written": 0,
+        "regressions_flagged": 0,
+        "regressions_resolved": 0,
         "skipped": 0,
         "errors": 0,
     }
+
+    newly_inserted_run_ids: list[int] = []
 
     with connect(settings.db_path) as conn:
         cursor = _get_cursor(conn)
@@ -314,7 +319,22 @@ def run_once() -> dict[str, Any]:
                 stats["metrics_written"] += len(metrics)
 
             stats["inserted"] += 1
+            newly_inserted_run_ids.append(run_id)
             latest_cursor = key
+
+        # Run anomaly detection for each new run. Do this after everything
+        # is inserted so history queries include the freshest data.
+        for new_id in newly_inserted_run_ids:
+            try:
+                flags = anomaly.detect_for_run(conn, new_id)
+                stats["regressions_flagged"] += len(flags)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("anomaly detection failed for run %d: %s", new_id, exc)
+
+        try:
+            stats["regressions_resolved"] = anomaly.resolve_stale_regressions(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("regression resolution failed: %s", exc)
 
         if latest_cursor != cursor and latest_cursor is not None:
             _set_cursor(conn, latest_cursor)
