@@ -749,6 +749,18 @@ class LTX2DenoisingStage(DenoisingStage):
             return False
         return int(server_args.tp_size or 1) == 1
 
+    @staticmethod
+    def _should_use_split_two_stage_guided_passes(
+        batch: Req,
+        server_args: ServerArgs,
+    ) -> bool:
+        return (
+            is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
+            and int(server_args.num_gpus) == 1
+            and int(server_args.tp_size or 1) == 1
+            and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
+        )
+
     @classmethod
     def _ltx2_calculate_guided_x0(
         cls,
@@ -1636,14 +1648,9 @@ class LTX2DenoisingStage(DenoisingStage):
                     and not need_perturbed
                     and not need_modality
                 )
-                use_split_two_stage_guided_passes = (
-                    is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
-                    and int(server_args.num_gpus) == 1
-                    and int(server_args.tp_size or 1) == 1
-                    and (
-                        server_args.pipeline_class_name == "LTX2TwoStageHQPipeline"
-                        or int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
-                    )
+                use_split_two_stage_guided_passes = self._should_use_split_two_stage_guided_passes(
+                    batch=batch,
+                    server_args=server_args,
                 )
 
                 if use_cfg_pair_batch:

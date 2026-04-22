@@ -86,6 +86,25 @@ def test_ltx2_hq_stage1_guider_defaults_merge_request_overrides():
     assert merged["audio_cfg_scale"] == 7.0
 
 
+def test_ltx2_hq_uses_batched_guided_passes_but_ti2v_keeps_split_path():
+    hq_batch = SimpleNamespace(ltx2_num_image_tokens=0)
+    ti2v_batch = SimpleNamespace(ltx2_num_image_tokens=128)
+    server_args = SimpleNamespace(
+        pipeline_class_name="LTX2TwoStageHQPipeline",
+        num_gpus=1,
+        tp_size=1,
+    )
+
+    assert not LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
+        hq_batch,
+        server_args,
+    )
+    assert LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
+        ti2v_batch,
+        server_args,
+    )
+
+
 class _FakePipeline:
     def __init__(self):
         self.single_stages = []
