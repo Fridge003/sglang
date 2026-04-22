@@ -118,6 +118,8 @@ def _restore_missing_gemma_config_attrs(model: torch.nn.Module) -> None:
     defaults = GEMMA3_CONFIG_FOR_LTX.text_config
     if not hasattr(text_config, "rope_local_base_freq"):
         text_config.rope_local_base_freq = defaults.rope_local_base_freq
+    if getattr(text_config, "rope_theta", None) is None:
+        text_config.rope_theta = defaults.rope_theta
     rope_scaling = getattr(text_config, "rope_scaling", None)
     if not isinstance(rope_scaling, dict) or "rope_type" not in rope_scaling:
         text_config.rope_scaling = dataclasses.asdict(defaults.rope_scaling)
