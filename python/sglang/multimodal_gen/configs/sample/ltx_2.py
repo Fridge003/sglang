@@ -96,6 +96,8 @@ class LTX23HQSamplingParams(LTX23SamplingParams):
     height: int = 1088
     width: int = 1920
     num_inference_steps: int = 15
+    distilled_lora_strength_stage_1: float = 0.25
+    distilled_lora_strength_stage_2: float = 0.5
 
     video_cfg_scale: float | None = 3.0
     video_stg_scale: float | None = 0.0
@@ -110,3 +112,13 @@ class LTX23HQSamplingParams(LTX23SamplingParams):
     audio_modality_scale: float | None = 3.0
     audio_skip_step: int | None = 0
     audio_stg_blocks: list[int] | None = dataclasses.field(default_factory=list)
+
+    def build_request_extra(self) -> dict[str, Any]:
+        extra = super().build_request_extra()
+        extra["ltx2_distilled_lora_strength_stage_1"] = float(
+            self.distilled_lora_strength_stage_1
+        )
+        extra["ltx2_distilled_lora_strength_stage_2"] = float(
+            self.distilled_lora_strength_stage_2
+        )
+        return extra

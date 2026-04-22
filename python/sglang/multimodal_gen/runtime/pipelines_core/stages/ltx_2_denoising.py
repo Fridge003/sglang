@@ -930,7 +930,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 else None
             )
             if callable(switch_lora_phase):
-                switch_lora_phase(ctx.stage)
+                switch_lora_phase(ctx.stage, batch=batch)
             ensure_phase_ready = (
                 getattr(pipeline, "ensure_ltx2_phase_ready", None)
                 if pipeline is not None

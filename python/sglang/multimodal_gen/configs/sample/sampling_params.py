@@ -624,7 +624,7 @@ class SamplingParams:
         user_kwargs = dict(kwargs)
         user_kwargs.pop("diffusers_kwargs", None)
 
-        user_sampling_params = SamplingParams(*args, **user_kwargs)
+        user_sampling_params = type(sampling_params)(*args, **user_kwargs)
         # TODO: refactor
         sampling_params._merge_with_user_params(
             user_sampling_params, explicit_fields=set(user_kwargs.keys())
@@ -803,6 +803,92 @@ class SamplingParams:
             "--guidance-rescale",
             type=float,
             help="Guidance rescale factor",
+        )
+        add_argument(
+            "--video-cfg-guidance-scale",
+            type=float,
+            dest="video_cfg_scale",
+            help="Official LTX-2 video CFG guidance scale override.",
+        )
+        add_argument(
+            "--video-stg-guidance-scale",
+            type=float,
+            dest="video_stg_scale",
+            help="Official LTX-2 video STG guidance scale override.",
+        )
+        add_argument(
+            "--video-rescale-scale",
+            type=float,
+            dest="video_rescale_scale",
+            help="Official LTX-2 video guidance rescale override.",
+        )
+        add_argument(
+            "--video-stg-blocks",
+            type=int,
+            nargs="*",
+            dest="video_stg_blocks",
+            help="Official LTX-2 video STG block override.",
+        )
+        add_argument(
+            "--a2v-guidance-scale",
+            type=float,
+            dest="video_modality_scale",
+            help="Official LTX-2 audio-to-video guidance scale override.",
+        )
+        add_argument(
+            "--video-skip-step",
+            type=int,
+            dest="video_skip_step",
+            help="Official LTX-2 video skip-step override.",
+        )
+        add_argument(
+            "--audio-cfg-guidance-scale",
+            type=float,
+            dest="audio_cfg_scale",
+            help="Official LTX-2 audio CFG guidance scale override.",
+        )
+        add_argument(
+            "--audio-stg-guidance-scale",
+            type=float,
+            dest="audio_stg_scale",
+            help="Official LTX-2 audio STG guidance scale override.",
+        )
+        add_argument(
+            "--audio-rescale-scale",
+            type=float,
+            dest="audio_rescale_scale",
+            help="Official LTX-2 audio guidance rescale override.",
+        )
+        add_argument(
+            "--audio-stg-blocks",
+            type=int,
+            nargs="*",
+            dest="audio_stg_blocks",
+            help="Official LTX-2 audio STG block override.",
+        )
+        add_argument(
+            "--v2a-guidance-scale",
+            type=float,
+            dest="audio_modality_scale",
+            help="Official LTX-2 video-to-audio guidance scale override.",
+        )
+        add_argument(
+            "--audio-skip-step",
+            type=int,
+            dest="audio_skip_step",
+            help="Official LTX-2 audio skip-step override.",
+        )
+        add_argument(
+            "--distilled-lora-strength-stage-1",
+            type=float,
+            dest="distilled_lora_strength_stage_1",
+            help="Official LTX-2.3 HQ stage-1 distilled LoRA strength override.",
+        )
+        add_argument(
+            "--distilled-lora-strength-stage-2",
+            type=float,
+            dest="distilled_lora_strength_stage_2",
+            help="Official LTX-2.3 HQ stage-2 distilled LoRA strength override.",
         )
         add_argument(
             "--cfg-normalization",
@@ -990,7 +1076,14 @@ class SamplingParams:
         for field in dataclasses.fields(user_params):
             field_name = field.name
             user_value = getattr(user_params, field_name)
-            default_class_value = getattr(SamplingParams, field_name)
+            if hasattr(SamplingParams, field_name):
+                default_class_value = getattr(SamplingParams, field_name)
+            elif field.default is not dataclasses.MISSING:
+                default_class_value = field.default
+            elif field.default_factory is not dataclasses.MISSING:
+                default_class_value = field.default_factory()
+            else:
+                default_class_value = dataclasses.MISSING
 
             is_user_modified = user_value != default_class_value or (
                 explicit_fields is not None and field_name in explicit_fields

@@ -317,6 +317,56 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
         self.assertEqual(params.height, 1088)
         self.assertEqual(params.num_inference_steps, 15)
 
+    def test_ltx23_hq_cli_aliases_parse_into_pipeline_specific_fields(self):
+        parser = argparse.ArgumentParser()
+        SamplingParams.add_cli_args(parser)
+
+        args = parser.parse_args(
+            [
+                "--video-cfg-guidance-scale",
+                "3.5",
+                "--audio-stg-guidance-scale",
+                "0.25",
+                "--video-stg-blocks",
+                "7",
+                "9",
+                "--distilled-lora-strength-stage-1",
+                "0.3",
+                "--distilled-lora-strength-stage-2",
+                "0.6",
+            ]
+        )
+        kwargs = LTX23HQSamplingParams.get_cli_args(args)
+
+        self.assertEqual(kwargs["video_cfg_scale"], 3.5)
+        self.assertEqual(kwargs["audio_stg_scale"], 0.25)
+        self.assertEqual(kwargs["video_stg_blocks"], [7, 9])
+        self.assertEqual(kwargs["distilled_lora_strength_stage_1"], 0.3)
+        self.assertEqual(kwargs["distilled_lora_strength_stage_2"], 0.6)
+
+    def test_explicit_pipeline_class_accepts_pipeline_specific_user_kwargs(self):
+        server_args = MagicMock()
+        server_args.backend = "sglang"
+        server_args.model_id = None
+        server_args.pipeline_class_name = "LTX2TwoStageHQPipeline"
+        server_args.pipeline_config = MagicMock()
+
+        params = SamplingParams.from_user_sampling_params_args(
+            "Lightricks/LTX-2.3",
+            server_args=server_args,
+            prompt="p",
+            video_cfg_scale=3.5,
+            audio_stg_scale=0.25,
+            distilled_lora_strength_stage_1=0.3,
+            distilled_lora_strength_stage_2=0.6,
+        )
+
+        self.assertIsInstance(params, LTX23HQSamplingParams)
+        self.assertEqual(params.video_cfg_scale, 3.5)
+        self.assertEqual(params.audio_stg_scale, 0.25)
+        self.assertEqual(params.distilled_lora_strength_stage_1, 0.3)
+        self.assertEqual(params.distilled_lora_strength_stage_2, 0.6)
+
 
 if __name__ == "__main__":
     unittest.main()

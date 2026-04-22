@@ -742,6 +742,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         self._stage1_lora_path = server_args.lora_path
         self._stage1_lora_scale = float(server_args.lora_scale)
         self._active_lora_phase = None
+        self._active_lora_signature = None
         self._use_premerged_stage2_transformer = False
 
     def _initialize_premerged_stage2_transformer(self, server_args: ServerArgs) -> None:
@@ -783,26 +784,50 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             "resident",
         )
 
-    def _can_short_circuit_lora_switch(self, phase: str) -> bool:
+    def _get_stage_distilled_lora_strength(self, phase: str, batch: Req | None) -> float:
+        if phase == "stage1":
+            default_strength = self.STAGE_1_DISTILLED_LORA_STRENGTH
+            extra_key = "ltx2_distilled_lora_strength_stage_1"
+        elif phase == "stage2":
+            default_strength = self.STAGE_2_DISTILLED_LORA_STRENGTH
+            extra_key = "ltx2_distilled_lora_strength_stage_2"
+        else:
+            raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")
+
+        if batch is None:
+            return float(default_strength)
+
+        request_strength = batch.extra.get(extra_key)
+        if request_strength is None:
+            return float(default_strength)
+        return float(request_strength)
+
+    def _can_short_circuit_lora_switch(self, phase: str, batch: Req | None) -> bool:
+        distilled_lora_strength = self._get_stage_distilled_lora_strength(phase, batch)
         if phase == "stage1":
             return (
                 self._stage1_lora_path is None
-                and self.STAGE_1_DISTILLED_LORA_STRENGTH == 0.0
+                and distilled_lora_strength == 0.0
             )
         if phase == "stage2":
             return (
-                self._use_premerged_stage2_transformer and self._stage1_lora_path is None
+                self._use_premerged_stage2_transformer
+                and self._stage1_lora_path is None
+                and distilled_lora_strength == self.STAGE_2_DISTILLED_LORA_STRENGTH
             )
         return False
 
-    def switch_lora_phase(self, phase: str) -> None:
-        if phase == self._active_lora_phase:
+    def switch_lora_phase(self, phase: str, batch: Req | None = None) -> None:
+        distilled_lora_strength = self._get_stage_distilled_lora_strength(phase, batch)
+        phase_signature = (phase, distilled_lora_strength)
+        if phase_signature == self._active_lora_signature:
             return
 
         if self._device_manager.switch_phase(phase) and self._can_short_circuit_lora_switch(
-            phase
+            phase, batch
         ):
             self._active_lora_phase = phase
+            self._active_lora_signature = phase_signature
             return
 
         if phase == "stage1":
@@ -815,10 +840,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_paths.append(self._stage1_lora_path)
                 lora_strengths.append(self._stage1_lora_scale)
                 lora_targets.append("transformer")
-            if self.STAGE_1_DISTILLED_LORA_STRENGTH != 0.0:
+            if distilled_lora_strength != 0.0:
                 lora_nicknames.append("ltx2_stage1_distilled")
                 lora_paths.append(self._distilled_lora_path)
-                lora_strengths.append(self.STAGE_1_DISTILLED_LORA_STRENGTH)
+                lora_strengths.append(distilled_lora_strength)
                 lora_targets.append("transformer")
             if lora_nicknames:
                 self.set_lora(
@@ -842,10 +867,10 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
                 lora_paths.append(self._stage1_lora_path)
                 lora_strengths.append(self._stage1_lora_scale)
                 lora_targets.append("transformer")
-            if self.STAGE_2_DISTILLED_LORA_STRENGTH != 0.0:
+            if distilled_lora_strength != 0.0:
                 lora_nicknames.append("ltx2_stage2_distilled")
                 lora_paths.append(self._distilled_lora_path)
-                lora_strengths.append(self.STAGE_2_DISTILLED_LORA_STRENGTH)
+                lora_strengths.append(distilled_lora_strength)
                 lora_targets.append("transformer")
             if lora_nicknames:
                 self.set_lora(
@@ -866,6 +891,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             raise ValueError(f"Unknown LTX2 two-stage LoRA phase: {phase}")
 
         self._active_lora_phase = phase
+        self._active_lora_signature = phase_signature
 
     def create_pipeline_stages(self, server_args: ServerArgs):
         _add_ltx2_front_stages(self)

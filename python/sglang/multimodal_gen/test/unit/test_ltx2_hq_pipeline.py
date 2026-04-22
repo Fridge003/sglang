@@ -95,14 +95,38 @@ def test_ltx2_hq_stage1_guider_defaults_merge_request_overrides():
 
 def test_ltx23_hq_sampling_params_defaults_match_official_hq_parser():
     params = LTX23HQSamplingParams()
+    extra = params.build_request_extra()
 
     assert params.height == 1088
     assert params.width == 1920
     assert params.num_inference_steps == 15
+    assert params.distilled_lora_strength_stage_1 == 0.25
+    assert params.distilled_lora_strength_stage_2 == 0.5
     assert params.video_rescale_scale == 0.45
     assert params.audio_rescale_scale == 1.0
     assert params.video_stg_blocks == []
     assert params.audio_stg_blocks == []
+    assert extra["ltx2_distilled_lora_strength_stage_1"] == 0.25
+    assert extra["ltx2_distilled_lora_strength_stage_2"] == 0.5
+
+
+def test_ltx2_two_stage_pipeline_reads_request_lora_strength_overrides():
+    pipeline = object.__new__(LTX2TwoStageHQPipeline)
+
+    assert (
+        pipeline._get_stage_distilled_lora_strength(
+            "stage1",
+            SimpleNamespace(extra={"ltx2_distilled_lora_strength_stage_1": 0.3}),
+        )
+        == 0.3
+    )
+    assert (
+        pipeline._get_stage_distilled_lora_strength(
+            "stage2",
+            SimpleNamespace(extra={"ltx2_distilled_lora_strength_stage_2": 0.6}),
+        )
+        == 0.6
+    )
 
 
 def test_ltx23_hq_pipeline_registers_pipeline_specific_sampling_params():
