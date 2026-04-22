@@ -25,12 +25,18 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
-# DEBUG: async-assert helper for bisecting the MLA CP IMA crash. All checks
-# are GPU-side `torch._assert_async` so they don't force a CPU sync; the
-# error surfaces at the next sync point (or immediately under
-# CUDA_LAUNCH_BLOCKING=1) with a Python stack pointing at the specific
-# invariant that failed. Enable with `SGLANG_CP_DEBUG_ASSERTS=1`.
-import os as _os
+# DEBUG: async-assert helper for bisecting the MLA CP IMA crash.
+# Enable with ``envs.SGLANG_CP_DEBUG_ASSERTS.override({1,2})`` (or by
+# exporting ``SGLANG_CP_DEBUG_ASSERTS`` in the environment):
+#   0 (default): fully disabled, near-zero overhead.
+#   1          : GPU-async assertions only (no CPU sync, no logging).
+#                Errors surface on the next CUDA sync with a Python stack
+#                pinpointing the invariant that failed. Combine with
+#                ``CUDA_LAUNCH_BLOCKING=1`` for precise localization.
+#   2          : asserts + one-shot shape/values dump per (rank, layer_id).
+#                Forces a small CPU sync once per pair, so CI logs get a
+#                single compact snapshot instead of flooding on every call.
+import sys as _sys
 
 from sgl_kernel import merge_state_v2
 
@@ -38,6 +44,25 @@ from sglang.jit_kernel.flash_attention import (
     flash_attn_varlen_func,
     flash_attn_with_kvcache,
 )
+from sglang.srt.environ import envs as _envs
+
+_CP_DEBUG_PRINTED: set = set()
+
+
+def _cp_debug_level() -> int:
+    # Re-read per call so flipping the env var mid-session (e.g. from a
+    # test harness via ``envs.SGLANG_CP_DEBUG_ASSERTS.override(1)``)
+    # takes effect without re-importing.
+    return _envs.SGLANG_CP_DEBUG_ASSERTS.get()
+
+
+def _cp_current_rank() -> int:
+    try:
+        if torch.distributed.is_initialized():
+            return torch.distributed.get_rank()
+    except Exception:
+        pass
+    return 0
 
 
 def _cp_debug_asserts(
@@ -54,117 +79,146 @@ def _cp_debug_asserts(
     use_local_attn,
     page_size,
 ):
-    if _os.environ.get("SGLANG_CP_DEBUG_ASSERTS", "0") != "1":
+    level = _cp_debug_level()
+    if level <= 0:
         return
 
-    # --- shape / dtype sanity ---
-    assert q_chunk.is_contiguous() or True, "q_chunk contiguity"
-    assert q_rope_chunk.dim() == 3, f"q_rope_chunk dim={q_rope_chunk.dim()}"
-    assert q_nope_chunk.dim() == 3, f"q_nope_chunk dim={q_nope_chunk.dim()}"
-    assert k_rope_cache.dim() == 4, f"k_rope_cache dim={k_rope_cache.dim()}"
-    assert c_kv_cache.dim() == 4, f"c_kv_cache dim={c_kv_cache.dim()}"
-    assert page_table.dim() == 2, f"page_table dim={page_table.dim()}"
+    rank = _cp_current_rank()
+    tag = f"[CP DEBUG rank={rank} layer={layer_id}]"
+
+    # ---- CPU-side structural checks (fail fast, no kernel cost) ----
+    assert q_rope_chunk.dim() == 3, f"{tag} q_rope_chunk dim={q_rope_chunk.dim()}"
+    assert q_nope_chunk.dim() == 3, f"{tag} q_nope_chunk dim={q_nope_chunk.dim()}"
+    assert k_rope_cache.dim() == 4, f"{tag} k_rope_cache dim={k_rope_cache.dim()}"
+    assert c_kv_cache.dim() == 4, f"{tag} c_kv_cache dim={c_kv_cache.dim()}"
+    assert page_table.dim() == 2, f"{tag} page_table dim={page_table.dim()}"
     assert (
         cache_seqlens_cp.dtype == torch.int32
-    ), f"cache_seqlens dtype={cache_seqlens_cp.dtype}"
+    ), f"{tag} cache_seqlens dtype={cache_seqlens_cp.dtype}"
+    # FA3 assumes k_cache and v_cache share the same block pool; page_table
+    # entries index both.
+    assert k_rope_cache.shape[0] == c_kv_cache.shape[0], (
+        f"{tag} kv-pool size mismatch "
+        f"k_rope_cache.shape[0]={k_rope_cache.shape[0]} "
+        f"c_kv_cache.shape[0]={c_kv_cache.shape[0]}"
+    )
 
     num_blocks = k_rope_cache.shape[0]
-    page_table_rows = page_table.shape[0]
     page_table_cols = page_table.shape[1]
+    batch_size = cu_seqlens_q_cp.shape[0] - 1
     total_q = q_chunk.shape[0]
 
-    # Dump Python-side shapes BEFORE the GPU asserts so even on async
-    # abort we see the offending scenario. These are all CPU-knowable.
-    import sys as _sys
-
-    print(
-        f"[CP DEBUG layer={layer_id}] "
-        f"q_chunk={tuple(q_chunk.shape)} "
-        f"k_rope_cache={tuple(k_rope_cache.shape)} "
-        f"c_kv_cache={tuple(c_kv_cache.shape)} "
-        f"page_table={tuple(page_table.shape)} "
-        f"cache_seqlens.shape={tuple(cache_seqlens_cp.shape)} "
-        f"cu_seqlens_q={tuple(cu_seqlens_q_cp.shape)} "
-        f"cu_seqlens_k={None if cu_seqlens_k is None else tuple(cu_seqlens_k.shape)} "
-        f"page_size={page_size} use_local_attn={use_local_attn}",
-        flush=True,
-        file=_sys.stderr,
+    # Batch-size consistency: FA reads cache_seqlens[b] for b in [0, B).
+    assert cache_seqlens_cp.shape[0] == batch_size, (
+        f"{tag} cache_seqlens batch ({cache_seqlens_cp.shape[0]}) != "
+        f"cu_seqlens_q batch ({batch_size})"
     )
+    assert (
+        page_table.shape[0] >= batch_size
+    ), f"{tag} page_table rows ({page_table.shape[0]}) < batch ({batch_size})"
+    # Nothing to check if there's no work for this chunk.
+    if batch_size == 0 or total_q == 0:
+        return
 
-    # ---- page_table entry validity: every block idx must be a valid
-    # index into k_rope_cache / c_kv_cache (same pool). A garbage entry
-    # (uninitialized / stale req_to_token column) causes FA to read from
-    # a random pool slot → IMA. ----
+    # ---- one-shot verbose log (level >= 2). Sync is intentional here:
+    # it is paid at most once per (rank, layer_id), so CI logs stay small. ----
+    if level >= 2:
+        key = (rank, layer_id)
+        if key not in _CP_DEBUG_PRINTED:
+            _CP_DEBUG_PRINTED.add(key)
+            cs_vals = cache_seqlens_cp.detach().cpu().tolist()
+            cq_vals = cu_seqlens_q_cp.detach().cpu().tolist()
+            ck_vals = (
+                None if cu_seqlens_k is None else cu_seqlens_k.detach().cpu().tolist()
+            )
+            print(
+                f"{tag} "
+                f"q_chunk={tuple(q_chunk.shape)} "
+                f"k_rope_cache={tuple(k_rope_cache.shape)} "
+                f"c_kv_cache={tuple(c_kv_cache.shape)} "
+                f"page_table={tuple(page_table.shape)} "
+                f"page_size={page_size} use_local_attn={use_local_attn} "
+                f"batch={batch_size} total_q={total_q} "
+                f"cache_seqlens={cs_vals} cu_seqlens_q={cq_vals} "
+                f"cu_seqlens_k={ck_vals}",
+                flush=True,
+                file=_sys.stderr,
+            )
+
+    # ---- GPU-async invariants. All checks are allocation-free and run
+    # on the GPU; errors surface at the next cuda sync (or immediately
+    # with CUDA_LAUNCH_BLOCKING=1). ----
+
+    # (1) Every page_table entry in the rows FA actually reads must be a
+    # valid block index. A stale / uninitialized entry (e.g., leftover
+    # req_to_token column) sends FA to a random pool slot → IMA.
+    pt_used = page_table[:batch_size]
     torch._assert_async(
-        (page_table.min() >= 0) & (page_table.max() < num_blocks),
-        f"[layer {layer_id}] page_table OOB vs num_blocks={num_blocks}",
+        (pt_used.min() >= 0) & (pt_used.max() < num_blocks),
+        f"{tag} page_table OOB " f"(rows=0:{batch_size}, num_blocks={num_blocks})",
     )
 
-    # ---- cache_seqlens vs page_table width. Each per-batch cache_seqlen
-    # N means FA reads ceil(N/page_size) page_table columns. For page_size=1
-    # that is exactly N columns → N must be ≤ page_table_cols. ----
-    # Small tensor - OK to sync once to print actual values for diagnosis.
-    cs_vals = cache_seqlens_cp.detach().cpu().tolist()
-    cq_vals = cu_seqlens_q_cp.detach().cpu().tolist()
-    ck_vals = None if cu_seqlens_k is None else cu_seqlens_k.detach().cpu().tolist()
-    print(
-        f"[CP DEBUG layer={layer_id}] "
-        f"cache_seqlens={cs_vals} cu_seqlens_q={cq_vals} "
-        f"cu_seqlens_k={ck_vals} "
-        f"page_table_cols={page_table_cols} total_q={total_q}",
-        flush=True,
-        file=_sys.stderr,
+    # (2) cache_seqlens must be non-negative and fit in page_table width.
+    # Per batch entry b, FA reads ceil(cache_seqlens[b]/page_size) columns
+    # of page_table — exactly cache_seqlens[b] for page_size=1.
+    torch._assert_async(
+        (cache_seqlens_cp >= 0).all(),
+        f"{tag} cache_seqlens contains negative values",
     )
     max_pages_needed = (cache_seqlens_cp.max() + page_size - 1) // page_size
     torch._assert_async(
         max_pages_needed <= page_table_cols,
-        f"[layer {layer_id}] cache_seqlens exceeds page_table width "
-        f"(cols={page_table_cols}, page_size={page_size})",
+        f"{tag} cache_seqlens exceeds page_table width "
+        f"(cols={page_table_cols}, page_size={page_size}, "
+        f"batch={batch_size})",
     )
 
-    # ---- cu_seqlens_q shape + monotonicity + tail == total_q ----
+    # (3) cu_seqlens_q structure: [0, ..., total_q], monotonic.
+    torch._assert_async(
+        cu_seqlens_q_cp[0] == 0,
+        f"{tag} cu_seqlens_q[0] != 0",
+    )
     torch._assert_async(
         (cu_seqlens_q_cp[1:] >= cu_seqlens_q_cp[:-1]).all(),
-        f"[layer {layer_id}] cu_seqlens_q not monotonic",
+        f"{tag} cu_seqlens_q not monotonic (batch={batch_size})",
     )
     torch._assert_async(
         cu_seqlens_q_cp[-1] == total_q,
-        f"[layer {layer_id}] cu_seqlens_q[-1] != q_chunk.shape[0]={total_q}",
-    )
-    torch._assert_async(
-        cu_seqlens_q_cp[0] == 0,
-        f"[layer {layer_id}] cu_seqlens_q[0] != 0",
+        f"{tag} cu_seqlens_q[-1] != q_chunk.shape[0]={total_q}",
     )
 
-    # ---- cu_seqlens_k_new (if actually passed) ----
-    # NOTE: we intentionally only check monotonicity here. The relationship
-    # cu_seqlens_k_new[-1] vs cache_seqlens.max() is NOT a required
-    # invariant for FA3 — cu_seqlens_k_new describes "new K appended
-    # across the batch" while cache_seqlens is per-seq. We want to see
-    # whether a kernel-level bound (page_table / cu_seqlens_q) fires
-    # before we blame cu_seqlens_k_new for the IMA.
+    # (4) cu_seqlens_k_new structure (if actually passed).
+    # NOTE: cu_seqlens_k_new[-1] vs cache_seqlens.max() is NOT a required
+    # FA3 invariant — cu_seqlens_k_new is "new K appended across the
+    # batch", cache_seqlens is per-seq. We only check shape/monotonicity
+    # so a real kernel bound (page_table / cu_seqlens_q) can fire first.
     if not use_local_attn and cu_seqlens_k is not None:
         torch._assert_async(
+            cu_seqlens_k[0] == 0,
+            f"{tag} cu_seqlens_k_new[0] != 0",
+        )
+        torch._assert_async(
             (cu_seqlens_k[1:] >= cu_seqlens_k[:-1]).all(),
-            f"[layer {layer_id}] cu_seqlens_k_new not monotonic",
+            f"{tag} cu_seqlens_k_new not monotonic",
         )
 
-    # ---- NaN / Inf on the q chunks (upstream corruption) ----
+    # (5) NaN/Inf on Q — catches upstream rotary/embedding corruption
+    # before FA surfaces it as an opaque IMA.
     torch._assert_async(
         ~torch.isnan(q_rope_chunk).any(),
-        f"[layer {layer_id}] NaN in q_rope_chunk",
+        f"{tag} NaN in q_rope_chunk",
     )
     torch._assert_async(
         ~torch.isnan(q_nope_chunk).any(),
-        f"[layer {layer_id}] NaN in q_nope_chunk",
+        f"{tag} NaN in q_nope_chunk",
     )
     torch._assert_async(
         ~torch.isinf(q_rope_chunk).any(),
-        f"[layer {layer_id}] Inf in q_rope_chunk",
+        f"{tag} Inf in q_rope_chunk",
     )
     torch._assert_async(
         ~torch.isinf(q_nope_chunk).any(),
-        f"[layer {layer_id}] Inf in q_nope_chunk",
+        f"{tag} Inf in q_nope_chunk",
     )
 
 

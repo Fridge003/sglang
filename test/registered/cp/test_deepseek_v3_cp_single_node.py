@@ -19,6 +19,7 @@ GSM8k threshold 0.935 matches the non-CP DSv3 baseline in
 import unittest
 from types import SimpleNamespace
 
+from sglang.srt.environ import envs, temp_set_env
 from sglang.srt.utils import kill_process_tree
 from sglang.test.ci.ci_register import register_cuda_ci
 from sglang.test.run_eval import run_eval
@@ -65,12 +66,23 @@ class TestDeepseekV3CPInSeqSplit(CustomTestCase):
             "--model-loader-extra-config",
             '{"enable_multithread_load": true, "num_threads": 64}',
         ]
-        cls.process = popen_launch_server(
-            cls.model,
-            cls.base_url,
-            timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH * 5,
-            other_args=other_args,
-        )
+        # DEBUG BRANCH ONLY — force-enable the MLA CP async-assert helper
+        # and serialize kernel launches so any invariant violation in the
+        # FA3 call site surfaces with a clean message on the exact
+        # launching Python frame (see ``_cp_debug_asserts`` in
+        # ``flashattention_backend.py``). Both overrides mutate
+        # ``os.environ`` on the parent process; ``popen_launch_server``
+        # copies it into the server subprocess, so all TP ranks inherit
+        # the flags. Revert this ``with`` block before landing.
+        with envs.SGLANG_CP_DEBUG_ASSERTS.override(1), temp_set_env(
+            CUDA_LAUNCH_BLOCKING="1"
+        ):
+            cls.process = popen_launch_server(
+                cls.model,
+                cls.base_url,
+                timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH * 5,
+                other_args=other_args,
+            )
 
     @classmethod
     def tearDownClass(cls):

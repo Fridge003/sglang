@@ -457,6 +457,12 @@ class Envs:
     SGLANG_SPEC_NAN_DETECTION = EnvBool(False)
     SGLANG_SPEC_OOB_DETECTION = EnvBool(False)
 
+    # Prefill CP debug
+    # 0: disabled; 1: GPU-async assertions only; 2: asserts + one-shot
+    # shape/values dump per (rank, layer_id). See ``_cp_debug_asserts`` in
+    # ``flashattention_backend.py``.
+    SGLANG_CP_DEBUG_ASSERTS = EnvInt(0)
+
     # VLM
     SGLANG_VLM_CACHE_SIZE_MB = EnvInt(100)
     SGLANG_IMAGE_MAX_PIXELS = EnvInt(16384 * 28 * 28)
