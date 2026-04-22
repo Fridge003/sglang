@@ -326,7 +326,7 @@ def _build_text_generate_request(
 @unittest.skipUnless(_HAS_SGLANG_GRPC, "sglang_grpc package not installed")
 class GrpcEnabledServerBase(CustomTestCase):
     grpc_channel = None
-    other_args = ("--mem-fraction-static", "0.7")
+    other_args = ("--mem-fraction-static", "0.7", "--enable-grpc")
 
     @classmethod
     def setUpClass(cls):
@@ -787,7 +787,7 @@ class TestGrpcDisabledServer(CustomTestCase):
             cls.model,
             cls.base_url,
             timeout=DEFAULT_TIMEOUT_FOR_SERVER_LAUNCH,
-            other_args=("--mem-fraction-static", "0.7", "--disable-grpc"),
+            other_args=("--mem-fraction-static", "0.7"),
         )
 
     @classmethod
@@ -826,6 +826,7 @@ class TestGrpcServerArgs(CustomTestCase):
                     DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
                     "--tokenizer-worker-num",
                     "2",
+                    "--enable-grpc",
                 ]
             )
 
@@ -838,10 +839,9 @@ class TestGrpcServerArgs(CustomTestCase):
                 DEFAULT_SMALL_MODEL_NAME_FOR_TEST_QWEN,
                 "--tokenizer-worker-num",
                 "2",
-                "--disable-grpc",
             ]
         )
-        self.assertTrue(server_args.disable_grpc)
+        self.assertFalse(server_args.enable_grpc)
         self.assertEqual(server_args.tokenizer_worker_num, 2)
 
     def test_deprecated_grpc_mode_skips_native_multi_tokenizer_validation(self):
