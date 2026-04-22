@@ -70,6 +70,66 @@ def _deepep_precompile_tp_barrier() -> None:
         get_tp_group().barrier()
 
 
+def _diag_tensor_summary(name: str, t: object) -> str:
+    # TEMP: diagnostic-only helper for torch 2.11 DeepEP CI failure (PR 21247).
+    # Remove once the root cause of the "Cannot access data pointer of Tensor
+    # that doesn't have storage" error is understood.
+    if t is None:
+        return f"{name}=None"
+    if not isinstance(t, torch.Tensor):
+        return f"{name}=<{type(t).__name__}>"
+    parts = [
+        f"cls={type(t).__name__}",
+        f"shape={tuple(t.shape)}",
+        f"dtype={t.dtype}",
+        f"device={t.device}",
+        f"contig={t.is_contiguous()}",
+        f"stride={t.stride()}",
+        f"has_base={t._base is not None}",
+    ]
+    try:
+        st = t.untyped_storage()
+        parts.append(f"storage_is_none={st is None}")
+        if st is not None:
+            try:
+                parts.append(f"storage_nbytes={st.nbytes()}")
+            except Exception as e:  # noqa: BLE001
+                parts.append(f"storage_nbytes=<{type(e).__name__}>")
+            try:
+                parts.append(f"storage_data_ptr={hex(st.data_ptr())}")
+            except Exception as e:  # noqa: BLE001
+                parts.append(f"storage_data_ptr=<{type(e).__name__}>")
+    except Exception as e:  # noqa: BLE001
+        parts.append(f"untyped_storage=<{type(e).__name__}>")
+    try:
+        parts.append(f"data_ptr={hex(t.data_ptr())}")
+    except Exception as e:  # noqa: BLE001
+        parts.append(f"data_ptr=<{type(e).__name__}: {e}>")
+    try:
+        parts.append(f"capturing={torch.cuda.is_current_stream_capturing()}")
+    except Exception:  # noqa: BLE001
+        pass
+    return f"{name}[{', '.join(parts)}]"
+
+
+def _diag_run_low_latency(label: str, fn, *args, **kwargs):
+    # TEMP: wraps deep_ep.Buffer.low_latency_dispatch/combine calls to surface
+    # which tensor argument has no storage under torch 2.11 CUDA graph capture.
+    # Remove once PR 21247's DeepEP data_ptr failure is understood.
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as exc:
+        if "Cannot access data pointer" not in str(exc):
+            raise
+        lines = [f"[DEEPEP-DIAG] {label} RuntimeError: {exc}"]
+        for idx, arg in enumerate(args):
+            lines.append(f"  {_diag_tensor_summary(f'arg[{idx}]', arg)}")
+        for key, val in kwargs.items():
+            lines.append(f"  {_diag_tensor_summary(key, val)}")
+        logger.error("\n".join(lines))
+        raise
+
+
 class DeepEPPDispatchHooks(DispatcherBaseHooks):
     def __call__(self, dispatcher: BaseDispatcher):
         for hook_fun in self.hook_dict.values():
@@ -642,7 +702,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
         buffer = self._get_buffer()
         _deepep_precompile_tp_barrier()
         packed_recv_hidden, self.packed_recv_count, self.handle, event, hook = (
-            buffer.low_latency_dispatch(
+            _diag_run_low_latency(
+                "low_latency_dispatch",
+                buffer.low_latency_dispatch,
                 hidden_states,
                 topk_ids,
                 self.num_max_dispatch_tokens_per_rank,
@@ -721,7 +783,9 @@ class _DeepEPDispatcherImplLowLatency(_DeepEPDispatcherImplBase):
 
         with ctx:
             _deepep_precompile_tp_barrier()
-            combined_hidden_states, event, hook = buffer.low_latency_combine(
+            combined_hidden_states, event, hook = _diag_run_low_latency(
+                "low_latency_combine",
+                buffer.low_latency_combine,
                 x=hidden_states,
                 topk_idx=topk_ids,
                 topk_weights=topk_weights,
