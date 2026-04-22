@@ -19,6 +19,27 @@ from sglang.srt.server_args import get_global_server_args
 
 @dataclass
 class ContextParallelMetadata:
+    """Per-rank metadata for prefill context parallelism.
+
+    Two different "totals" coexist here and are intentionally kept
+    separate:
+
+    - PADDED (``kv_len`` input to ``prepare_context_parallel_metadata``,
+      ``total_seq_lens``, ``split_list``, ``actual_seq_q_prev/next``):
+      ceil-aligned to ``cp_size * 2`` tokens. Used for buffer shapes and
+      per-rank token layout — e.g. ``cp_all_gather_rerange_output`` and
+      all-gather buffers need every rank to contribute the same padded
+      width, otherwise the collective deadlocks.
+
+    - UNPADDED (``kv_len_prev/next`` for non-NSA CP): clamped to
+      ``prefix_len + extend_len`` (the real per-request total). FA3's
+      ``page_table`` is built from unpadded ``seq_lens_cpu.max()`` in
+      ``FlashAttentionBackend.init_forward_metadata``, so
+      ``cache_seqlens`` fed to FA must not exceed the unpadded total —
+      otherwise FA reads ``page_table[:, :cache_seqlens]`` out of bounds
+      and triggers a CUDA illegal-memory-access.
+    """
+
     split_list: List[int] = None
     max_rank_len: List[int] = None
     zigzag_index: List[int] = None
@@ -36,6 +57,8 @@ class ContextParallelMetadata:
     actual_seq_q_prev_tensor: torch.Tensor = None
     actual_seq_q_next_tensor: torch.Tensor = None
 
+    # Padded total (ceil_align(kv_len, cp_size*2)). Used by the CP
+    # allgather to size per-rank buffers; do NOT clamp to unpadded here.
     total_seq_lens: torch.Tensor = None
 
 
@@ -537,6 +560,29 @@ def prepare_context_parallel_metadata(
     else:
         kv_len_prev = prefix_len + prefix_sum_list[cp_rank]
         kv_len_next = prefix_len + prefix_sum_list[cp_size * 2 - cp_rank - 1]
+
+        # Clamp the K horizon to the UNPADDED total (prefix + extend).
+        # `kv_len` here is the padded per-pass token count
+        # (ceil_align(extend, cp_size*2)), so `prefix_sum_list` spans
+        # the padded range. FA3's `page_table` is sized to
+        # `seq_lens_cpu.max()` (unpadded) in
+        # `FlashAttentionBackend.init_forward_metadata`, so any
+        # cache_seqlens > unpadded_total causes a page_table OOB read
+        # and a CUDA IMA. This is a semantic no-op: padded Q rows
+        # still run through attention here, but the padded output rows
+        # are dropped by the post-attention NSA CP reduce-scatter, so
+        # clamping the K horizon only affects values that are never
+        # consumed downstream.
+        # NOTE: we intentionally do NOT clamp `actual_seq_q_prev/next`
+        # below. Those are the Q-side counts and must match
+        # `q_prev/q_next.shape[0]` produced by `torch.chunk(q, 2)` in
+        # `cp_attn_forward_extend`; clamping them down would make FA
+        # emit a smaller output and break the concat that follows.
+        # We pay a tiny amount of wasted compute on the padded Q rows
+        # instead.
+        unpadded_total = prefix_len + int(extend_lens[0])
+        kv_len_prev = min(kv_len_prev, unpadded_total)
+        kv_len_next = min(kv_len_next, unpadded_total)
     actual_seq_q_prev = split_list[cp_rank]
     actual_seq_q_next = split_list[cp_size * 2 - cp_rank - 1]
     # Flash Attention expects cache_seqlens to have shape (batch_size,), not scalar

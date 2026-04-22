@@ -25,12 +25,147 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+# DEBUG: async-assert helper for bisecting the MLA CP IMA crash. All checks
+# are GPU-side `torch._assert_async` so they don't force a CPU sync; the
+# error surfaces at the next sync point (or immediately under
+# CUDA_LAUNCH_BLOCKING=1) with a Python stack pointing at the specific
+# invariant that failed. Enable with `SGLANG_CP_DEBUG_ASSERTS=1`.
+import os as _os
+
 from sgl_kernel import merge_state_v2
 
 from sglang.jit_kernel.flash_attention import (
     flash_attn_varlen_func,
     flash_attn_with_kvcache,
 )
+
+
+def _cp_debug_asserts(
+    layer_id,
+    q_chunk,
+    q_rope_chunk,
+    q_nope_chunk,
+    k_rope_cache,
+    c_kv_cache,
+    page_table,
+    cache_seqlens_cp,
+    cu_seqlens_q_cp,
+    cu_seqlens_k,
+    use_local_attn,
+    page_size,
+):
+    if _os.environ.get("SGLANG_CP_DEBUG_ASSERTS", "0") != "1":
+        return
+
+    # --- shape / dtype sanity ---
+    assert q_chunk.is_contiguous() or True, "q_chunk contiguity"
+    assert q_rope_chunk.dim() == 3, f"q_rope_chunk dim={q_rope_chunk.dim()}"
+    assert q_nope_chunk.dim() == 3, f"q_nope_chunk dim={q_nope_chunk.dim()}"
+    assert k_rope_cache.dim() == 4, f"k_rope_cache dim={k_rope_cache.dim()}"
+    assert c_kv_cache.dim() == 4, f"c_kv_cache dim={c_kv_cache.dim()}"
+    assert page_table.dim() == 2, f"page_table dim={page_table.dim()}"
+    assert (
+        cache_seqlens_cp.dtype == torch.int32
+    ), f"cache_seqlens dtype={cache_seqlens_cp.dtype}"
+
+    num_blocks = k_rope_cache.shape[0]
+    page_table_rows = page_table.shape[0]
+    page_table_cols = page_table.shape[1]
+    total_q = q_chunk.shape[0]
+
+    # Dump Python-side shapes BEFORE the GPU asserts so even on async
+    # abort we see the offending scenario. These are all CPU-knowable.
+    import sys as _sys
+
+    print(
+        f"[CP DEBUG layer={layer_id}] "
+        f"q_chunk={tuple(q_chunk.shape)} "
+        f"k_rope_cache={tuple(k_rope_cache.shape)} "
+        f"c_kv_cache={tuple(c_kv_cache.shape)} "
+        f"page_table={tuple(page_table.shape)} "
+        f"cache_seqlens.shape={tuple(cache_seqlens_cp.shape)} "
+        f"cu_seqlens_q={tuple(cu_seqlens_q_cp.shape)} "
+        f"cu_seqlens_k={None if cu_seqlens_k is None else tuple(cu_seqlens_k.shape)} "
+        f"page_size={page_size} use_local_attn={use_local_attn}",
+        flush=True,
+        file=_sys.stderr,
+    )
+
+    # ---- page_table entry validity: every block idx must be a valid
+    # index into k_rope_cache / c_kv_cache (same pool). A garbage entry
+    # (uninitialized / stale req_to_token column) causes FA to read from
+    # a random pool slot → IMA. ----
+    torch._assert_async(
+        (page_table.min() >= 0) & (page_table.max() < num_blocks),
+        f"[layer {layer_id}] page_table OOB vs num_blocks={num_blocks}",
+    )
+
+    # ---- cache_seqlens vs page_table width. Each per-batch cache_seqlen
+    # N means FA reads ceil(N/page_size) page_table columns. For page_size=1
+    # that is exactly N columns → N must be ≤ page_table_cols. ----
+    # Small tensor - OK to sync once to print actual values for diagnosis.
+    cs_vals = cache_seqlens_cp.detach().cpu().tolist()
+    cq_vals = cu_seqlens_q_cp.detach().cpu().tolist()
+    ck_vals = None if cu_seqlens_k is None else cu_seqlens_k.detach().cpu().tolist()
+    print(
+        f"[CP DEBUG layer={layer_id}] "
+        f"cache_seqlens={cs_vals} cu_seqlens_q={cq_vals} "
+        f"cu_seqlens_k={ck_vals} "
+        f"page_table_cols={page_table_cols} total_q={total_q}",
+        flush=True,
+        file=_sys.stderr,
+    )
+    max_pages_needed = (cache_seqlens_cp.max() + page_size - 1) // page_size
+    torch._assert_async(
+        max_pages_needed <= page_table_cols,
+        f"[layer {layer_id}] cache_seqlens exceeds page_table width "
+        f"(cols={page_table_cols}, page_size={page_size})",
+    )
+
+    # ---- cu_seqlens_q shape + monotonicity + tail == total_q ----
+    torch._assert_async(
+        (cu_seqlens_q_cp[1:] >= cu_seqlens_q_cp[:-1]).all(),
+        f"[layer {layer_id}] cu_seqlens_q not monotonic",
+    )
+    torch._assert_async(
+        cu_seqlens_q_cp[-1] == total_q,
+        f"[layer {layer_id}] cu_seqlens_q[-1] != q_chunk.shape[0]={total_q}",
+    )
+    torch._assert_async(
+        cu_seqlens_q_cp[0] == 0,
+        f"[layer {layer_id}] cu_seqlens_q[0] != 0",
+    )
+
+    # ---- cu_seqlens_k_new (if actually passed) ----
+    # NOTE: we intentionally only check monotonicity here. The relationship
+    # cu_seqlens_k_new[-1] vs cache_seqlens.max() is NOT a required
+    # invariant for FA3 — cu_seqlens_k_new describes "new K appended
+    # across the batch" while cache_seqlens is per-seq. We want to see
+    # whether a kernel-level bound (page_table / cu_seqlens_q) fires
+    # before we blame cu_seqlens_k_new for the IMA.
+    if not use_local_attn and cu_seqlens_k is not None:
+        torch._assert_async(
+            (cu_seqlens_k[1:] >= cu_seqlens_k[:-1]).all(),
+            f"[layer {layer_id}] cu_seqlens_k_new not monotonic",
+        )
+
+    # ---- NaN / Inf on the q chunks (upstream corruption) ----
+    torch._assert_async(
+        ~torch.isnan(q_rope_chunk).any(),
+        f"[layer {layer_id}] NaN in q_rope_chunk",
+    )
+    torch._assert_async(
+        ~torch.isnan(q_nope_chunk).any(),
+        f"[layer {layer_id}] NaN in q_nope_chunk",
+    )
+    torch._assert_async(
+        ~torch.isinf(q_rope_chunk).any(),
+        f"[layer {layer_id}] Inf in q_rope_chunk",
+    )
+    torch._assert_async(
+        ~torch.isinf(q_nope_chunk).any(),
+        f"[layer {layer_id}] Inf in q_nope_chunk",
+    )
 
 
 @dataclass
@@ -974,6 +1109,25 @@ class FlashAttentionBackend(AttentionBackend):
                     ):
                         q_nope_chunk = q_chunk[..., : layer.v_head_dim]
                         q_rope_chunk = q_chunk[..., layer.v_head_dim :]
+                        # DEBUG ASYNC ASSERTS — bisect the IMA crash.
+                        # Error surfaces at next CUDA sync (or via
+                        # CUDA_LAUNCH_BLOCKING=1), so we get a precise
+                        # Python-level stack identifying WHICH invariant
+                        # the runtime is violating.
+                        _cp_debug_asserts(
+                            layer_id=layer.layer_id,
+                            q_chunk=q_chunk,
+                            q_rope_chunk=q_rope_chunk,
+                            q_nope_chunk=q_nope_chunk,
+                            k_rope_cache=k_rope_cache,
+                            c_kv_cache=c_kv_cache,
+                            page_table=page_table,
+                            cache_seqlens_cp=cache_seqlens_cp,
+                            cu_seqlens_q_cp=cu_seqlens_q_cp,
+                            cu_seqlens_k=cu_seqlens_k,
+                            use_local_attn=use_local_attn,
+                            page_size=self.page_size,
+                        )
                         return flash_attn_with_kvcache(
                             q=q_rope_chunk,
                             qv=q_nope_chunk,
