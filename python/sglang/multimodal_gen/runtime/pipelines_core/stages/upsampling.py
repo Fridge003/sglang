@@ -6,6 +6,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
 
 logger = init_logger(__name__)
 
@@ -128,6 +129,16 @@ class LTX2UpsampleStage(PipelineStage):
             prefetch_stage2()
 
         device = get_local_torch_device()
+
+        if envs.SGLANG_DIFFUSION_PROBE_DIR:
+            dump_probe_payload(
+                batch,
+                "stage1/output",
+                {
+                    "video_state": {"latent": batch.latents},
+                    "audio_state": {"latent": batch.audio_latents},
+                },
+            )
 
         inject_path = envs.SGLANG_DIFFUSION_LTX2_INJECT_STAGE1_OUTPUT
         if inject_path:

@@ -389,7 +389,7 @@ def _patch_stage2_probe_loop(probe_dir: Path | None):
     def _wrapped_loop(*, sigmas, video_state, audio_state, stepper, transformer, denoiser):
         is_stage2 = int(sigmas.numel()) <= 4
         if not is_stage2:
-            return original_loop(
+            video_state, audio_state = original_loop(
                 sigmas=sigmas,
                 video_state=video_state,
                 audio_state=audio_state,
@@ -397,6 +397,15 @@ def _patch_stage2_probe_loop(probe_dir: Path | None):
                 transformer=transformer,
                 denoiser=denoiser,
             )
+            _save_probe(
+                probe_dir,
+                "stage1/output",
+                {
+                    "video_state": video_state,
+                    "audio_state": audio_state,
+                },
+            )
+            return video_state, audio_state
 
         _save_probe(
             probe_dir,
