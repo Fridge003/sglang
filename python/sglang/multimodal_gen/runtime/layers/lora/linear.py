@@ -21,13 +21,13 @@ from sglang.multimodal_gen.runtime.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from sglang.multimodal_gen.runtime.layers.linear import (
-    apply_fp32_row_parallel_linear,
     ColumnParallelLinear,
     LinearBase,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    apply_fp32_row_parallel_linear,
     should_use_fp32_row_parallel_accum,
 )
 from sglang.multimodal_gen.runtime.layers.vocab_parallel_embedding import (
@@ -464,9 +464,7 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 self.base_layer, input_parallel
             )
         if not self.merged and not self.disable_lora:
-            lora_dtype = (
-                torch.float32 if use_fp32_row_parallel_accum else lora_A.dtype
-            )
+            lora_dtype = torch.float32 if use_fp32_row_parallel_accum else lora_A.dtype
             input_parallel_lora = input_parallel.to(dtype=lora_dtype)
             lora_A_sliced = self.slice_lora_a_weights(
                 lora_A.to(

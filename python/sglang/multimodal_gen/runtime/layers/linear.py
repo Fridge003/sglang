@@ -473,9 +473,7 @@ class ColumnParallelLinear(LinearBase):
             self, input_
         )
         if use_fp32_column_parallel_accum:
-            output_parallel = apply_fp32_column_parallel_linear(
-                self, input_, bias=bias
-            )
+            output_parallel = apply_fp32_column_parallel_linear(self, input_, bias=bias)
         else:
             output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
