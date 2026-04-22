@@ -34,7 +34,10 @@ pynvml = import_pynvml()  # type: ignore[no-untyped-call]
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
-torch.backends.cuda.enable_cudnn_sdp(False)
+# Allow opt-out via env var for models where CUDNN SDPA alignment is required
+# (e.g., LTX-2.3 HQ alignment with official which uses CUDNN batch-invariant kernel).
+if not envs.SGLANG_DIFFUSION_LTX2_FORCE_CUDNN_SDPA:
+    torch.backends.cuda.enable_cudnn_sdp(False)
 
 
 def device_id_to_physical_device_id(device_id: int) -> int:

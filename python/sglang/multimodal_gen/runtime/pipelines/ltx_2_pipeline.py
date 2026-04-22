@@ -142,8 +142,9 @@ def build_official_ltx2_sigmas(
 
     if stretch:
         one_minus_z = 1.0 - shifted[non_zero_mask]
-        scale_factor = one_minus_z[-1] / (1.0 - terminal)
-        shifted[non_zero_mask] = 1.0 - (one_minus_z / scale_factor)
+        if bool(torch.any(one_minus_z != 0)):
+            scale_factor = one_minus_z[-1] / (1.0 - terminal)
+            shifted[non_zero_mask] = 1.0 - (one_minus_z / scale_factor)
 
     return shifted[:-1].tolist()
 

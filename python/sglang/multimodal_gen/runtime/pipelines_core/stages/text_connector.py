@@ -171,6 +171,45 @@ class LTX2TextConnectorStage(PipelineStage):
             batch.negative_prompt_embeds = [neg_embeds]
             batch.negative_audio_prompt_embeds = [neg_audio_embeds]
             batch.negative_attention_mask = neg_mask
+
+            inject_path = envs.SGLANG_DIFFUSION_LTX2_INJECT_CONNECTOR_OUTPUT
+            if inject_path:
+                print(
+                    f"[INJECT_CONNECTOR] loading official dump from {inject_path}",
+                    flush=True,
+                )
+                inj = torch.load(str(inject_path), map_location="cpu")
+                print(
+                    f"[INJECT_CONNECTOR] pre-inject shapes: "
+                    f"pos={tuple(pos_embeds.shape)} neg={tuple(neg_embeds.shape)}; "
+                    f"dump pos={tuple(inj['positive_prompt_embeds'].shape)} "
+                    f"dump pos_audio={tuple(inj['positive_audio_prompt_embeds'].shape)}",
+                    flush=True,
+                )
+                tgt_device = pos_embeds.device
+                tgt_dtype = pos_embeds.dtype
+                batch.prompt_embeds = [
+                    inj["positive_prompt_embeds"].to(device=tgt_device, dtype=tgt_dtype)
+                ]
+                batch.audio_prompt_embeds = [
+                    inj["positive_audio_prompt_embeds"].to(
+                        device=tgt_device, dtype=tgt_dtype
+                    )
+                ]
+                batch.prompt_attention_mask = inj["positive_attention_mask"].to(
+                    device=tgt_device
+                )
+                batch.negative_prompt_embeds = [
+                    inj["negative_prompt_embeds"].to(device=tgt_device, dtype=tgt_dtype)
+                ]
+                batch.negative_audio_prompt_embeds = [
+                    inj["negative_audio_prompt_embeds"].to(
+                        device=tgt_device, dtype=tgt_dtype
+                    )
+                ]
+                batch.negative_attention_mask = inj["negative_attention_mask"].to(
+                    device=tgt_device
+                )
         else:
             dump_probe_payload(
                 batch,

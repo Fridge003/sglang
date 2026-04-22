@@ -4,6 +4,7 @@ from unittest.mock import patch
 from sglang.multimodal_gen.configs.sample.ltx_2 import LTX23SamplingParams
 from sglang.multimodal_gen.runtime.pipelines.ltx_2_pipeline import (
     _add_ltx2_stage1_generation_stages,
+    build_official_ltx2_sigmas,
 )
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
     LTX2DenoisingStage,
@@ -46,6 +47,13 @@ def test_ltx23_sampling_params_copies_stage1_block_lists():
 
     assert extra["ltx2_stage1_guider_params"]["video_stg_blocks"] == [7, 9]
     assert extra["ltx2_stage1_guider_params"]["audio_stg_blocks"] == [3]
+
+
+def test_build_official_ltx2_sigmas_handles_single_step_without_nan():
+    sigmas = build_official_ltx2_sigmas(1, number_of_tokens=1024)
+
+    assert len(sigmas) == 1
+    assert sigmas[0] == 1.0
 
 
 def test_ltx2_hq_stage1_guider_defaults_merge_request_overrides():

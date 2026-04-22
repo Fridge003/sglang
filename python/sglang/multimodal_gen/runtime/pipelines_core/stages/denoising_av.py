@@ -3,6 +3,7 @@ import copy
 import torch
 from diffusers.utils.torch_utils import randn_tensor
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import is_ltx23_native_variant
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import (
@@ -11,6 +12,7 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.ltx_2_denoising import 
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
+from sglang.multimodal_gen.runtime.utils.probe_utils import dump_probe_payload
 
 logger = init_logger(__name__)
 
@@ -124,8 +126,16 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         vae=None,
         audio_vae=None,
         pipeline=None,
+        sampler_name: str = "res2s",
     ):
-        super().__init__(transformer, scheduler, vae, audio_vae, pipeline=pipeline)
+        super().__init__(
+            transformer,
+            scheduler,
+            vae,
+            audio_vae,
+            pipeline=pipeline,
+            sampler_name=sampler_name,
+        )
         self.distilled_sigmas = torch.tensor(distilled_sigmas)
 
     @staticmethod
@@ -239,6 +249,34 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 audio_noise * audio_scaled_mask
                 + batch.audio_latents * (1 - audio_scaled_mask)
             ).to(batch.audio_latents.dtype)
+
+        if envs.SGLANG_DIFFUSION_PROBE_DIR:
+            dump_probe_payload(
+                batch,
+                "stage2/noised_input",
+                {
+                    "video_state": {"latent": batch.latents},
+                    "audio_state": {"latent": batch.audio_latents},
+                },
+            )
+
+        inject_path = envs.SGLANG_DIFFUSION_LTX2_INJECT_STAGE2_NOISED_INPUT
+        if inject_path:
+            inj = torch.load(str(inject_path), map_location="cpu")
+            off_v = inj["video_state"]["latent"]
+            off_a = inj["audio_state"]["latent"]
+            print(
+                f"[INJECT_STAGE2_NOISED] loading {inject_path}; native pre-inject: "
+                f"video={tuple(batch.latents.shape)} audio={tuple(batch.audio_latents.shape) if batch.audio_latents is not None else None}; "
+                f"dump: video={tuple(off_v.shape)} audio={tuple(off_a.shape)}",
+                flush=True,
+            )
+            batch.latents = off_v.to(device=batch.latents.device, dtype=batch.latents.dtype)
+            if isinstance(batch.audio_latents, torch.Tensor):
+                batch.audio_latents = off_a.to(
+                    device=batch.audio_latents.device, dtype=batch.audio_latents.dtype
+                )
+
         if not is_ltx23_native_variant(
             server_args.pipeline_config.vae_config.arch_config
         ):
@@ -256,8 +294,23 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
 
         self.scheduler = copy.deepcopy(original_scheduler)
         distilled_device = self.scheduler.sigmas.device
-        self.scheduler.sigmas = self.distilled_sigmas.to(distilled_device)
         num_steps = len(self.distilled_sigmas) - 1
+        # Match official res2s loop: inject 0.0011 before terminal 0 so the
+        # last step still runs a full res2s update instead of returning
+        # denoised_sample directly (sigma_next==0 early-return).
+        if self.distilled_sigmas[-1].item() == 0.0:
+            injected = torch.cat(
+                [
+                    self.distilled_sigmas[:-1],
+                    torch.tensor(
+                        [0.0011, 0.0], dtype=self.distilled_sigmas.dtype
+                    ),
+                ],
+                dim=0,
+            )
+        else:
+            injected = self.distilled_sigmas
+        self.scheduler.sigmas = injected.to(distilled_device)
         self.scheduler.num_inference_steps = num_steps
         self.scheduler.timesteps = (self.distilled_sigmas[:num_steps] * 1000).to(
             distilled_device

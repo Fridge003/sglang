@@ -176,11 +176,13 @@ def _selected_internal_probe_block_indices(num_blocks: int) -> set[int]:
     return {idx for idx in selected if 0 <= idx < num_blocks}
 
 
-def _internal_probe_block_basename(block_idx: int, num_blocks: int) -> str:
+def _internal_probe_block_basename(
+    block_idx: int, num_blocks: int, phase: str = "stage1"
+) -> str:
     last_idx = num_blocks - 1
     if block_idx == last_idx:
-        return "stage1_transformer_block_last"
-    return f"stage1_transformer_block{block_idx}"
+        return f"{phase}_transformer_block_last"
+    return f"{phase}_transformer_block{block_idx}"
 
 
 def _maybe_dump_transformer_block_substep_probe(
@@ -723,6 +725,9 @@ class LTX2Attention(nn.Module):
         k_post_qk_norm: torch.Tensor | None = None
         q_post_rope: torch.Tensor | None = None
         k_post_rope: torch.Tensor | None = None
+        attn_kernel_out: torch.Tensor | None = None
+        pre_to_out: torch.Tensor | None = None
+        out_proj_probe: torch.Tensor | None = None
 
         if use_attention:
             raw_q, _ = self.to_q(x)
@@ -758,18 +763,6 @@ class LTX2Attention(nn.Module):
             q_post_rope = q
             k_post_rope = k
 
-        if internal_probe_path is not None:
-            probe_payload: dict[str, torch.Tensor | None] = {
-                "q_proj": raw_q,
-                "k_proj": raw_k,
-                "v_proj": raw_v,
-                "q_post_qk_norm": q_post_qk_norm,
-                "k_post_qk_norm": k_post_qk_norm,
-                "q_post_rope": q_post_rope,
-                "k_post_rope": k_post_rope,
-            }
-            _maybe_dump_internal_probe(internal_probe_path, probe_payload)
-
         v = v.view(*v.shape[:-1], self.local_heads, self.dim_head)
         if use_attention:
             q = q.view(*q.shape[:-1], self.local_heads, self.dim_head)
@@ -803,6 +796,7 @@ class LTX2Attention(nn.Module):
                     attn_mask=mask,
                     skip_sequence_parallel_override=skip_sequence_parallel_override,
                 )
+            attn_kernel_out = out.flatten(2)
 
             if perturbation_mask is not None:
                 if perturbation_mask.ndim == out.ndim - 1:
@@ -820,7 +814,26 @@ class LTX2Attention(nn.Module):
             out = out.view(b, t, self.local_heads * self.dim_head)
 
         out_flat = out.flatten(2)
+        pre_to_out = out_flat
         out_proj, _ = self.to_out[0](out_flat)
+        out_proj_probe = out_proj
+
+        if internal_probe_path is not None:
+            probe_payload: dict[str, torch.Tensor | None] = {
+                "q_proj": raw_q,
+                "k_proj": raw_k,
+                "v_proj": raw_v,
+                "q_post_qk_norm": q_post_qk_norm,
+                "k_post_qk_norm": k_post_qk_norm,
+                "q_post_rope": q_post_rope,
+                "k_post_rope": k_post_rope,
+                "attn_kernel_out": attn_kernel_out,
+                "pre_to_out": pre_to_out,
+                "out_proj": out_proj_probe,
+                "to_out_weight": self.to_out[0].weight,
+                "to_out_bias": self.to_out[0].bias,
+            }
+            _maybe_dump_internal_probe(internal_probe_path, probe_payload)
 
         return out_proj
 
@@ -1160,6 +1173,18 @@ class LTX2TransformerBlock(nn.Module):
             mod_encoder_hidden_states = (
                 encoder_hidden_states * (1 + v_prompt_scale) + v_prompt_shift
             )
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_inputs",
+                ),
+                {
+                    "video_attn_input": norm_hidden_states,
+                    "video_context": mod_encoder_hidden_states,
+                    "video_context_mask": encoder_attention_mask,
+                },
+            )
             attn_hidden_states = self.attn2(
                 norm_hidden_states,
                 context=mod_encoder_hidden_states,
@@ -1182,6 +1207,18 @@ class LTX2TransformerBlock(nn.Module):
             mod_audio_encoder_hidden_states = (
                 audio_encoder_hidden_states * (1 + a_prompt_scale) + a_prompt_shift
             )
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_inputs_audio",
+                ),
+                {
+                    "audio_attn_input": norm_audio_hidden_states,
+                    "audio_context": mod_audio_encoder_hidden_states,
+                    "audio_context_mask": audio_encoder_attention_mask,
+                },
+            )
             attn_audio_hidden_states = self.audio_attn2(
                 norm_audio_hidden_states,
                 context=mod_audio_encoder_hidden_states,
@@ -1190,8 +1227,31 @@ class LTX2TransformerBlock(nn.Module):
             audio_hidden_states = (
                 audio_hidden_states + attn_audio_hidden_states * agate_q
             )
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_delta",
+                ),
+                {
+                    "video_delta": attn_hidden_states,
+                    "audio_delta": attn_audio_hidden_states,
+                },
+            )
         else:
             norm_hidden_states = rms_norm(hidden_states, self.norm_eps)
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_inputs",
+                ),
+                {
+                    "video_attn_input": norm_hidden_states,
+                    "video_context": encoder_hidden_states,
+                    "video_context_mask": encoder_attention_mask,
+                },
+            )
             attn_hidden_states = self.attn2(
                 norm_hidden_states,
                 context=encoder_hidden_states,
@@ -1200,12 +1260,35 @@ class LTX2TransformerBlock(nn.Module):
             hidden_states = hidden_states + attn_hidden_states
 
             norm_audio_hidden_states = rms_norm(audio_hidden_states, self.norm_eps)
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_inputs_audio",
+                ),
+                {
+                    "audio_attn_input": norm_audio_hidden_states,
+                    "audio_context": audio_encoder_hidden_states,
+                    "audio_context_mask": audio_encoder_attention_mask,
+                },
+            )
             attn_audio_hidden_states = self.audio_attn2(
                 norm_audio_hidden_states,
                 context=audio_encoder_hidden_states,
                 mask=audio_encoder_attention_mask,
             )
             audio_hidden_states = audio_hidden_states + attn_audio_hidden_states
+            _maybe_dump_internal_probe(
+                _derive_transformer_block_probe_file(
+                    internal_probe_root_path,
+                    internal_probe_basename,
+                    "prompt_cross_delta",
+                ),
+                {
+                    "video_delta": attn_hidden_states,
+                    "audio_delta": attn_audio_hidden_states,
+                },
+            )
         _maybe_dump_transformer_block_substep_probe(
             internal_probe_root_path,
             internal_probe_basename,
@@ -1965,6 +2048,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         skip_video_self_attn_blocks = set(skip_video_self_attn_blocks or ())
         skip_audio_self_attn_blocks = set(skip_audio_self_attn_blocks or ())
         internal_probe_root_path = kwargs.get("_sglang_internal_probe_path")
+        internal_probe_phase = str(kwargs.get("_sglang_internal_probe_phase", "stage1"))
         probe_block_indices = _selected_internal_probe_block_indices(
             len(self.transformer_blocks)
         )
@@ -2021,7 +2105,7 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             internal_probe_basename = None
             if internal_probe_root_path and block.idx in probe_block_indices:
                 internal_probe_basename = _internal_probe_block_basename(
-                    block.idx, len(self.transformer_blocks)
+                    block.idx, len(self.transformer_blocks), internal_probe_phase
                 )
                 _maybe_dump_internal_probe(
                     _derive_internal_probe_path(

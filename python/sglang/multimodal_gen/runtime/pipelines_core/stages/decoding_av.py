@@ -1,5 +1,6 @@
 import torch
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBatch, Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.decoding import DecodingStage
@@ -32,6 +33,21 @@ class LTX2AVDecodingStage(DecodingStage):
 
     def forward(self, batch: Req, server_args: ServerArgs) -> OutputBatch:
         self.load_model()
+
+        inject_path = envs.SGLANG_DIFFUSION_LTX2_INJECT_STAGE2_OUTPUT
+        if inject_path:
+            inj = torch.load(str(inject_path), map_location="cpu")
+            off_v = inj["video_state"]["latent"]
+            off_a = inj["audio_state"]["latent"]
+            print(
+                f"[INJECT_STAGE2] loading {inject_path}; native pre-inject: "
+                f"video={tuple(batch.latents.shape)} audio={tuple(batch.audio_latents.shape) if batch.audio_latents is not None else None}; "
+                f"dump: video={tuple(off_v.shape)} audio={tuple(off_a.shape)}",
+                flush=True,
+            )
+            batch.latents = off_v.to(device=batch.latents.device, dtype=batch.latents.dtype)
+            if batch.audio_latents is not None:
+                batch.audio_latents = off_a.to(device=batch.audio_latents.device, dtype=batch.audio_latents.dtype)
 
         self.vae = self.vae.to(get_local_torch_device())
         self.vae.eval()

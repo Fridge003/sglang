@@ -1,5 +1,6 @@
 import torch
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.runtime.distributed import get_local_torch_device
 from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import Req
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
@@ -127,8 +128,48 @@ class LTX2UpsampleStage(PipelineStage):
             prefetch_stage2()
 
         device = get_local_torch_device()
+
+        inject_path = envs.SGLANG_DIFFUSION_LTX2_INJECT_STAGE1_OUTPUT
+        if inject_path:
+            print(
+                f"[INJECT_STAGE1] loading official stage1 output from {inject_path}",
+                flush=True,
+            )
+            inj = torch.load(str(inject_path), map_location="cpu")
+            off_v = inj["video_state"]["latent"]
+            off_a = inj["audio_state"]["latent"]
+            print(
+                f"[INJECT_STAGE1] native pre-inject: video={tuple(batch.latents.shape)} "
+                f"audio={tuple(batch.audio_latents.shape) if batch.audio_latents is not None else None}; "
+                f"dump: video={tuple(off_v.shape)} audio={tuple(off_a.shape)}",
+                flush=True,
+            )
+            batch.latents = off_v.to(device=batch.latents.device, dtype=batch.latents.dtype)
+            if batch.audio_latents is not None:
+                batch.audio_latents = off_a.to(
+                    device=batch.audio_latents.device, dtype=batch.audio_latents.dtype
+                )
+
         latents = self._upsample_video_latents(batch.latents, server_args, device)
         logger.info("Upsampled video latents: %s", list(latents.shape))
+
+        up_inject = envs.SGLANG_DIFFUSION_LTX2_INJECT_UPSAMPLE_OUTPUT
+        if up_inject:
+            inj = torch.load(str(up_inject), map_location="cpu")
+            off_up = inj["upscaled_video_latent"]
+            off_audio = inj["audio_latent_pre_stage2"]
+            print(
+                f"[INJECT_UPSAMPLE] loading {up_inject}; native_pre: video={tuple(latents.shape)} "
+                f"audio={tuple(batch.audio_latents.shape) if batch.audio_latents is not None else None}; "
+                f"dump: video={tuple(off_up.shape)} audio={tuple(off_audio.shape)}",
+                flush=True,
+            )
+            latents = off_up.to(device=latents.device, dtype=latents.dtype)
+            if batch.audio_latents is not None:
+                batch.audio_latents = off_audio.to(
+                    device=batch.audio_latents.device, dtype=batch.audio_latents.dtype
+                )
+
         self._restore_full_resolution(batch)
         self._pack_video_latents(batch, latents, server_args)
         logger.info(
