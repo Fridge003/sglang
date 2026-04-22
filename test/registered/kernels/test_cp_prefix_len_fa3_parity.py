@@ -7,6 +7,7 @@ full-sequence FA3 reference computed over the unpadded `(prefix + extend)`
 KV. Any discrepancy indicates the metadata function emitted wrong
 `cache_seqlens` for at least one rank.
 """
+
 import unittest
 from unittest.mock import patch
 
@@ -24,7 +25,7 @@ _DEVICE = "cuda"
 _DTYPE = torch.bfloat16
 _HEAD_NUM = 8
 _HEAD_DIM = 128
-_SCALE = _HEAD_DIM ** -0.5
+_SCALE = _HEAD_DIM**-0.5
 
 
 class TestCPPrefixLenFA3Parity(CustomTestCase):
@@ -66,9 +67,7 @@ class TestCPPrefixLenFA3Parity(CustomTestCase):
 
         # CP path sees tensors padded to `ceil_align(extend, cp_size)`,
         # matching what `prepare_mlp_sync_batch` does in production.
-        zeros = torch.zeros(
-            pad, _HEAD_NUM, _HEAD_DIM, device=_DEVICE, dtype=_DTYPE
-        )
+        zeros = torch.zeros(pad, _HEAD_NUM, _HEAD_DIM, device=_DEVICE, dtype=_DTYPE)
         q_padded = torch.cat([q_full, zeros], dim=0)
         k_padded = torch.cat([k_full, zeros], dim=0)
         v_padded = torch.cat([v_full, zeros], dim=0)
