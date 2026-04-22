@@ -98,10 +98,7 @@ url = "https://docs.sglang.ai/whl/cu130/"
 explicit = true
 
 [tool.uv.sources]
-torch = [
-  { index = "pypi", marker = "platform_machine == 'x86_64'"},
-  { index = "torch-cu129", marker = "platform_machine == 'aarch64'"},
-]
+torch = { index = "torch-cu130" }
 torchvision = { index = "torch-cu130" }
 torchaudio = { index = "torch-cu130" }
 sglang-kernel = { index = "sglang-kernel-cu130" }
