@@ -45,10 +45,79 @@ def _load_json(path: str) -> dict:
         return json.load(f)
 
 
+def _load_checkpoint_config(path: str) -> dict:
+    with safe_open(path, framework="pt") as f:
+        metadata = f.metadata()
+    if metadata is None or "config" not in metadata:
+        raise ValueError(f"Missing config metadata in checkpoint: {path}")
+    return json.loads(metadata["config"])
+
+
 def _write_json(path: str, payload: dict) -> None:
     with open(path, "w") as f:
         json.dump(payload, f, indent=2)
         f.write("\n")
+
+
+def _build_text_encoder_config() -> dict:
+    return {
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "boi_token_index": 255999,
+        "eoi_token_index": 256000,
+        "eos_token_id": [1, 106],
+        "image_token_id": 262144,
+        "image_token_index": 262144,
+        "initializer_range": 0.02,
+        "mm_tokens_per_image": 256,
+        "model_type": "gemma3",
+        "text_config": {
+            "attention_bias": False,
+            "attention_dropout": 0.0,
+            "attn_logit_softcapping": None,
+            "cache_implementation": "hybrid",
+            "final_logit_softcapping": None,
+            "head_dim": 256,
+            "hidden_activation": "gelu_pytorch_tanh",
+            "hidden_size": 3840,
+            "initializer_range": 0.02,
+            "intermediate_size": 15360,
+            "max_position_embeddings": 131072,
+            "model_type": "gemma3_text",
+            "num_attention_heads": 16,
+            "num_hidden_layers": 48,
+            "num_key_value_heads": 8,
+            "query_pre_attn_scalar": 256,
+            "rms_norm_eps": 1e-6,
+            "rope_local_base_freq": 10000,
+            "rope_scaling": {
+                "factor": 8.0,
+                "rope_type": "linear",
+            },
+            "rope_theta": 1000000,
+            "sliding_window": 1024,
+            "sliding_window_pattern": 6,
+            "torch_dtype": "float32",
+            "use_cache": True,
+            "vocab_size": 262208,
+        },
+        "torch_dtype": "bfloat16",
+        "transformers_version": "4.51.0",
+        "vision_config": {
+            "attention_dropout": 0.0,
+            "hidden_act": "gelu_pytorch_tanh",
+            "hidden_size": 1152,
+            "image_size": 896,
+            "intermediate_size": 4304,
+            "layer_norm_eps": 1e-6,
+            "model_type": "siglip_vision_model",
+            "num_attention_heads": 16,
+            "num_channels": 3,
+            "num_hidden_layers": 27,
+            "patch_size": 14,
+            "torch_dtype": "float32",
+            "vision_use_head": False,
+        },
+    }
 
 
 def _rename_connector_key(key: str) -> str | None:
@@ -104,30 +173,73 @@ def _repack_connectors_weights(source_path: str, output_path: str) -> None:
     save_file(tensors, output_path)
 
 
-def _build_transformer_config(config_donor_dir: str) -> dict:
+def _build_transformer_config(
+    config_donor_dir: str, checkpoint_transformer_config: dict
+) -> dict:
     config = _load_json(os.path.join(config_donor_dir, "transformer", "config.json"))
+    config.update(checkpoint_transformer_config)
     config["_class_name"] = "LTX2VideoTransformer3DModel"
     config["ltx_variant"] = "ltx_2_3"
     config["cross_attention_adaln"] = True
     config["force_sdpa_v2a_cross_attention"] = True
     config["quantize_video_rope_coords_to_hidden_dtype"] = True
+    if "double_precision_rope" not in config:
+        config["double_precision_rope"] = (
+            config.get("frequencies_precision") == "float64"
+        )
     return config
 
 
-def _build_connectors_config(config_donor_dir: str) -> dict:
+def _build_connectors_config(
+    config_donor_dir: str, checkpoint_transformer_config: dict
+) -> dict:
+    transformer_config = _load_json(
+        os.path.join(config_donor_dir, "transformer", "config.json")
+    )
+    transformer_config.update(checkpoint_transformer_config)
     text_encoder_config = _load_json(
         os.path.join(config_donor_dir, "text_encoder", "config.json")
+    )
+    connector_max_pos = transformer_config.get("connector_positional_embedding_max_pos")
+    connector_rope_base_seq_len = (
+        1 if connector_max_pos is None else connector_max_pos[0]
+    )
+    connector_rope_type = transformer_config.get("rope_type", "interleaved")
+    rope_double_precision = bool(
+        transformer_config.get(
+            "double_precision_rope",
+            transformer_config.get("frequencies_precision", False) == "float64",
+        )
+    )
+    video_connector_num_attention_heads = transformer_config.get(
+        "connector_num_attention_heads", 30
+    )
+    video_connector_attention_head_dim = transformer_config.get(
+        "connector_attention_head_dim", 128
+    )
+    video_connector_num_layers = transformer_config.get("connector_num_layers", 2)
+    audio_connector_num_attention_heads = transformer_config.get(
+        "audio_connector_num_attention_heads",
+        video_connector_num_attention_heads,
+    )
+    audio_connector_attention_head_dim = transformer_config.get(
+        "audio_connector_attention_head_dim",
+        video_connector_attention_head_dim,
+    )
+    audio_connector_num_layers = transformer_config.get(
+        "audio_connector_num_layers",
+        video_connector_num_layers,
+    )
+    connector_apply_gated_attention = text_encoder_config.get(
+        "connector_apply_gated_attention",
+        transformer_config.get("connector_apply_gated_attention", False),
     )
     return {
         "_class_name": "LTX2TextConnectors",
         "_diffusers_version": "0.37.0.dev0",
-        "audio_connector_attention_head_dim": text_encoder_config[
-            "audio_connector_attention_head_dim"
-        ],
-        "audio_connector_num_attention_heads": text_encoder_config[
-            "audio_connector_num_attention_heads"
-        ],
-        "audio_connector_num_layers": text_encoder_config["audio_connector_num_layers"],
+        "audio_connector_attention_head_dim": audio_connector_attention_head_dim,
+        "audio_connector_num_attention_heads": audio_connector_num_attention_heads,
+        "audio_connector_num_layers": audio_connector_num_layers,
         "audio_connector_num_learnable_registers": text_encoder_config[
             "connector_num_learnable_registers"
         ],
@@ -136,30 +248,22 @@ def _build_connectors_config(config_donor_dir: str) -> dict:
         ],
         "caption_channels": text_encoder_config["hidden_size"],
         "causal_temporal_positioning": False,
-        "connector_apply_gated_attention": text_encoder_config[
-            "connector_apply_gated_attention"
-        ],
+        "connector_apply_gated_attention": connector_apply_gated_attention,
         "feature_extractor_in_features": text_encoder_config[
             "feature_extractor_in_features"
         ],
-        "connector_rope_base_seq_len": text_encoder_config[
-            "connector_positional_embedding_max_pos"
-        ][0],
-        "rope_double_precision": text_encoder_config["connector_double_precision_rope"],
+        "connector_rope_base_seq_len": connector_rope_base_seq_len,
+        "rope_double_precision": rope_double_precision,
         "rope_theta": text_encoder_config["connector_positional_embedding_theta"],
-        "rope_type": text_encoder_config["connector_rope_type"],
+        "rope_type": connector_rope_type,
         "text_proj_in_factor": text_encoder_config["feature_extractor_in_features"]
         // text_encoder_config["hidden_size"],
         "video_feature_extractor_out_features": text_encoder_config[
             "video_feature_extractor_out_features"
         ],
-        "video_connector_attention_head_dim": text_encoder_config[
-            "connector_attention_head_dim"
-        ],
-        "video_connector_num_attention_heads": text_encoder_config[
-            "connector_num_attention_heads"
-        ],
-        "video_connector_num_layers": text_encoder_config["connector_num_layers"],
+        "video_connector_attention_head_dim": video_connector_attention_head_dim,
+        "video_connector_num_attention_heads": video_connector_num_attention_heads,
+        "video_connector_num_layers": video_connector_num_layers,
         "video_connector_num_learnable_registers": text_encoder_config[
             "connector_num_learnable_registers"
         ],
@@ -248,18 +352,25 @@ def materialize(
             os.path.join(auxiliary_dir, component_name),
             os.path.join(output_dir, component_name),
         )
+    _write_json(
+        os.path.join(output_dir, "text_encoder", "config.json"),
+        _build_text_encoder_config(),
+    )
     _copytree_link_or_copy(
         os.path.join(config_donor_dir, "vocoder"),
         os.path.join(output_dir, "vocoder"),
     )
 
     source_checkpoint = os.path.join(source_dir, "ltx-2.3-22b-dev.safetensors")
+    checkpoint_transformer_config = _load_checkpoint_config(source_checkpoint).get(
+        "transformer", {}
+    )
 
     transformer_dir = os.path.join(output_dir, "transformer")
     _ensure_dir(transformer_dir)
     _write_json(
         os.path.join(transformer_dir, "config.json"),
-        _build_transformer_config(config_donor_dir),
+        _build_transformer_config(config_donor_dir, checkpoint_transformer_config),
     )
     _repack_transformer_weights(
         source_checkpoint, os.path.join(transformer_dir, "model.safetensors")
@@ -269,7 +380,7 @@ def materialize(
     _ensure_dir(connectors_dir)
     _write_json(
         os.path.join(connectors_dir, "config.json"),
-        _build_connectors_config(config_donor_dir),
+        _build_connectors_config(config_donor_dir, checkpoint_transformer_config),
     )
     _repack_connectors_weights(
         source_checkpoint, os.path.join(connectors_dir, "model.safetensors")
