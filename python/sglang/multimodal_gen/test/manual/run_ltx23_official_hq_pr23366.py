@@ -163,11 +163,50 @@ def _patch_official_builder_for_gemma_buffers() -> None:
         _materialize_known_meta_buffers(meta_model, device)
         return original_return_model(self, meta_model, device)
 
-    original_create_and_populate = gemma_encoder_configurator.create_and_populate
-
     def _patched_create_and_populate(module):
-        _restore_missing_gemma_config_attrs(module.model)
-        return original_create_and_populate(module)
+        model = module.model
+        _restore_missing_gemma_config_attrs(model)
+        v_model = model.model.vision_tower.vision_model
+        l_model = model.model.language_model
+
+        config = model.config.text_config
+        dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
+        base = getattr(
+            config,
+            "rope_local_base_freq",
+            GEMMA3_CONFIG_FOR_LTX.text_config.rope_local_base_freq,
+        )
+        rope_scaling = getattr(config, "rope_scaling", None)
+        if not isinstance(rope_scaling, dict) or "rope_type" not in rope_scaling:
+            rope_scaling = dataclasses.asdict(
+                GEMMA3_CONFIG_FOR_LTX.text_config.rope_scaling
+            )
+            config.rope_scaling = rope_scaling
+
+        local_rope_freqs = 1.0 / (
+            base
+            ** (
+                torch.arange(0, dim, 2, dtype=torch.int64).to(dtype=torch.float) / dim
+            )
+        )
+        inv_freqs, _ = gemma_encoder_configurator.ROPE_INIT_FUNCTIONS[
+            rope_scaling["rope_type"]
+        ](config)
+
+        positions_length = len(v_model.embeddings.position_ids[0])
+        position_ids = torch.arange(
+            positions_length, dtype=torch.long, device="cpu"
+        ).unsqueeze(0)
+        v_model.embeddings.register_buffer("position_ids", position_ids)
+        embed_scale = torch.tensor(
+            model.config.text_config.hidden_size**0.5, device="cpu"
+        )
+        l_model.embed_tokens.register_buffer("embed_scale", embed_scale)
+        l_model.rotary_emb_local.register_buffer("inv_freq", local_rope_freqs)
+        l_model.rotary_emb.register_buffer("inv_freq", inv_freqs)
+        return module
 
     gemma_encoder_configurator.create_and_populate = _patched_create_and_populate
     gemma_encoder_configurator.GEMMA_MODEL_OPS = (
