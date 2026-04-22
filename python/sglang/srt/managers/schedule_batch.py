@@ -2216,11 +2216,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # 1) self is always prefill, whose seq_lens is not a future
         # 2) other is always decode, which is finished in previous step
         # so verify_done is already synced and this is a no-op.
-        # In disagg decode + overlap, merge_batch can be called before
-        # filter_batch, so running_batch.seq_lens may still be a forward_stream
-        # future. Synchronize here to avoid a cross-stream data race.
-        if not envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get():
-            self.maybe_wait_verify_done()
+        # self.seq_lens may still be a forward_stream future (e.g. running decode
+        # batch whose verify hasn't finished yet on GPU), and the torch.cat below
+        # runs on schedule_stream. Always inject a cross-stream wait — under
+        # SGLANG_SPEC_V2_NO_VERIFY_SYNC, this resolves to wait_event (GPU-side
+        # stream sync, CPU non-blocking), preserving the no-sync speedup while
+        # closing the data race.
+        self.maybe_wait_verify_done()
 
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
         # orchestrator.merge() depends on Batch.reqs during preparation of each penalizers, so it

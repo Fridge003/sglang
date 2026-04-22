@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from sglang.srt.environ import envs
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.schedule_batch import ModelWorkerBatch, ScheduleBatch
 from sglang.srt.managers.utils import get_alloc_len_per_decode
@@ -22,7 +23,6 @@ from sglang.srt.model_executor.forward_batch_info import (
     ForwardBatch,
     ForwardMode,
 )
-from sglang.srt.environ import envs
 from sglang.srt.model_executor.model_runner import ModelRunner
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.eagle_utils import verify_tree_greedy_func
@@ -90,8 +90,10 @@ class EagleDraftInputV2Mixin:
 
         skip_cpu_sync = envs.SGLANG_SPEC_V2_NO_VERIFY_SYNC.get()
 
-        if not skip_cpu_sync:
-            batch.maybe_wait_verify_done()
+        # Always ensure schedule_stream is ordered after the prior iter's
+        # verify: under skip_cpu_sync this is a stream wait_event (no CPU
+        # block), otherwise a full host synchronize.
+        batch.maybe_wait_verify_done()
 
         page_size = batch.token_to_kv_pool_allocator.page_size
         cur_kv_lens_cpu = []
