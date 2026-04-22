@@ -150,3 +150,6 @@ else
     fi
     python3 setup.py install
 fi
+
+# Best-effort NIXL install for decode-radix disaggregation coverage.
+${PIP_CMD:-pip} install nixl ${PIP_INSTALL_SUFFIX:-} || echo "Warning: nixl install failed; continuing without nixl"

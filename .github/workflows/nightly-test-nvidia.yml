@@ -260,6 +260,7 @@ jobs:
     if: github.repository == 'sgl-project/sglang' && (inputs.job_filter == '' || inputs.job_filter == 'all' || inputs.job_filter == 'nightly-test-general-8-gpu-h20')
     runs-on: 8-gpu-h20
     env:
+      CU_VERSION: cu129
       SGLANG_CI_RDMA_ALL_DEVICES: "mlx5_1,mlx5_2,mlx5_3,mlx5_4"
     steps:
       - name: Checkout code

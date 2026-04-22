@@ -56,6 +56,7 @@ jobs:
     timeout-minutes: 120
     env:
       RUNNER_LABELS: ${{ inputs.runner_label }}
+      CU_VERSION: ${{ inputs.runner_label == '8-gpu-h20' && 'cu129' || 'cu130' }}
       SGLANG_CI_RDMA_ALL_DEVICES: ${{ inputs.runner_label == '8-gpu-h20' && 'mlx5_1,mlx5_2,mlx5_3,mlx5_4' || '' }}
     steps:
       - name: Checkout code
