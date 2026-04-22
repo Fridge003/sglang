@@ -20,14 +20,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
-from sglang.srt.mem_cache.radix_cache import (
-    RadixKey,
-    _key_match_page_size1,
-    _key_match_paged,
-    get_child_key,
-    maybe_bigram_convert,
-    page_align_keys,
-)
+from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.unified_cache_components import (
     _NUM_COMPONENT_TYPES,
     BASE_COMPONENT_TYPE,
@@ -40,7 +33,7 @@ from sglang.srt.mem_cache.unified_cache_components import (
     get_and_increase_time_counter,
 )
 from sglang.srt.mem_cache.utils import convert_to_bigram_key
-from sglang.srt.session.session_aware_cache import SessionAwareCache
+from sglang.srt.session.streaming_session import StreamingSession
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -190,13 +183,6 @@ class UnifiedRadixCache(BasePrefixCache):
         if params.enable_metrics:
             self.init_metrics_collector()
 
-        if self.page_size == 1:
-            self.key_match_fn = _key_match_page_size1
-            self.get_child_key_fn = get_child_key
-        else:
-            self.key_match_fn = partial(_key_match_paged, page_size=self.page_size)
-            self.get_child_key_fn = partial(get_child_key, page_size=self.page_size)
-
         assert params.tree_components is not None
         self.tree_components = tuple(params.tree_components)
         self.components: dict[ComponentType, TreeComponent] = {
@@ -210,12 +196,12 @@ class UnifiedRadixCache(BasePrefixCache):
         else:
             self.key_convert_fn = lambda key: key
 
-        # Streaming session: embedded SessionAwareCache with self as inner.
+        # Streaming session: embedded StreamingSession with self as inner.
+        # Always on -- zero overhead when no streaming session is open (the
+        # try_* entries short-circuit on non-streaming reqs / real TreeNodes).
         # Dispatch methods below pre-check conditions so the session's
         # internal fall-through to self.inner.xxx never fires -- no recursion.
-        self.session: Optional[SessionAwareCache] = (
-            SessionAwareCache(inner=self) if params.enable_streaming_session else None
-        )
+        self.session = StreamingSession(inner=self)
 
         self.reset()
         logger.info(f"Init Unified RadixTree with components {self.tree_components}")
@@ -231,17 +217,15 @@ class UnifiedRadixCache(BasePrefixCache):
         self.lru_lists = {
             ct: UnifiedLRUList(ct, self.tree_components) for ct in self.tree_components
         }
-        if self.session is not None:
-            self.session.slots.clear()
+        self.session.slots.clear()
 
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
-        if self.session is not None:
-            result = self.session.try_match_prefix(params)
-            if result is not None:
-                return result
+        result = self.session.try_match_prefix(params)
+        if result is not None:
+            return result
 
         key = params.key
-        key, _ = maybe_bigram_convert(self.is_eagle, key)
+        key, _ = key.maybe_to_bigram_view(self.is_eagle)
         if self.disable or len(key) == 0:
             return MatchResult(
                 device_indices=torch.empty(
@@ -252,9 +236,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 last_device_node=self.root_node,
                 last_host_node=self.root_node,
             )
-        if self.page_size != 1:
-            page_aligned_len = len(key) // self.page_size * self.page_size
-            key = key[:page_aligned_len]
+        key = key.page_aligned(self.page_size)
 
         value, last_node, best_value_len = self._match_prefix_helper(key)
         return self._match_post_processor(params, value, last_node, best_value_len)
@@ -265,10 +247,13 @@ class UnifiedRadixCache(BasePrefixCache):
 
         key = params.key
         value = params.value
-        if value is None:
-            value = torch.tensor([x for x in key.token_ids], dtype=torch.int64)
+        key, value = key.maybe_to_bigram_view(self.is_eagle, value)
+        key = key.page_aligned(self.page_size)
+        if value is not None:
+            value = value[: len(key)]
+        else:
+            value = torch.tensor(key.token_ids[: len(key)], dtype=torch.int64)
 
-        key, value = maybe_bigram_convert(self.is_eagle, key, value)
         result = self._insert_helper(self.root_node, key, value, params)
         return result
 
@@ -289,10 +274,9 @@ class UnifiedRadixCache(BasePrefixCache):
         )
 
     def inc_lock_ref(self, node: Any) -> IncLockRefResult:
-        if self.session is not None:
-            result = self.session.try_inc_lock_ref(node)
-            if result is not None:
-                return result
+        result = self.session.try_inc_lock_ref(node)
+        if result is not None:
+            return result
         if self.disable:
             return IncLockRefResult()
         result = IncLockRefResult()
@@ -303,10 +287,9 @@ class UnifiedRadixCache(BasePrefixCache):
     def dec_lock_ref(
         self, node: Any, params: Optional[DecLockRefParams] = None
     ) -> DecLockRefResult:
-        if self.session is not None:
-            result = self.session.try_dec_lock_ref(node, params)
-            if result is not None:
-                return result
+        result = self.session.try_dec_lock_ref(node, params)
+        if result is not None:
+            return result
         if self.disable:
             return DecLockRefResult()
         for component in self._components_tuple:
@@ -315,9 +298,7 @@ class UnifiedRadixCache(BasePrefixCache):
         return DecLockRefResult()
 
     def cache_finished_req(self, req: Req, is_insert: bool = True, **kwargs) -> None:
-        if self.session is not None and self.session.try_cache_finished_req(
-            req, is_insert=is_insert, **kwargs
-        ):
+        if self.session.try_cache_finished_req(req, is_insert=is_insert, **kwargs):
             return
 
         kv_committed_len = req.pop_committed_kv_cache()
@@ -361,12 +342,11 @@ class UnifiedRadixCache(BasePrefixCache):
                 token_ids = token_ids[:effective_cache_len]
                 kv_indices = kv_indices[:effective_cache_len]
 
-            # Key convert + page align
-            keys = self.key_convert_fn(token_ids)
-            keys = page_align_keys(keys, self.page_size)
-            page_aligned_len = len(keys)
+            radix_key = RadixKey(
+                token_ids, req.extra_key, is_bigram=self.is_eagle
+            ).page_aligned(self.page_size)
+            page_aligned_len = len(radix_key)
             values = kv_indices[:page_aligned_len].to(dtype=torch.int64, copy=True)
-            radix_key = RadixKey(keys, req.extra_key, is_bigram=self.is_eagle)
 
             insert_params.key = radix_key
             insert_params.value = values
@@ -389,9 +369,7 @@ class UnifiedRadixCache(BasePrefixCache):
             )
 
     def cache_unfinished_req(self, req: Req, chunked=False, **kwargs) -> None:
-        if self.session is not None and self.session.try_cache_unfinished_req(
-            req, chunked=chunked, **kwargs
-        ):
+        if self.session.try_cache_unfinished_req(req, chunked=chunked, **kwargs):
             return
 
         token_ids = req.fill_ids
@@ -430,12 +408,13 @@ class UnifiedRadixCache(BasePrefixCache):
 
         kv_indices = kv_indices_orig[:effective_cache_len]
 
-        # Key convert + page align
-        keys = self.key_convert_fn(token_ids[:effective_cache_len])
-        keys = page_align_keys(keys, self.page_size)
-        page_aligned_len = len(keys)
+        radix_key = RadixKey(
+            token_ids[:effective_cache_len],
+            req.extra_key,
+            is_bigram=self.is_eagle,
+        ).page_aligned(self.page_size)
+        page_aligned_len = len(radix_key)
         values = kv_indices[:page_aligned_len].to(dtype=torch.int64, copy=True)
-        radix_key = RadixKey(keys, req.extra_key, is_bigram=self.is_eagle)
 
         insert_params.key = radix_key
         insert_params.value = values
@@ -493,7 +472,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         Not used yet; reserved for future read-only match operations."""
         node = self.root_node
-        child_key = self.get_child_key_fn(key)
+        child_key = key.child_key(self.page_size)
         value: list[torch.Tensor] = []
         best_value_len = 0
         best_node = node
@@ -509,7 +488,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         while len(key) > 0 and child_key in node.children:
             child = node.children[child_key]
-            prefix_len = self.key_match_fn(child.key, key)
+            prefix_len = child.key.match(key, page_size=self.page_size)
             if prefix_len < len(child.key):
                 # Read-only: do not split, ignore partial match and stop
                 break
@@ -518,14 +497,14 @@ class UnifiedRadixCache(BasePrefixCache):
             _update_best_if_valid(node)
             key = key[prefix_len:]
             if len(key):
-                child_key = self.get_child_key_fn(key)
+                child_key = key.child_key(self.page_size)
         return value, best_node, best_value_len
 
     def _match_prefix_helper(
         self, key: RadixKey
     ) -> tuple[list[torch.Tensor], UnifiedTreeNode, int]:
         node = self.root_node
-        child_key = self.get_child_key_fn(key)
+        child_key = key.child_key(self.page_size)
         value: list[torch.Tensor] = []
         best_value_len = 0
         best_node = node
@@ -541,7 +520,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         while len(key) > 0 and child_key in node.children:
             child = node.children[child_key]
-            prefix_len = self.key_match_fn(child.key, key)
+            prefix_len = child.key.match(key, page_size=self.page_size)
             if prefix_len < len(child.key):
                 node = self._split_node(child.key, child, prefix_len)
                 value.append(node.component_data[BASE_COMPONENT_TYPE].value)
@@ -552,7 +531,7 @@ class UnifiedRadixCache(BasePrefixCache):
             _update_best_if_valid(node)
             key = key[prefix_len:]
             if len(key):
-                child_key = self.get_child_key_fn(key)
+                child_key = key.child_key(self.page_size)
         return value, best_node, best_value_len
 
     def _match_post_processor(
@@ -596,7 +575,7 @@ class UnifiedRadixCache(BasePrefixCache):
         self, key: RadixKey, child: UnifiedTreeNode, split_len: int
     ) -> UnifiedTreeNode:
         new_node = UnifiedTreeNode(self.tree_components)
-        new_node.children = {self.get_child_key_fn(key[split_len:]): child}
+        new_node.children = {key[split_len:].child_key(self.page_size): child}
         new_node.parent = child.parent
         new_node.key = child.key[:split_len]
         new_node.component_data[BASE_COMPONENT_TYPE].value = (
@@ -613,7 +592,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         for component in self._components_tuple:
             component.redistribute_on_node_split(new_parent=new_node, child=child)
-        new_node.parent.children[self.get_child_key_fn(key)] = new_node
+        new_node.parent.children[key.child_key(self.page_size)] = new_node
 
         self._for_each_component_lru(new_node, UnifiedLRUList.insert_mru)
         self._for_each_component_lru(child, UnifiedLRUList.insert_mru)
@@ -635,7 +614,7 @@ class UnifiedRadixCache(BasePrefixCache):
         new_node.parent = parent
         new_node.key = key
         new_node.component_data[BASE_COMPONENT_TYPE].value = value.clone()
-        parent.children[self.get_child_key_fn(key)] = new_node
+        parent.children[key.child_key(self.page_size)] = new_node
         self.lru_lists[BASE_COMPONENT_TYPE].insert_mru(new_node)
         self.component_evictable_size_[BASE_COMPONENT_TYPE] += len(value)
         return new_node
@@ -651,12 +630,12 @@ class UnifiedRadixCache(BasePrefixCache):
         if len(key) == 0:
             return InsertResult(prefix_len=0, mamba_exist=True)
 
-        child_key = self.get_child_key_fn(key)
+        child_key = key.child_key(self.page_size)
         total_prefix_length = 0
         while len(key) > 0 and child_key in node.children:
             node = node.children[child_key]
             self._touch_node(node)
-            prefix_len = self.key_match_fn(node.key, key)
+            prefix_len = node.key.match(key, page_size=self.page_size)
             if prefix_len < len(node.key):
                 node = self._split_node(node.key, node, prefix_len)
 
@@ -683,7 +662,7 @@ class UnifiedRadixCache(BasePrefixCache):
             key = key[prefix_len:]
             value = value[prefix_len:]
             if len(key):
-                child_key = self.get_child_key_fn(key)
+                child_key = key.child_key(self.page_size)
 
         is_new_leaf = False
         # Create new leaf for remaining suffix
@@ -746,7 +725,7 @@ class UnifiedRadixCache(BasePrefixCache):
             self._iteratively_delete_tombstone_leaf(node, tracker)
 
     def _remove_leaf_from_parent(self, node: UnifiedTreeNode):
-        key = self.get_child_key_fn(node.key)
+        key = node.key.child_key(self.page_size)
         v = node.parent.children.pop(key, None)
         assert v == node
 
@@ -813,33 +792,24 @@ class UnifiedRadixCache(BasePrefixCache):
     def supports_mamba(self) -> bool:
         return ComponentType.MAMBA in self.components
 
-    # ---- Streaming session API (delegates to composed SessionImpl) ----
+    # ---- Streaming session API (delegates to composed StreamingSession) ----
 
     def supports_streaming_session(self) -> bool:
-        return self.session is not None
+        return True
 
     def release_session(self, session_id: str) -> None:
-        if self.session is not None:
-            self.session.release_session(session_id)
+        self.session.release_session(session_id)
 
     def session_held_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
-        if self.session is None:
-            return 0
         return self.session.session_held_tokens(active_pool_idxs)
 
     def session_held_full_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
-        if self.session is None:
-            return 0
         return self.session.session_held_full_tokens(active_pool_idxs)
 
     def session_held_swa_tokens(self, active_pool_idxs: Optional[set] = None) -> int:
-        if self.session is None:
-            return 0
         return self.session.session_held_swa_tokens(active_pool_idxs)
 
     def session_held_req_count(self, active_pool_idxs: Optional[set] = None) -> int:
-        if self.session is None:
-            return 0
         return self.session.session_held_req_count(active_pool_idxs)
 
     def evictable_size(self) -> int:
@@ -964,7 +934,7 @@ class UnifiedRadixCache(BasePrefixCache):
         # Skip when streaming sessions hold tree locks: the check asserts
         # all nodes are unlocked during idle, which streaming sessions break
         # by design (they hold a first-turn lock across turns).
-        if self.session is not None and self.session.any_holding_kv():
+        if self.session.any_holding_kv():
             return
         try:
             # 1. Collect all nodes from tree
