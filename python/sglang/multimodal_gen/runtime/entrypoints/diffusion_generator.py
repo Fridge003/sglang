@@ -382,6 +382,11 @@ class DiffGenerator:
         """
         Sends a request to the scheduler and waits for a response.
         """
+        if self.local_scheduler_process:
+            return sync_scheduler_client.forward(
+                batch,
+                watch_processes=self.local_scheduler_process,
+            )
         return sync_scheduler_client.forward(batch)
 
     # LoRA

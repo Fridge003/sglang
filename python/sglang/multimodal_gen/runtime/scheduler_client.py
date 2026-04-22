@@ -75,12 +75,39 @@ class SchedulerClient:
             f"SchedulerClient connected to backend scheduler at {scheduler_endpoint}"
         )
 
-    def forward(self, batch: Any) -> Any:
+    def forward(
+        self,
+        batch: Any,
+        *,
+        watch_processes: list[Any] | None = None,
+        poll_timeout_ms: int = 1000,
+    ) -> Any:
         """Sends a batch or request to the scheduler and waits for the response."""
         try:
             self.scheduler_socket.send_pyobj(batch)
-            output_batch = self.scheduler_socket.recv_pyobj()
-            return output_batch
+            if not watch_processes:
+                return self.scheduler_socket.recv_pyobj()
+
+            while True:
+                if self.scheduler_socket.poll(timeout=poll_timeout_ms) & zmq.POLLIN:
+                    return self.scheduler_socket.recv_pyobj()
+
+                dead_processes = []
+                for process in watch_processes:
+                    if process is None:
+                        continue
+                    process.join(timeout=0)
+                    if not process.is_alive():
+                        dead_processes.append(process)
+                if dead_processes:
+                    details = ", ".join(
+                        f"{process.name}(pid={process.pid}, exitcode={process.exitcode})"
+                        for process in dead_processes
+                    )
+                    raise RuntimeError(
+                        "Scheduler process exited before replying: "
+                        f"{details}"
+                    )
         except zmq.error.Again:
             logger.error("Timeout waiting for response from scheduler.")
             raise TimeoutError("Scheduler did not respond in time.")
