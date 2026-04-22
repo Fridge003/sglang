@@ -46,7 +46,6 @@ The test passes if the maximum and mean differences are within the tolerance thr
 import argparse
 import json
 import os
-import pickle
 import random
 import unittest
 
@@ -82,7 +81,7 @@ TEMPERATURE = 1.0
 MAX_LEN = 20000
 
 # Default output files
-DEFAULT_BASELINE_PKL = "sglang_baseline_local.pkl"
+DEFAULT_BASELINE_JSON = "sglang_baseline_local.json"
 DEFAULT_META_JSON = "baseline_meta_preview.json"
 
 # Default engine configuration
@@ -97,14 +96,14 @@ DEFAULT_ENGINE_CONFIG = {
 
 
 def generate_baseline(
-    baseline_file=DEFAULT_BASELINE_PKL,
+    baseline_file=DEFAULT_BASELINE_JSON,
     meta_file=DEFAULT_META_JSON,
     num_samples=NUM_SAMPLES,
 ):
     """Generate a local baseline for logprobs testing.
 
     Args:
-        baseline_file: Path to save the baseline pickle file
+        baseline_file: Path to save the baseline JSON file
         meta_file: Path to save the metadata preview JSON file
         num_samples: Number of samples to generate
     """
@@ -200,8 +199,8 @@ def generate_baseline(
             )
 
         # Save baseline files
-        with open(baseline_file, "wb") as f:
-            pickle.dump(records, f)
+        with open(baseline_file, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False)
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump(records[:2], f, ensure_ascii=False, indent=2)
 
@@ -263,11 +262,11 @@ class TestLogprobsDense(unittest.TestCase):
 
         print(f"Loading local baseline from {baseline_file}...")
         try:
-            with open(baseline_file, "rb") as f:
-                records = pickle.load(f)
+            with open(baseline_file, "r", encoding="utf-8") as f:
+                records = json.load(f)
             print(f"Successfully loaded {len(records)} records from local baseline")
             return records
-        except (IOError, pickle.PickleError) as e:
+        except (IOError, json.JSONDecodeError) as e:
             raise Exception(f"Failed to load local baseline: {e}") from e
 
     def compare_meta(self, baseline_meta, sglang_meta):
@@ -493,7 +492,7 @@ def main():
         print("🚀 Generating baseline...")
         generate_baseline()
         print(f"\n✅ Baseline generation complete!")
-        print(f"📁 Baseline saved to: {DEFAULT_BASELINE_PKL}")
+        print(f"📁 Baseline saved to: {DEFAULT_BASELINE_JSON}")
         print(f"📁 Metadata preview saved to: {DEFAULT_META_JSON}")
         print(f"\n💡 Next steps:")
         print(f"   1. Make your code changes")
@@ -501,8 +500,8 @@ def main():
 
     elif args.mode == "test":
         print("🧪 Running logprobs test...")
-        if not os.path.exists(DEFAULT_BASELINE_PKL):
-            print(f"❌ Baseline file not found: {DEFAULT_BASELINE_PKL}")
+        if not os.path.exists(DEFAULT_BASELINE_JSON):
+            print(f"❌ Baseline file not found: {DEFAULT_BASELINE_JSON}")
             print(f"💡 Generate baseline first by running:")
             print(f"   python {__file__} gen")
             print(f"   This will download ShareGPT data and generate a local baseline.")
@@ -515,7 +514,7 @@ def main():
         test_instance = TestLogprobsDense()
         test_instance.setUpClass()
         try:
-            test_instance.test_logprobs_comparison(baseline_file=DEFAULT_BASELINE_PKL)
+            test_instance.test_logprobs_comparison(baseline_file=DEFAULT_BASELINE_JSON)
             print("\n✅ Test completed successfully!")
         finally:
             test_instance.tearDownClass()

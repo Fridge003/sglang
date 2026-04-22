@@ -224,3 +224,53 @@ binding = "PyO3"
 
 [tool.kernels.dependencies]
 "kernels-community/sgl-flash-attn3" = 1
+
+[tool.ruff]
+extend-exclude = [".claude/worktrees", "sgl-model-gateway/bindings/python/sglang_router"]
+
+[tool.ruff.lint]
+# Scope this config to TID251 only. The existing pre-commit F401/F821 hook
+# still runs independently with its own explicit --select flag.
+select = ["TID251"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "pickle is banned — use json, msgspec, or safetensors. For genuine IPC/distributed pickle, add a per-file-ignores entry with a one-line reason."
+"_pickle".msg = "pickle is banned — see above."
+"cPickle".msg = "pickle is banned — see above."
+"dill".msg = "dill is banned except for user-callable serialization — add a per-file-ignores entry."
+"cloudpickle".msg = "cloudpickle is banned except in multimodal_gen user-code paths — add a per-file-ignores entry."
+
+# Allowlist for files that genuinely need pickle. See .claude/pickle-migration.md
+# for rationale on each entry.
+[tool.ruff.lint.per-file-ignores]
+# Reads crash_dump_*.pkl written by tokenizer_manager.py (itself allowlisted)
+"test/registered/debug_utils/test_crash_dump.py" = ["TID251"]
+# Opaque ParameterServer.get_metas() payload from external checkpoint-engine dep
+"examples/checkpoint_engine/update.py" = ["TID251"]
+"python/sglang/srt/checkpoint_engine/update.py" = ["TID251"]
+# ZMQ IPC of custom EmbeddingData / Req across worker boundaries
+"python/sglang/srt/disaggregation/encode_server.py" = ["TID251"]
+"python/sglang/srt/disaggregation/encode_receiver.py" = ["TID251"]
+"python/sglang/srt/managers/tokenizer_manager.py" = ["TID251"]
+"python/sglang/srt/managers/mm_utils.py" = ["TID251"]
+"python/sglang/srt/managers/multi_tokenizer_mixin.py" = ["TID251"]
+# torch.distributed object exchange via uint8 tensors (NCCL moves tensors only)
+"python/sglang/srt/distributed/utils.py" = ["TID251"]
+"python/sglang/srt/distributed/parallel_state.py" = ["TID251"]
+"python/sglang/srt/distributed/naive_distributed.py" = ["TID251"]
+"python/sglang/srt/distributed/device_communicators/shm_broadcast.py" = ["TID251"]
+"python/sglang/srt/distributed/device_communicators/custom_all_reduce_utils.py" = ["TID251"]
+# broadcast_pyobj/point_to_point_pyobj + SafeUnpickler CVE-2025-10164 mitigation
+"python/sglang/srt/utils/common.py" = ["TID251"]
+# User-supplied callables (extensibility API)
+"python/sglang/srt/sampling/custom_logit_processor.py" = ["TID251"]
+"python/sglang/multimodal_gen/utils.py" = ["TID251"]
+# multimodal_gen ZMQ / distributed (mirrors srt/)
+"python/sglang/multimodal_gen/runtime/disaggregation/orchestrator.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/disaggregation/scheduler_mixin.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/scheduler_client.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/managers/scheduler.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/models/registry.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/distributed/group_coordinator.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/distributed/utils.py" = ["TID251"]
+"python/sglang/multimodal_gen/runtime/utils/distributed.py" = ["TID251"]

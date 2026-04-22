@@ -1,7 +1,7 @@
 import argparse
 import asyncio
+import json
 import os
-import pickle
 from pathlib import Path
 from typing import List
 
@@ -9,6 +9,7 @@ import openai
 import torch
 from bert_score import BERTScorer
 from datasets import load_dataset
+from openai.types.chat import ChatCompletion
 from tqdm import tqdm
 
 
@@ -31,7 +32,7 @@ async def fetch_response(
     model: str,
     output_dir: Path,
 ):
-    output_file = output_dir / f"response_{index}.pkl"
+    output_file = output_dir / f"response_{index}.json"
     if output_file.exists():
         return
 
@@ -55,12 +56,12 @@ async def fetch_response(
                 max_tokens=512,
             )
         except openai.BadRequestError as e:
-            with open(output_file, "wb") as f:
-                pickle.dump({"error": str(e)}, f)
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump({"error": str(e)}, f)
             return
 
-    with open(output_file, "wb") as f:
-        pickle.dump(response, f)
+    with open(output_file, "w", encoding="utf-8") as f:
+        f.write(response.model_dump_json())
 
 
 async def benchmark(args):
@@ -107,14 +108,17 @@ def analyse(args):
     for idx, ex in enumerate(tqdm(dataset, desc="Loading responses")):
         if idx >= args.num_prompts:
             break
-        pkl_file = output_dir / f"response_{idx}.pkl"
-        if not pkl_file.exists():
-            raise FileNotFoundError(pkl_file)
+        json_file = output_dir / f"response_{idx}.json"
+        if not json_file.exists():
+            raise FileNotFoundError(json_file)
 
-        response = pickle.load(open(pkl_file, "rb"))
-        if isinstance(response, dict) and "error" in response:
+        with open(json_file, "r", encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
+        if isinstance(data, dict) and "error" in data:
             continue
 
+        response = ChatCompletion.model_validate_json(raw)
         hyps.append(response.choices[0].message.content.strip())
         refs.append(ex["answer"])
 

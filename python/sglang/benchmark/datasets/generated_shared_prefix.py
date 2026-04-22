@@ -1,12 +1,12 @@
-import pickle
 import random
 import uuid
 from argparse import Namespace
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List
 
+import msgspec
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
@@ -84,7 +84,7 @@ def get_gen_prefix_cache_path(
     cache_key = (
         f"gen_shared_prefix_{seed}_{num_groups}_{prompts_per_group}_"
         f"{system_prompt_len}_{question_len}_{output_len}_"
-        f"{tokenizer.__class__.__name__}.pkl"
+        f"{tokenizer.__class__.__name__}.msgpack"
     )
     return cache_dir / cache_key
 
@@ -119,7 +119,8 @@ def sample_generated_shared_prefix_requests(
     if cache_path.exists() and should_cache:
         print(f"\nLoading cached generated input data from {cache_path}")
         with open(cache_path, "rb") as f:
-            return pickle.load(f)
+            cached = msgspec.msgpack.decode(f.read())
+        return [DatasetRow(**row) for row in cached]
 
     print(
         f"\nGenerating new input data... "
@@ -226,6 +227,6 @@ def sample_generated_shared_prefix_requests(
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Caching generated input data to {cache_path}")
         with open(cache_path, "wb") as f:
-            pickle.dump(input_requests, f)
+            f.write(msgspec.msgpack.encode([asdict(r) for r in input_requests]))
 
     return input_requests

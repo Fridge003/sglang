@@ -2,8 +2,8 @@
 
 import argparse
 import asyncio
+import json
 import os
-import pickle
 import re
 import shutil
 from collections import defaultdict
@@ -14,6 +14,7 @@ import numpy as np
 import openai
 from datasets import load_dataset
 from openai import AsyncOpenAI
+from openai.types.completion import Completion
 from tqdm import tqdm
 
 # Mapping providers to their clients and models
@@ -39,7 +40,7 @@ provider_to_models = {
 async def fetch_responses(
     client, prompt, semaphore, index, provider, model_size, output_dir, max_tokens
 ):
-    output_file = os.path.join(output_dir, f"response_{index}.pkl")
+    output_file = os.path.join(output_dir, f"response_{index}.json")
     if os.path.exists(output_file):
         print(f"File {output_file} already exists, skipping.")
         return
@@ -52,12 +53,12 @@ async def fetch_responses(
             max_tokens=max_tokens,
         )
         if isinstance(response, openai.BadRequestError):
-            with open(output_file, "wb") as f:
-                pickle.dump("bad_response", f)
+            with open(output_file, "w", encoding="utf-8") as f:
+                json.dump("bad_response", f)
         assert isinstance(response, openai.types.completion.Completion)
         # Save response to a file
-        with open(output_file, "wb") as f:
-            pickle.dump(response, f)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(response.model_dump_json())
 
 
 TASK_TO_MAX_TOKENS = {
@@ -225,10 +226,13 @@ def analyze(task, response_path, model_size):
     total = len(ds["latest"])
 
     for i in range(0, total):
-        response = pickle.load(
-            open(os.path.join(response_path, f"response_{i}.pkl"), "rb")
-        )
-        responses.append(response)
+        with open(os.path.join(response_path, f"response_{i}.json"), "r", encoding="utf-8") as f:
+            raw = f.read()
+        data = json.loads(raw)
+        if data == "bad_response":
+            responses.append(None)
+            continue
+        responses.append(Completion.model_validate_json(raw))
 
     @dataclass
     class Stats:

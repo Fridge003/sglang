@@ -42,6 +42,22 @@ repos:
           python/sglang/srt/grpc/.*_pb2\.pyi$|
           python/sglang/srt/grpc/.*_pb2_grpc\.pyi$|
           )$
+      - id: ruff
+        alias: ruff-tid251
+        name: ruff (TID251 pickle ban)
+        args:
+          - --select=TID251
+          - --config=python/pyproject.toml
+        files: ^(benchmark/|docs/|examples/|python/sglang/|sgl-model-gateway/py_*|test/)
+        exclude: |
+          (?x)^(
+          .*/__init__\.py$|
+          .*\.ipynb$|
+          python/sglang/srt/grpc/.*_pb2\.py$|
+          python/sglang/srt/grpc/.*_pb2_grpc\.py$|
+          python/sglang/srt/grpc/.*_pb2\.pyi$|
+          python/sglang/srt/grpc/.*_pb2_grpc\.pyi$|
+          )$
   - repo: https://github.com/psf/black
     rev: 26.1.0
     hooks:
