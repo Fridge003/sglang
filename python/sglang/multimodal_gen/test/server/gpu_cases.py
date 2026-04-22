@@ -523,7 +523,8 @@ TWO_GPU_CASES_A = [
             model_path="Lightricks/LTX-2.3",
             extras=[
                 "--pipeline-class-name LTX2TwoStagePipeline",
-                "--ltx2-two-stage-device-mode original", "--tp=2"
+                "--ltx2-two-stage-device-mode original",
+                "--tp=2",
             ],
         ),
         TI2V_sampling_params,
@@ -546,7 +547,7 @@ TWO_GPU_CASES_B = [
             extras=[
                 "--pipeline-class-name LTX2TwoStagePipeline",
                 "--ltx2-two-stage-device-mode original",
-                "--tp=2"
+                "--tp=2",
             ],
         ),
         T2V_sampling_params,

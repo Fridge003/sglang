@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 SOURCE_PATH = (
     Path(__file__).resolve().parents[1] / "runtime" / "models" / "dits" / "ltx_2.py"
 )
@@ -82,7 +81,9 @@ def _self_sequential_first_call(
         func = first_call.func
         func_name = func.id if isinstance(func, ast.Name) else None
         return func_name, _literal_keywords(first_call)
-    raise AssertionError(f"self.{attr_name} Sequential not found in {class_name}.__init__")
+    raise AssertionError(
+        f"self.{attr_name} Sequential not found in {class_name}.__init__"
+    )
 
 
 def test_text_projection_uses_tp_friendly_linears():
@@ -109,13 +110,17 @@ def test_attention_and_ff_use_tp_friendly_linears():
         assert keywords["gather_output"] is False
         assert keywords["accumulate_in_fp32"] is True
 
-    to_out_func, to_out_keywords = _self_sequential_first_call("LTX2Attention", "to_out")
+    to_out_func, to_out_keywords = _self_sequential_first_call(
+        "LTX2Attention", "to_out"
+    )
     assert to_out_func == "RowParallelLinear"
     assert to_out_keywords["input_is_parallel"] is True
     assert to_out_keywords["accumulate_in_fp32"] is True
 
     proj_in_func, proj_in_keywords = _self_assignment_call("LTX2FeedForward", "proj_in")
-    proj_out_func, proj_out_keywords = _self_assignment_call("LTX2FeedForward", "proj_out")
+    proj_out_func, proj_out_keywords = _self_assignment_call(
+        "LTX2FeedForward", "proj_out"
+    )
     assert proj_in_func == "ColumnParallelLinear"
     assert proj_in_keywords["gather_output"] is False
     assert proj_out_func == "RowParallelLinear"
