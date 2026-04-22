@@ -4,6 +4,7 @@ import { api, type RunMetricDelta, type RunSummary } from "@/lib/api";
 import { compactUnit, formatNumber, formatRelative } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { CopyLinkButton } from "@/components/copy-link-button";
 
 export const dynamic = "force-dynamic";
 
@@ -30,7 +31,8 @@ export default async function ComparePage({
 
   return (
     <div className="space-y-8 animate-fade-in-up">
-      <section className="border-b border-border/60 pb-6">
+      <section className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 pb-6">
+        <div className="space-y-1">
         <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
           Compare runs
         </p>
@@ -52,6 +54,8 @@ export default async function ComparePage({
             <span className="text-muted-foreground">No meaningful change</span>
           )}
         </h1>
+        </div>
+        <CopyLinkButton />
       </section>
 
       <section className="grid gap-4 md:grid-cols-2">

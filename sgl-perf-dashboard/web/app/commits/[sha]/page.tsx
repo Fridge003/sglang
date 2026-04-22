@@ -4,6 +4,7 @@ import { api, type RunSummary } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { CopyLinkButton } from "@/components/copy-link-button";
 
 export const dynamic = "force-dynamic";
 
@@ -18,7 +19,8 @@ export default async function CommitPage({
 
   return (
     <div className="space-y-8 animate-fade-in-up">
-      <section className="border-b border-border/60 pb-6">
+      <section className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 pb-6">
+        <div className="space-y-1">
         <p className="text-[11px] uppercase tracking-wider text-muted-foreground">
           Commit
         </p>
@@ -54,6 +56,8 @@ export default async function CommitPage({
             </>
           )}
         </p>
+        </div>
+        <CopyLinkButton />
       </section>
 
       <section className="space-y-3">

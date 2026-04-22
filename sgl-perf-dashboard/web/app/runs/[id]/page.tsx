@@ -3,6 +3,8 @@ import { api } from "@/lib/api";
 import { compactUnit, formatNumber, formatRelative } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { CopyLinkButton } from "@/components/copy-link-button";
+import { RerunLink } from "@/components/rerun-link";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +34,7 @@ export default async function RunDetailPage({
             · {formatRelative(run.started_at)}
           </p>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="font-mono lowercase">{run.trigger}</Badge>
           <Badge variant={run.status === "passed" ? "success" : "destructive"}>
             <span
@@ -43,6 +45,8 @@ export default async function RunDetailPage({
             />
             {run.status}
           </Badge>
+          <RerunLink prNumber={run.pr_number} configName={run.config_name} />
+          <CopyLinkButton />
         </div>
       </section>
 

@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { formatNumber, formatRelative } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { CopyLinkButton } from "@/components/copy-link-button";
 
 export const dynamic = "force-dynamic";
 
@@ -43,7 +44,7 @@ export default async function RegressionDetailPage({
               detected {formatRelative(reg.detected_at)}
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Badge
               variant={reg.severity === "minor" ? "warning" : "destructive"}
               className="uppercase tracking-wider"
@@ -55,6 +56,7 @@ export default async function RegressionDetailPage({
             ) : (
               <Badge variant="outline">active</Badge>
             )}
+            <CopyLinkButton />
           </div>
         </div>
       </section>
