@@ -9,6 +9,7 @@ import torch
 
 try:
     import ltx_pipelines.ti2vid_two_stages_hq as ltx2_hq_module
+    import ltx_pipelines.utils.blocks as ltx2_blocks_module
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
@@ -174,6 +175,7 @@ def _patch_official_builder_for_gemma_buffers() -> None:
             mutator=_patched_create_and_populate
         )
     )
+    ltx2_blocks_module.GEMMA_MODEL_OPS = gemma_encoder_configurator.GEMMA_MODEL_OPS
     SingleGPUModelBuilder._return_model = _patched_return_model
     SingleGPUModelBuilder._pr23366_meta_patch_applied = True
 
