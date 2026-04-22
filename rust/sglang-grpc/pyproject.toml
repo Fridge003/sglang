@@ -27,4 +27,4 @@ dev = [
 
 [tool.maturin]
 python-source = "src"
-module-name = "sglang_grpc.sglang_grpc_rs"
+module-name = "sglang_grpc._core"

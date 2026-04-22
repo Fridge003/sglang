@@ -1,12 +1,12 @@
 [package]
 name = "sglang-grpc"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "In-process Rust gRPC server for SGLang"
 license = "Apache-2.0"
 
 [lib]
-name = "sglang_grpc_rs"
+name = "_core"
 crate-type = ["cdylib"]
 
 [dependencies]

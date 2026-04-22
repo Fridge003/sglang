@@ -194,7 +194,7 @@ fn start_server(
 }
 
 #[pymodule]
-fn sglang_grpc_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(start_server, m)?)?;
     m.add_class::<GrpcServerHandle>()?;
     Ok(())

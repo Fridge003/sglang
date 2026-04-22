@@ -380,7 +380,7 @@ async def lifespan(fast_api_app: FastAPI):
 
     if (
         envs.SGLANG_GRANIAN_PARENT_PID.get() is not None
-        and not server_args.disable_grpc
+        and server_args.enable_grpc
     ):
         grpc_handle = _start_native_grpc_server_for_runtime(
             server_args=server_args,
@@ -660,12 +660,29 @@ async def server_info():
 
 @app.get("/get_load")
 async def get_load():
-    """Get load metrics (deprecated - use /v1/loads instead)."""
+    """Get load metrics (deprecated - use /v1/loads instead).
+
+    Legacy shim backed by /v1/loads. Projects GetLoadsReqOutput down to the
+    historical field shape (dp_rank, num_reqs, num_waiting_reqs, num_tokens,
+    num_pending_tokens, ts_tic) so existing clients keep working.
+    """
     logger.warning(
         "Endpoint '/get_load' is deprecated and will be removed in a future version. "
         "Please use '/v1/loads' instead."
     )
-    return await _global_state.tokenizer_manager.get_load()
+    load_results = await _global_state.tokenizer_manager.get_loads(include=["core"])
+    ts = time.perf_counter()
+    return [
+        {
+            "dp_rank": r.dp_rank,
+            "num_reqs": r.num_running_reqs + r.num_waiting_reqs,
+            "num_waiting_reqs": r.num_waiting_reqs,
+            "num_tokens": r.num_total_tokens,
+            "num_pending_tokens": r.num_total_tokens - r.num_used_tokens,
+            "ts_tic": ts,
+        }
+        for r in load_results
+    ]
 
 
 # example usage:
@@ -2400,7 +2417,7 @@ def launch_server(
     # Granian workers get their own TokenizerManager instances, so they start
     # native gRPC from the worker lifespan instead of the parent process.
     grpc_handle = None
-    if not server_args.disable_grpc and not server_args.enable_http2:
+    if server_args.enable_grpc and not server_args.enable_http2:
         grpc_handle = _start_native_grpc_server_for_runtime(
             server_args,
             tokenizer_manager,
