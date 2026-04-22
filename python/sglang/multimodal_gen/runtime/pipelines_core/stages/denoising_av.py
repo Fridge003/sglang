@@ -193,6 +193,47 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             return False
         return "LTX-2.3" not in str(getattr(server_args, "model_path", ""))
 
+    @staticmethod
+    def _build_stage2_renoise_generator(
+        batch: Req, reference_tensor: torch.Tensor
+    ) -> torch.Generator:
+        """Build a dedicated stage-2 re-noise generator whose internal state
+        matches official ``noiser.generator`` at stage-2 entry.
+
+        Decouples stage-2 re-noise from ``batch.generator`` drift by seeding a
+        fresh generator and consuming the same video+audio shapes that stage-1
+        initial-latent prep generated. See Ckpt-61 for rationale.
+        """
+        seeds = getattr(batch, "seeds", None)
+        if seeds:
+            seed = int(seeds[0])
+        else:
+            seed = int(getattr(batch, "seed", 10))
+        device = reference_tensor.device
+        dtype = reference_tensor.dtype
+        g = torch.Generator(device=device).manual_seed(seed)
+        video_shape = batch.extra.get("ltx2_stage1_packed_video_shape")
+        audio_shape = batch.extra.get("ltx2_stage1_packed_audio_shape")
+        if video_shape is not None:
+            _ = torch.randn(tuple(video_shape), device=device, dtype=dtype, generator=g)
+        if audio_shape is not None:
+            _ = torch.randn(tuple(audio_shape), device=device, dtype=dtype, generator=g)
+        return g
+
+    @staticmethod
+    def _ltx2_renoise_like(
+        reference_tensor: torch.Tensor, generator: torch.Generator
+    ) -> torch.Tensor:
+        """Generate stage-2 re-noise directly via ``torch.randn`` + dedicated
+        generator. Matches official ``GaussianNoiser.__call__`` byte-for-byte
+        (same device, same dtype, same kernel path)."""
+        return torch.randn(
+            reference_tensor.shape,
+            device=reference_tensor.device,
+            dtype=reference_tensor.dtype,
+            generator=generator,
+        )
+
     def forward(self, batch: Req, server_args: ServerArgs) -> Req:
         """Run the distilled refinement schedule on top of the shared AV denoiser."""
         batch.extra["ltx2_phase"] = "stage2"
@@ -213,6 +254,17 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
         if self._should_reset_stage2_generators(server_args):
             self._reset_stage2_generators(batch)
         noise_scale = float(self.distilled_sigmas[0].item())
+        # Dedicated stage-2 re-noise generator (Ckpt-61). Seeded to match
+        # official noiser.generator at stage-2 entry by replaying the stage-1
+        # video + audio randn consumption.
+        video_reference_for_gen = (
+            batch.latents if isinstance(batch.latents, torch.Tensor) else None
+        )
+        if video_reference_for_gen is None:
+            video_reference_for_gen = batch.audio_latents
+        renoise_gen = self._build_stage2_renoise_generator(
+            batch, video_reference_for_gen
+        )
         if is_native_ti2v:
             prepared_latents, denoise_mask, _ = self._prepare_ltx2_ti2v_clean_state(
                 latents=batch.latents,
@@ -221,33 +273,27 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
                 zero_clean_latent=True,
                 clean_latent_background=batch.ltx2_ti2v_clean_latent_background,
             )
-            video_noise = self._randn_like_with_batch_generators(
-                prepared_latents, batch
-            )
+            video_noise = self._ltx2_renoise_like(prepared_latents, renoise_gen)
             scaled_mask = (
                 denoise_mask.to(device=prepared_latents.device, dtype=torch.float32)
                 * noise_scale
             )
             batch.latents = (
-                video_noise * scaled_mask + prepared_latents * (1 - scaled_mask)
+                video_noise.float() * scaled_mask
+                + prepared_latents.float() * (1.0 - scaled_mask)
             ).to(prepared_latents.dtype)
         else:
-            video_noise = self._randn_like_with_batch_generators(batch.latents, batch)
+            video_noise = self._ltx2_renoise_like(batch.latents, renoise_gen)
             batch.latents = (
-                video_noise * noise_scale + batch.latents * (1 - noise_scale)
+                video_noise.float() * noise_scale
+                + batch.latents.float() * (1.0 - noise_scale)
             ).to(batch.latents.dtype)
 
         if isinstance(batch.audio_latents, torch.Tensor):
-            audio_noise = self._randn_like_with_batch_generators(
-                batch.audio_latents, batch
-            )
-            audio_scaled_mask = (
-                torch.ones_like(batch.audio_latents[..., :1], dtype=torch.float32)
-                * noise_scale
-            )
+            audio_noise = self._ltx2_renoise_like(batch.audio_latents, renoise_gen)
             batch.audio_latents = (
-                audio_noise * audio_scaled_mask
-                + batch.audio_latents * (1 - audio_scaled_mask)
+                audio_noise.float() * noise_scale
+                + batch.audio_latents.float() * (1.0 - noise_scale)
             ).to(batch.audio_latents.dtype)
 
         if envs.SGLANG_DIFFUSION_PROBE_DIR:
