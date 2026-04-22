@@ -329,9 +329,7 @@ class RuntimeHandle:
         self, chunk_callback, dp_rank: Optional[int] = None
     ) -> None:
         try:
-            result = await self.tokenizer_manager.get_load()
-            if dp_rank is not None:
-                result = [r for r in result if r.dp_rank == dp_rank]
+            result = await self.tokenizer_manager.get_loads(dp_rank=dp_rank)
             data = json.dumps([dataclasses.asdict(r) for r in result], default=str)
             chunk_callback(data.encode("utf-8"), finished=True)
         except Exception as e:
