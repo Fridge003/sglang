@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     SGLANG_DIFFUSION_LTX2_INJECT_UPSAMPLE_OUTPUT: str | None = None
     SGLANG_DIFFUSION_LTX2_INJECT_STAGE2_NOISED_INPUT: str | None = None
     SGLANG_DIFFUSION_LTX2_FORCE_CUDNN_SDPA: bool = False
+    SGLANG_DIFFUSION_LTX2_FF_FP32: bool = False
     # cache-dit env vars (primary transformer)
     SGLANG_CACHE_DIT_ENABLED: bool = False
     SGLANG_CACHE_DIT_FN: int = 1
@@ -275,6 +276,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "SGLANG_DIFFUSION_LTX2_FORCE_CUDNN_SDPA": _lazy_bool(
         "SGLANG_DIFFUSION_LTX2_FORCE_CUDNN_SDPA"
+    ),
+    "SGLANG_DIFFUSION_LTX2_FF_FP32": _lazy_bool(
+        "SGLANG_DIFFUSION_LTX2_FF_FP32"
     ),
     "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D": _lazy_bool(
         "SGLANG_DIFFUSION_VAE_CHANNELS_LAST_3D", "false"

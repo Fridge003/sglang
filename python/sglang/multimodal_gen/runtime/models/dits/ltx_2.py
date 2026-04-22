@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from sglang.multimodal_gen import envs
 from sglang.multimodal_gen.configs.models.dits.ltx_2 import LTX2ArchConfig, LTX2Config
 from sglang.multimodal_gen.runtime.distributed import (
     get_sp_parallel_rank,
@@ -892,6 +893,21 @@ class LTX2FeedForward(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if envs.SGLANG_DIFFUSION_LTX2_FF_FP32:
+            in_dtype = x.dtype
+            orig_proj_in_w = self.proj_in.weight
+            orig_proj_in_b = self.proj_in.bias
+            orig_proj_out_w = self.proj_out.weight
+            orig_proj_out_b = self.proj_out.bias
+            x_f = x.float()
+            x_f = torch.nn.functional.linear(
+                x_f, orig_proj_in_w.float(), orig_proj_in_b.float() if orig_proj_in_b is not None else None
+            )
+            x_f = self.act(x_f)
+            x_f = torch.nn.functional.linear(
+                x_f, orig_proj_out_w.float(), orig_proj_out_b.float() if orig_proj_out_b is not None else None
+            )
+            return x_f.to(in_dtype)
         x, _ = self.proj_in(x)
         x = self.act(x)
         x, _ = self.proj_out(x)
