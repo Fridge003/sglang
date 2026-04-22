@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { CopyLinkButton } from "@/components/copy-link-button";
 import TrendChart from "./trend-chart";
 
 export const dynamic = "force-dynamic";
@@ -32,15 +33,18 @@ export default async function ConfigDetailPage({
 
   return (
     <div className="space-y-8 animate-fade-in-up">
-      <section className="border-b border-border/60 pb-6">
-        <h1 className="font-mono text-lg font-semibold leading-tight">{name}</h1>
-        <p className="mt-1 text-[13px] text-muted-foreground">
-          {config.concurrency_levels.length} concurrency level
-          {config.concurrency_levels.length === 1 ? "" : "s"} · last run{" "}
-          {config.latest_started_at
-            ? new Date(config.latest_started_at).toLocaleString()
-            : "—"}
-        </p>
+      <section className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 pb-6">
+        <div className="space-y-1">
+          <h1 className="font-mono text-lg font-semibold leading-tight">{name}</h1>
+          <p className="text-[13px] text-muted-foreground">
+            {config.concurrency_levels.length} concurrency level
+            {config.concurrency_levels.length === 1 ? "" : "s"} · last run{" "}
+            {config.latest_started_at
+              ? new Date(config.latest_started_at).toLocaleString()
+              : "—"}
+          </p>
+        </div>
+        <CopyLinkButton />
       </section>
 
       <section className="flex flex-wrap items-center gap-2">

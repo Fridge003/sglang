@@ -137,7 +137,7 @@ export default async function RunDetailPage({
             <KV label="Logs">
               <a
                 className="break-all font-mono text-[11px] text-primary transition hover:underline"
-                href={`https://minio.34-93-45-118.nip.io/sglang-ci-logs/${run.s3_log_prefix}`}
+                href={`https://console.minio.34-93-45-118.nip.io/browser/sglang-ci-logs/${encodeURIComponent(run.s3_log_prefix)}`}
                 target="_blank"
                 rel="noreferrer"
               >
