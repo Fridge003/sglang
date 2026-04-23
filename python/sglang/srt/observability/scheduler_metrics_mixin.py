@@ -532,12 +532,11 @@ class SchedulerMetricsMixin:
             num_accepted_drafts = (
                 self.spec_num_accepted_tokens - self.spec_num_forward_ct
             )
-            draft_tokens_fallback = (self.server_args.speculative_num_steps or 0) + 1
-            num_draft_tokens = (
-                self.server_args.speculative_num_draft_tokens or draft_tokens_fallback
-            )
-            total_draft_tokens = self.spec_num_forward_ct * (num_draft_tokens - 1)
-
+            if self.server_args.speculative_num_draft_tokens:
+                draft_per_round = self.server_args.speculative_num_draft_tokens - 1
+            else:
+                draft_per_round = self.server_args.speculative_num_steps or 0
+            total_draft_tokens = self.spec_num_forward_ct * draft_per_round
             spec_accept_rate = (
                 num_accepted_drafts / total_draft_tokens
                 if total_draft_tokens > 0
