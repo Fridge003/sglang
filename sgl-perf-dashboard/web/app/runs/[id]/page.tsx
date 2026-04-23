@@ -36,10 +36,22 @@ export default async function RunDetailPage({
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="font-mono lowercase">{run.trigger}</Badge>
-          <Badge variant={run.status === "passed" ? "success" : "destructive"}>
+          <Badge
+            variant={
+              run.status === "passed"
+                ? "success"
+                : run.status === "partial"
+                  ? "warning"
+                  : "destructive"
+            }
+          >
             <span
               className={`inline-block h-1.5 w-1.5 rounded-full ${
-                run.status === "passed" ? "bg-success" : "bg-destructive"
+                run.status === "passed"
+                  ? "bg-success"
+                  : run.status === "partial"
+                    ? "bg-warning"
+                    : "bg-destructive"
               }`}
               aria-hidden
             />
@@ -49,6 +61,42 @@ export default async function RunDetailPage({
           <CopyLinkButton />
         </div>
       </section>
+
+      {/* Failure banner (failed or partial runs) */}
+      {(run.status === "failed" || run.status === "partial") && (
+        <section
+          className={`rounded-xl border p-4 ${
+            run.status === "failed"
+              ? "border-destructive/40 bg-destructive/5"
+              : "border-warning/40 bg-warning/5"
+          }`}
+        >
+          <p
+            className={`text-[13px] font-semibold ${
+              run.status === "failed" ? "text-destructive" : "text-warning"
+            }`}
+          >
+            {run.status === "failed"
+              ? "This run failed"
+              : "Partial run — some concurrencies missing"}
+          </p>
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            {run.failure_reason ?? "No reason recorded."} Reconciled from the
+            expected matrix — no benchmark output was uploaded for this
+            (config, concurrency) pair.
+          </p>
+          <div className="mt-2 flex gap-3 text-[12px]">
+            <a
+              className="text-primary transition hover:underline"
+              href={run.gh_job_url ?? run.github_run_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View GitHub Actions logs →
+            </a>
+          </div>
+        </section>
+      )}
 
       {/* Two-column meta */}
       <section className="grid gap-4 md:grid-cols-2">
@@ -135,43 +183,51 @@ export default async function RunDetailPage({
               </span>
             </KV>
             <KV label="Logs">
-              <a
-                className="break-all font-mono text-[11px] text-primary transition hover:underline"
-                href={`https://sgl-ci-logs-khjfeoysf.brevlab.com/browser/sglang-ci-logs/${encodeURIComponent(run.s3_log_prefix)}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {run.s3_log_prefix}
-              </a>
+              {run.s3_log_prefix ? (
+                <a
+                  className="break-all font-mono text-[11px] text-primary transition hover:underline"
+                  href={`https://sgl-ci-logs-khjfeoysf.brevlab.com/browser/sglang-ci-logs/${encodeURIComponent(run.s3_log_prefix)}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  {run.s3_log_prefix}
+                </a>
+              ) : (
+                <span className="text-[11px] text-muted-foreground">
+                  no logs uploaded
+                </span>
+              )}
             </KV>
           </CardContent>
         </Card>
       </section>
 
-      {/* Metrics */}
-      <section className="space-y-3">
-        <div className="flex items-baseline justify-between">
-          <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
-            Metrics
-          </h2>
-          <span className="text-[11px] text-muted-foreground/70">
-            {run.metrics.length} captured
-          </span>
-        </div>
-        {run.metrics.length === 0 ? (
-          <Card>
-            <CardContent className="py-10 text-center text-[13px] text-muted-foreground">
-              No metrics parsed for this run.
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {run.metrics.map((m) => (
-              <MetricCard key={m.name} name={m.name} value={m.value} unit={m.unit} />
-            ))}
+      {/* Metrics — hidden entirely for failed runs (no JSON, no metrics) */}
+      {run.status !== "failed" && (
+        <section className="space-y-3">
+          <div className="flex items-baseline justify-between">
+            <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              Metrics
+            </h2>
+            <span className="text-[11px] text-muted-foreground/70">
+              {run.metrics.length} captured
+            </span>
           </div>
-        )}
-      </section>
+          {run.metrics.length === 0 ? (
+            <Card>
+              <CardContent className="py-10 text-center text-[13px] text-muted-foreground">
+                No metrics parsed for this run.
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+              {run.metrics.map((m) => (
+                <MetricCard key={m.name} name={m.name} value={m.value} unit={m.unit} />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

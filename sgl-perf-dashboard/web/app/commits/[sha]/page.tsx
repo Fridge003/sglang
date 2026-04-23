@@ -107,7 +107,15 @@ export default async function CommitPage({
                     {r.concurrency.toLocaleString()}
                   </td>
                   <td className="px-4 py-2.5">
-                    <Badge variant={r.status === "passed" ? "success" : "destructive"}>
+                    <Badge
+                      variant={
+                        r.status === "passed"
+                          ? "success"
+                          : r.status === "partial"
+                            ? "warning"
+                            : "destructive"
+                      }
+                    >
                       {r.status}
                     </Badge>
                   </td>

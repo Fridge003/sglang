@@ -31,6 +31,24 @@ export default async function ConfigDetailPage({
     .configTrend(name, { metric, concurrency, window_days: windowDays })
     .catch(() => []);
 
+  // Recent runs for this config (any concurrency) — used for the stability strip.
+  const recentRuns = await api
+    .listRuns({ config: name, limit: 100 })
+    .catch(() => []);
+  const stabilityCutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+  const stabilityRuns = recentRuns
+    .filter((r) => new Date(r.started_at).getTime() >= stabilityCutoff)
+    .sort(
+      (a, b) => new Date(a.started_at).getTime() - new Date(b.started_at).getTime(),
+    );
+  const passedCount = stabilityRuns.filter((r) => r.status === "passed").length;
+  const failedCount = stabilityRuns.filter((r) => r.status === "failed").length;
+  const partialCount = stabilityRuns.filter((r) => r.status === "partial").length;
+  const passRate =
+    stabilityRuns.length > 0
+      ? Math.round((passedCount / stabilityRuns.length) * 100)
+      : null;
+
   return (
     <div className="space-y-8 animate-fade-in-up">
       <section className="flex flex-wrap items-start justify-between gap-3 border-b border-border/60 pb-6">
@@ -80,6 +98,60 @@ export default async function ConfigDetailPage({
           window: {windowDays}d
         </span>
       </section>
+
+      {stabilityRuns.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+              Stability (14d)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <div className="flex flex-wrap gap-[3px]">
+              {stabilityRuns.map((r) => (
+                <a
+                  key={r.id}
+                  href={`/runs/${r.id}`}
+                  title={`${r.status} · conc ${r.concurrency} · ${new Date(r.started_at).toLocaleString()}${r.failure_reason ? ` · ${r.failure_reason}` : ""}`}
+                  className={`h-4 w-2.5 rounded-sm transition hover:ring-1 hover:ring-foreground/40 ${
+                    r.status === "passed"
+                      ? "bg-success"
+                      : r.status === "partial"
+                        ? "bg-warning"
+                        : "bg-destructive"
+                  }`}
+                  aria-label={`run ${r.id} ${r.status}`}
+                />
+              ))}
+            </div>
+            <p className="text-[12px] text-muted-foreground">
+              <span className="tabular-numbers text-success">{passedCount} passed</span>
+              {failedCount > 0 && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="tabular-numbers text-destructive">
+                    {failedCount} failed
+                  </span>
+                </>
+              )}
+              {partialCount > 0 && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="tabular-numbers text-warning">
+                    {partialCount} partial
+                  </span>
+                </>
+              )}
+              {passRate !== null && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="tabular-numbers">{passRate}% pass rate</span>
+                </>
+              )}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>

@@ -13,13 +13,39 @@ export default async function RunsPage({
   searchParams: Promise<{ config?: string; trigger?: string; status?: string }>;
 }) {
   const params = await searchParams;
-  const runs = await api.listRuns({ limit: 200, ...params }).catch(() => []);
+  const status = params.status ?? "all";
+  const runs = await api.listRuns({ limit: 200, ...params, status }).catch(() => []);
+
+  const buildHref = (nextStatus: string) => {
+    const qs = new URLSearchParams();
+    if (params.config) qs.set("config", params.config);
+    if (params.trigger) qs.set("trigger", params.trigger);
+    qs.set("status", nextStatus);
+    return `?${qs.toString()}`;
+  };
 
   return (
     <div className="space-y-6 animate-fade-in-up">
       <AutoRefresh />
       <section className="flex items-baseline justify-between border-b border-border/60 pb-4">
-        <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
+        <div className="space-y-2">
+          <h1 className="text-xl font-semibold tracking-tight">Runs</h1>
+          <div className="flex gap-1">
+            {(["all", "passed", "failed", "partial"] as const).map((s) => (
+              <Link
+                key={s}
+                href={buildHref(s)}
+                className={`rounded-md border px-2 py-0.5 text-[12px] transition ${
+                  status === s
+                    ? "border-primary/60 bg-primary/10 text-primary"
+                    : "border-border/60 text-muted-foreground hover:border-border hover:text-foreground"
+                }`}
+              >
+                {s}
+              </Link>
+            ))}
+          </div>
+        </div>
         <p className="text-[12px] text-muted-foreground">
           <span className="tabular-numbers font-medium text-foreground">
             {runs.length.toLocaleString()}
@@ -91,10 +117,22 @@ export default async function RunsPage({
                     )}
                   </td>
                   <td className="px-4 py-2.5">
-                    <Badge variant={r.status === "passed" ? "success" : "destructive"}>
+                    <Badge
+                      variant={
+                        r.status === "passed"
+                          ? "success"
+                          : r.status === "partial"
+                            ? "warning"
+                            : "destructive"
+                      }
+                    >
                       <span
                         className={`inline-block h-1.5 w-1.5 rounded-full ${
-                          r.status === "passed" ? "bg-success" : "bg-destructive"
+                          r.status === "passed"
+                            ? "bg-success"
+                            : r.status === "partial"
+                              ? "bg-warning"
+                              : "bg-destructive"
                         }`}
                         aria-hidden
                       />

@@ -16,8 +16,14 @@ services:
       DB_PATH: /data/dashboard.db
       RETENTION_DAYS: ${RETENTION_DAYS:-90}
       INGESTER_INTERVAL_SECONDS: ${INGESTER_INTERVAL_SECONDS:-300}
+      NIGHTLY_CONFIGS_PATH: /app/nightly-configs.yaml
+      NIGHTLY_RUNNER: ${NIGHTLY_RUNNER:-gb200}
+      RECONCILE_WINDOW_DAYS: ${RECONCILE_WINDOW_DAYS:-30}
     volumes:
       - ./dashboard-data:/data
+      # Mount the nightly-configs.yaml the reconciler reads to know the
+      # expected (config, concurrency) matrix for each workflow.
+      - ../scripts/ci/slurm/nightly-configs.yaml:/app/nightly-configs.yaml:ro
     networks:
       - minio-net
     healthcheck:

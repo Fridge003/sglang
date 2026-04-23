@@ -9,26 +9,29 @@ export const dynamic = "force-dynamic";
 
 async function loadHomeData() {
   try {
-    const [recentRuns, configs, health, regressions] = await Promise.all([
+    const [recentRuns, configs, health, regressions, recentFailures] = await Promise.all([
       api.listRuns({ limit: 20 }),
       api.listConfigs(),
       api.health(),
       api.listRegressions("active"),
+      api.listRuns({ limit: 10, status: "failed" }),
     ]);
-    return { recentRuns, configs, health, regressions, error: null };
+    return { recentRuns, configs, health, regressions, recentFailures, error: null };
   } catch (err) {
     return {
       recentRuns: [],
       configs: [],
       health: null,
       regressions: [] as RegressionSummary[],
+      recentFailures: [] as RunSummary[],
       error: err instanceof Error ? err.message : String(err),
     };
   }
 }
 
 export default async function HomePage() {
-  const { recentRuns, configs, health, regressions, error } = await loadHomeData();
+  const { recentRuns, configs, health, regressions, recentFailures, error } =
+    await loadHomeData();
 
   return (
     <div className="space-y-10 animate-fade-in-up">
@@ -43,11 +46,28 @@ export default async function HomePage() {
                 <span className="tabular-numbers font-medium text-foreground">
                   {health.runs.toLocaleString()}
                 </span>{" "}
-                runs tracked ·{" "}
-                <span className="tabular-numbers">
-                  {health.metrics.toLocaleString()}
-                </span>{" "}
-                metrics · new data {formatRelative(health.last_ingest_at)}
+                runs{" "}
+                <span className="tabular-numbers text-success">
+                  {health.runs_passed.toLocaleString()} passed
+                </span>
+                {health.runs_failed > 0 && (
+                  <>
+                    <span className="mx-1 text-muted-foreground/60">·</span>
+                    <span className="tabular-numbers text-destructive">
+                      {health.runs_failed.toLocaleString()} failed
+                    </span>
+                  </>
+                )}
+                {health.runs_partial > 0 && (
+                  <>
+                    <span className="mx-1 text-muted-foreground/60">·</span>
+                    <span className="tabular-numbers text-warning">
+                      {health.runs_partial.toLocaleString()} partial
+                    </span>
+                  </>
+                )}
+                <span className="mx-1.5 text-muted-foreground/60">·</span>
+                new data {formatRelative(health.last_ingest_at)}
                 <span className="mx-1.5 text-muted-foreground/60">·</span>
                 <span title={`last scheduler tick: ${health.last_scheduler_run_at ?? "never"}`}>
                   sync {formatRelative(health.last_scheduler_run_at)}
@@ -73,15 +93,27 @@ export default async function HomePage() {
       {error && <ErrorBanner message={error} />}
 
       {/* Needs attention */}
-      {regressions.length > 0 && (
+      {(regressions.length > 0 || recentFailures.length > 0) && (
         <section className="space-y-3">
           <SectionHeader
             title="Needs attention"
-            hint={`${regressions.length} active regression${regressions.length === 1 ? "" : "s"}`}
+            hint={[
+              regressions.length > 0
+                ? `${regressions.length} regression${regressions.length === 1 ? "" : "s"}`
+                : null,
+              recentFailures.length > 0
+                ? `${recentFailures.length} failed run${recentFailures.length === 1 ? "" : "s"}`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
           />
           <div className="space-y-2">
             {regressions.map((r) => (
               <RegressionRow key={r.id} reg={r} />
+            ))}
+            {recentFailures.map((r) => (
+              <FailedRunRow key={r.id} run={r} />
             ))}
           </div>
         </section>
@@ -157,6 +189,7 @@ function SectionHeader({
 
 function ConfigCard({ config }: { config: ConfigSummary }) {
   const isPassing = config.latest_status === "passed";
+  const isPartial = config.latest_status === "partial";
   return (
     <Link href={`/configs/${config.config_name}`} className="group block">
       <Card className="h-full">
@@ -165,7 +198,7 @@ function ConfigCard({ config }: { config: ConfigSummary }) {
             <CardTitle className="font-mono text-[13px] leading-tight text-foreground/90">
               {config.config_name}
             </CardTitle>
-            <Badge variant={isPassing ? "success" : "destructive"}>
+            <Badge variant={isPassing ? "success" : isPartial ? "warning" : "destructive"}>
               <StatusDot passing={isPassing} />
               {config.latest_status ?? "—"}
             </Badge>
@@ -235,7 +268,15 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
                 {r.commit_author ?? "—"}
               </td>
               <td className="px-4 py-2.5">
-                <Badge variant={r.status === "passed" ? "success" : "destructive"}>
+                <Badge
+                  variant={
+                    r.status === "passed"
+                      ? "success"
+                      : r.status === "partial"
+                        ? "warning"
+                        : "destructive"
+                  }
+                >
                   <StatusDot passing={r.status === "passed"} />
                   {r.status}
                 </Badge>
@@ -317,6 +358,52 @@ function StatusDot({ passing }: { passing: boolean }) {
       }`}
       aria-hidden
     />
+  );
+}
+
+function FailedRunRow({ run }: { run: RunSummary }) {
+  const isPartial = run.status === "partial";
+  return (
+    <Link href={`/runs/${run.id}`} className="block">
+      <Card className="transition-colors hover:border-destructive/60">
+        <CardContent className="flex flex-wrap items-center gap-3 p-4">
+          <Badge variant={isPartial ? "warning" : "destructive"} className="uppercase tracking-wider">
+            {run.status}
+          </Badge>
+          <div className="min-w-0 flex-1">
+            <p className="truncate font-mono text-[13px]">
+              <span className="text-foreground/80">{run.config_name}</span>
+              <span className="mx-1.5 text-muted-foreground">·</span>
+              <span className="text-muted-foreground">conc {run.concurrency.toLocaleString()}</span>
+            </p>
+            <p className="mt-0.5 text-[11px] text-muted-foreground">
+              {run.failure_reason && (
+                <>
+                  <span>{run.failure_reason}</span>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                </>
+              )}
+              {formatRelative(run.started_at)}
+              {run.commit_short_sha && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  <span className="font-mono">{run.commit_short_sha}</span>
+                </>
+              )}
+              {run.commit_author && (
+                <>
+                  <span className="mx-1 text-muted-foreground/60">·</span>
+                  {run.commit_author}
+                </>
+              )}
+            </p>
+          </div>
+          <span className="text-[12px] text-muted-foreground transition group-hover:text-foreground">
+            investigate →
+          </span>
+        </CardContent>
+      </Card>
+    </Link>
   );
 }
 

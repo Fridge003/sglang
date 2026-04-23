@@ -35,6 +35,8 @@ export interface RunSummary {
   concurrency: number;
   started_at: string;
   status: string;
+  failure_reason: string | null;
+  gh_job_url: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -72,6 +74,9 @@ export interface TrendPoint {
 export interface HealthStatus {
   status: string;
   runs: number;
+  runs_passed: number;
+  runs_failed: number;
+  runs_partial: number;
   metrics: number;
   last_ingest_at: string | null;
   last_scheduler_run_at: string | null;

@@ -21,7 +21,7 @@ from typing import Any
 
 import boto3
 from botocore.client import Config as BotoConfig
-from dashboard import anomaly
+from dashboard import anomaly, reconciler
 from dashboard.config import settings
 from dashboard.db import connect
 from dashboard.github_client import CommitInfo, GitHubClient, PRInfo
@@ -172,6 +172,23 @@ def _insert_run(
         f"{parsed.github_run_id}/attempts/{parsed.github_run_attempt}"
     )
     try:
+        # Upgrade any placeholder row (failed/partial) that the reconciler may
+        # have inserted for this same unique key. A late-arriving JSON should
+        # replace the placeholder, not lose to it on INSERT OR IGNORE.
+        conn.execute(
+            """
+            DELETE FROM runs
+            WHERE github_run_id = ? AND github_run_attempt = ?
+              AND config_name = ? AND concurrency = ?
+              AND status IN ('failed', 'partial')
+            """,
+            (
+                parsed.github_run_id,
+                parsed.github_run_attempt,
+                parsed.config_name,
+                parsed.concurrency,
+            ),
+        )
         conn.execute(
             """
             INSERT OR IGNORE INTO runs (
@@ -274,6 +291,8 @@ def run_once() -> dict[str, Any]:
         "regressions_resolved": 0,
         "skipped": 0,
         "errors": 0,
+        "reconcile_failed": 0,
+        "reconcile_partial": 0,
     }
 
     newly_inserted_run_ids: list[int] = []
@@ -351,6 +370,13 @@ def run_once() -> dict[str, Any]:
             _set_cursor(conn, latest_cursor)
         _set_heartbeat(conn)
         conn.commit()
+
+        try:
+            rc = reconciler.reconcile(conn)
+            stats["reconcile_failed"] = rc.get("failed_inserted", 0)
+            stats["reconcile_partial"] = rc.get("partial_inserted", 0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reconciler failed: %s", exc)
 
     github.close()
     logger.info("ingest complete: %s", stats)

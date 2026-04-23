@@ -91,6 +91,16 @@ app.add_middleware(
 )
 
 
+def _maybe(row: sqlite3.Row, key: str) -> Any:
+    """Defensive read — returns None if a column was added in a later migration
+    but the caller still holds a pre-migration row.
+    """
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
 def _row_to_summary(row: sqlite3.Row) -> RunSummary:
     return RunSummary(
         id=row["id"],
@@ -110,6 +120,8 @@ def _row_to_summary(row: sqlite3.Row) -> RunSummary:
         concurrency=row["concurrency"],
         started_at=row["started_at"],
         status=row["status"],
+        failure_reason=_maybe(row, "failure_reason"),
+        gh_job_url=_maybe(row, "gh_job_url"),
     )
 
 
@@ -140,6 +152,8 @@ def _row_to_detail(row: sqlite3.Row, metrics: list[Metric]) -> RunDetail:
         decode_gpus=row["decode_gpus"],
         started_at=row["started_at"],
         status=row["status"],
+        failure_reason=_maybe(row, "failure_reason"),
+        gh_job_url=_maybe(row, "gh_job_url"),
         s3_log_prefix=row["s3_log_prefix"],
         slurm_job_id=row["slurm_job_id"],
         ingested_at=row["ingested_at"],
@@ -156,6 +170,10 @@ def _row_to_detail(row: sqlite3.Row, metrics: list[Metric]) -> RunDetail:
 def health() -> HealthStatus:
     with connect(settings.db_path) as conn:
         runs_count = conn.execute("SELECT COUNT(*) AS c FROM runs").fetchone()["c"]
+        status_rows = conn.execute(
+            "SELECT status, COUNT(*) AS c FROM runs GROUP BY status"
+        ).fetchall()
+        status_counts = {r["status"]: r["c"] for r in status_rows}
         metrics_count = conn.execute("SELECT COUNT(*) AS c FROM metrics").fetchone()[
             "c"
         ]
@@ -168,6 +186,9 @@ def health() -> HealthStatus:
     return HealthStatus(
         status="ok",
         runs=runs_count,
+        runs_passed=status_counts.get("passed", 0),
+        runs_failed=status_counts.get("failed", 0),
+        runs_partial=status_counts.get("partial", 0),
         metrics=metrics_count,
         last_ingest_at=cursor_row["updated_at"] if cursor_row else None,
         last_scheduler_run_at=heartbeat_row["updated_at"] if heartbeat_row else None,
@@ -191,7 +212,7 @@ def list_runs(
     if trigger:
         clauses.append("trigger = ?")
         params.append(trigger)
-    if status:
+    if status and status != "all":
         clauses.append("status = ?")
         params.append(status)
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""

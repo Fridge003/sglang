@@ -115,7 +115,19 @@ CREATE TABLE IF NOT EXISTS ingester_state (
 );
 """
 
-CURRENT_SCHEMA_VERSION = 1
+MIGRATIONS_V2 = """
+CREATE TABLE IF NOT EXISTS reconciliation_state (
+    workflow_run_id TEXT PRIMARY KEY,
+    reconciled_at   TEXT NOT NULL
+);
+"""
+
+CURRENT_SCHEMA_VERSION = 2
+
+
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
 
 
 def _apply_migrations(conn: sqlite3.Connection) -> None:
@@ -123,6 +135,15 @@ def _apply_migrations(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
     installed = row[0] if row and row[0] is not None else 0
+
+    if installed < 2:
+        # Failure tracking: gh_job_url + failure_reason on runs, reconciliation_state table.
+        if not _column_exists(conn, "runs", "gh_job_url"):
+            conn.execute("ALTER TABLE runs ADD COLUMN gh_job_url TEXT")
+        if not _column_exists(conn, "runs", "failure_reason"):
+            conn.execute("ALTER TABLE runs ADD COLUMN failure_reason TEXT")
+        conn.executescript(MIGRATIONS_V2)
+
     if installed < CURRENT_SCHEMA_VERSION:
         conn.execute(
             "INSERT INTO schema_version (version, applied_at) VALUES (?, datetime('now'))",

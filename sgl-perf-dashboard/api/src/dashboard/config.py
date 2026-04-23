@@ -30,6 +30,12 @@ class Settings(BaseSettings):
     # Ingester
     ingester_interval_seconds: int = Field(default=300, ge=30, le=3600)
 
+    # Reconciler — mount scripts/ci/slurm/nightly-configs.yaml into the container
+    # at this path so the reconciler knows the expected matrix per workflow run.
+    nightly_configs_path: str = Field(default="/app/nightly-configs.yaml")
+    nightly_runner: str = Field(default="gb200")
+    reconcile_window_days: int = Field(default=30, ge=1, le=365)
+
     # API server
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000, ge=1, le=65535)

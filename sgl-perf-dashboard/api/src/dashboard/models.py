@@ -33,6 +33,8 @@ class RunSummary(BaseModel):
     concurrency: int
     started_at: str
     status: str
+    failure_reason: str | None = None
+    gh_job_url: str | None = None
 
 
 class RunDetail(RunSummary):
@@ -76,6 +78,9 @@ class ConfigSummary(BaseModel):
 class HealthStatus(BaseModel):
     status: str
     runs: int
+    runs_passed: int
+    runs_failed: int
+    runs_partial: int
     metrics: int
     last_ingest_at: str | None
     last_scheduler_run_at: str | None
