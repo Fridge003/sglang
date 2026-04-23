@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { formatRelative } from "@/lib/format";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { AutoRefresh } from "@/components/auto-refresh";
 
 export const dynamic = "force-dynamic";
 
@@ -17,6 +18,7 @@ export default async function RegressionsPage({
 
   return (
     <div className="space-y-6 animate-fade-in-up">
+      <AutoRefresh />
       <section className="flex items-baseline justify-between border-b border-border/60 pb-4">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight">Regressions</h1>

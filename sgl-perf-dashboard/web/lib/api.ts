@@ -74,6 +74,7 @@ export interface HealthStatus {
   runs: number;
   metrics: number;
   last_ingest_at: string | null;
+  last_scheduler_run_at: string | null;
   github_enrichment: boolean;
 }
 

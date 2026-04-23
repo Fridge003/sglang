@@ -50,8 +50,6 @@ async def lifespan(_app: FastAPI):
         "interval",
         seconds=settings.ingester_interval_seconds,
         id="ingest",
-        # Fire immediately on startup so first deploy doesn't wait 5 min.
-        next_run_time=None,
     )
     _scheduler.start()
     logger.info(
@@ -164,11 +162,15 @@ def health() -> HealthStatus:
         cursor_row = conn.execute(
             "SELECT updated_at FROM ingester_state WHERE key = 's3_cursor'"
         ).fetchone()
+        heartbeat_row = conn.execute(
+            "SELECT updated_at FROM ingester_state WHERE key = 'last_run'"
+        ).fetchone()
     return HealthStatus(
         status="ok",
         runs=runs_count,
         metrics=metrics_count,
         last_ingest_at=cursor_row["updated_at"] if cursor_row else None,
+        last_scheduler_run_at=heartbeat_row["updated_at"] if heartbeat_row else None,
         github_enrichment=settings.github_enrichment_enabled,
     )
 

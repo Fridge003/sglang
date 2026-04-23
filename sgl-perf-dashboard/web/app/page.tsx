@@ -3,6 +3,7 @@ import { api, type ConfigSummary, type RegressionSummary, type RunSummary } from
 import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { AutoRefresh } from "@/components/auto-refresh";
 
 export const dynamic = "force-dynamic";
 
@@ -31,6 +32,7 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-10 animate-fade-in-up">
+      <AutoRefresh />
       {/* Header */}
       <section className="flex flex-wrap items-end justify-between gap-4">
         <div className="space-y-1">
@@ -45,7 +47,11 @@ export default async function HomePage() {
                 <span className="tabular-numbers">
                   {health.metrics.toLocaleString()}
                 </span>{" "}
-                metrics · last ingest {formatRelative(health.last_ingest_at)}
+                metrics · new data {formatRelative(health.last_ingest_at)}
+                <span className="mx-1.5 text-muted-foreground/60">·</span>
+                <span title={`last scheduler tick: ${health.last_scheduler_run_at ?? "never"}`}>
+                  sync {formatRelative(health.last_scheduler_run_at)}
+                </span>
               </>
             ) : (
               "loading…"

@@ -78,6 +78,7 @@ class HealthStatus(BaseModel):
     runs: int
     metrics: int
     last_ingest_at: str | None
+    last_scheduler_run_at: str | None
     github_enrichment: bool
 
 

@@ -147,6 +147,17 @@ def _set_cursor(conn: sqlite3.Connection, cursor: str) -> None:
     )
 
 
+def _set_heartbeat(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO ingester_state (key, value, updated_at)
+        VALUES ('last_run', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (_now_iso(), _now_iso()),
+    )
+
+
 def _insert_run(
     conn: sqlite3.Connection,
     parsed: ParsedPath,
@@ -338,6 +349,7 @@ def run_once() -> dict[str, Any]:
 
         if latest_cursor != cursor and latest_cursor is not None:
             _set_cursor(conn, latest_cursor)
+        _set_heartbeat(conn)
         conn.commit()
 
     github.close()

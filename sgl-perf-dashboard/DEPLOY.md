@@ -1,8 +1,10 @@
 # Deployment on the `ci-logs` Brev instance
 
-This dashboard runs alongside MinIO + Caddy on the same Brev box. Caddy
-terminates TLS for `dashboard.34-93-45-118.nip.io` and reverse-proxies to
-the two containers on the shared `minio-net` Docker network.
+This dashboard runs alongside MinIO + Caddy on the same Brev box. The
+dashboard and MinIO console are exposed to the team via Cloudflare tunnels
+(`sgl-dashboard-khjfeoysf.brevlab.com`, `sgl-ci-logs-khjfeoysf.brevlab.com`),
+gated by Cloudflare Access. The MinIO S3 API used by CI keeps using the
+direct path through Caddy on the Brev public IP.
 
 ## Prerequisites on the box
 
@@ -29,17 +31,25 @@ docker network create --driver bridge minio-net 2>/dev/null || true
 # Alternative: edit docker-compose.yaml to reference `minio_minio-net` directly
 ```
 
-## Caddy addition
+## Tunnel + host-port setup
 
-Append to `/home/ubuntu/minio/Caddyfile`:
+The dashboard-web and MinIO containers must bind to `127.0.0.1` on the host
+so Brev's tunnel agent can reach them:
 
-```caddyfile
-dashboard.34-93-45-118.nip.io {
-    @api path /api/*
-    reverse_proxy @api dashboard-api:8000
-    reverse_proxy dashboard-web:3000
-}
-```
+- `docker-compose.yaml` → `dashboard-web.ports`: `127.0.0.1:3000:3000`
+- `~/minio/docker-compose.yaml` → `minio.ports`: `127.0.0.1:9001:9001`
+
+Then create two Brev tunnels from the instance UI:
+- `sgl-dashboard-*` → internal port 3000
+- `sgl-ci-logs-*`   → internal port 9001
+
+Enable Cloudflare Access on both, with an `@nvidia.com` policy.
+
+## Caddy (for CI S3 API only)
+
+Caddy still fronts the MinIO S3 API at `https://minio.<host>.nip.io` for CI
+uploads. No dashboard vhost is needed — Brev's tunnel bypasses Caddy for
+human-facing traffic.
 
 Reload Caddy:
 ```bash
@@ -61,7 +71,7 @@ docker compose logs -f
 
 Verify:
 ```bash
-curl -I https://dashboard.34-93-45-118.nip.io/api/health
+curl -I https://sgl-dashboard-khjfeoysf.brevlab.com/api/health
 ```
 
 ## Upgrade

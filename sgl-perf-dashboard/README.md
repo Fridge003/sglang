@@ -29,8 +29,10 @@ docker compose -f docker-compose.yaml -f docker-compose.dev.yaml up --build
 
 ## Production deployment
 
-Runs on the `ci-logs` Brev instance alongside MinIO. Caddy reverse-proxies
-`https://dashboard.34-93-45-118.nip.io` to the two containers.
+Runs on the `ci-logs` Brev instance alongside MinIO. Exposed to the team via
+a Cloudflare tunnel (`https://sgl-dashboard-khjfeoysf.brevlab.com`); the MinIO
+console is on a second tunnel (`https://sgl-ci-logs-khjfeoysf.brevlab.com`).
+Both are gated by Cloudflare Access (`@nvidia.com` SSO).
 
 See [DEPLOY.md](DEPLOY.md) for Brev-specific steps.
 
@@ -61,4 +63,4 @@ FastAPI (/api/*) ◄─── Next.js frontend
 
 - Design doc: DLR-5301
 - Parent: DLR-5069 (GB200 nightly pipeline)
-- MinIO logs: https://minio.34-93-45-118.nip.io
+- MinIO console (team access): https://sgl-ci-logs-khjfeoysf.brevlab.com
