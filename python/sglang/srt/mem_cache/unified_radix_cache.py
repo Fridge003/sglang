@@ -1577,7 +1577,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 if child.key is None:
                     E(f"[Tree] node {child.id} has no key")
 
-        # ── PART 2: Per-Node State Machine (A2-A5) + Leaf Qualification ──
+        # ── PART 2: Per-node state machine and leaf qualification ──
         expected_dev_leaves: set[UnifiedTreeNode] = set()
         expected_hst_leaves: set[UnifiedTreeNode] = set()
 
@@ -1588,45 +1588,45 @@ class UnifiedRadixCache(BasePrefixCache):
             full_dev = node.component_data[FCT].value is not None
             full_hst = node.component_data[FCT].host_value is not None
 
-            # A2: Full is tree backbone — aux data requires Full data
+            # Full is the tree backbone, so aux data requires Full data.
             for ct in self.tree_components:
                 if ct == FCT:
                     continue
                 cd = node.component_data[ct]
                 if cd.value is not None and not full_dev:
-                    E(f"[A2] node {nid} {ct} device present but Full.value=None")
+                    E(f"node {nid} {ct} device present but Full.value=None")
                 if cd.host_value is not None and not full_hst:
-                    E(f"[A2] node {nid} {ct} host present but Full.host_value=None")
+                    E(f"node {nid} {ct} host present but Full.host_value=None")
 
-            # A3: No dead nodes — at least Full device or Full host
+            # Every node must keep Full data on at least one layer.
             if not full_dev and not full_hst:
-                E(f"[A3] node {nid} dead: no Full device and no Full host")
+                E(f"node {nid} dead: no Full device and no Full host")
 
-            # A4: Prefix continuity (parent must have data if child has)
+            # Parent prefixes must keep data whenever the child does.
             if node.parent is not None and node.parent is not self.root_node:
                 p_dev = node.parent.component_data[FCT].value is not None
                 p_hst = node.parent.component_data[FCT].host_value is not None
                 if full_dev and not p_dev:
                     E(
-                        f"[A4] node {nid} device present but parent {node.parent.id} evicted"
+                        f"node {nid} device present but parent {node.parent.id} evicted"
                     )
                 if full_hst and not p_hst:
                     E(
-                        f"[A4] node {nid} backed up but parent {node.parent.id} not backed up"
+                        f"node {nid} backed up but parent {node.parent.id} not backed up"
                     )
 
-            # A5: Lock hierarchy + sanity
+            # Lock hierarchy and counters must stay sane.
             fl = node.component_data[FCT].lock_ref
             for ct in self.tree_components:
                 cd = node.component_data[ct]
                 if cd.lock_ref < 0:
-                    E(f"[A5] node {nid} {ct} lock_ref={cd.lock_ref}")
+                    E(f"node {nid} {ct} lock_ref={cd.lock_ref}")
                 if cd.host_lock_ref < 0:
-                    E(f"[A5] node {nid} {ct} host_lock_ref={cd.host_lock_ref}")
+                    E(f"node {nid} {ct} host_lock_ref={cd.host_lock_ref}")
                 if ct != FCT and fl < cd.lock_ref:
-                    E(f"[A5] node {nid} full_lock={fl} < {ct}_lock={cd.lock_ref}")
+                    E(f"node {nid} full_lock={fl} < {ct}_lock={cd.lock_ref}")
                 if cd.value is None and cd.lock_ref > 0:
-                    E(f"[A5] node {nid} {ct} evicted but lock_ref={cd.lock_ref}")
+                    E(f"node {nid} {ct} evicted but lock_ref={cd.lock_ref}")
 
             # Collect expected leaf qualification (single pass)
             if self._is_device_leaf(node):
@@ -1634,25 +1634,25 @@ class UnifiedRadixCache(BasePrefixCache):
             if self._is_host_leaf(node):
                 expected_hst_leaves.add(node)
 
-        # ── PART 3: Tracking Structures (INV-1~5) ──
+        # ── PART 3: Tracking structures ──
 
-        # INV-3: D-leaf set matches expected
+        # Device leaf set must match the expected leaves.
         if self.evictable_device_leaves != expected_dev_leaves:
             extra = self.evictable_device_leaves - expected_dev_leaves
             missing = expected_dev_leaves - self.evictable_device_leaves
             if extra:
-                E(f"[INV-3] D-leaf extra: {[n.id for n in list(extra)[:5]]}")
+                E(f"D-leaf extra: {[n.id for n in list(extra)[:5]]}")
             if missing:
-                E(f"[INV-3] D-leaf missing: {[n.id for n in list(missing)[:5]]}")
+                E(f"D-leaf missing: {[n.id for n in list(missing)[:5]]}")
 
-        # INV-4: H-leaf set matches expected
+        # Host leaf set must match the expected leaves.
         if self.evictable_host_leaves != expected_hst_leaves:
             extra = self.evictable_host_leaves - expected_hst_leaves
             missing = expected_hst_leaves - self.evictable_host_leaves
             if extra:
-                E(f"[INV-4] H-leaf extra: {[n.id for n in list(extra)[:5]]}")
+                E(f"H-leaf extra: {[n.id for n in list(extra)[:5]]}")
             if missing:
-                E(f"[INV-4] H-leaf missing: {[n.id for n in list(missing)[:5]]}")
+                E(f"H-leaf missing: {[n.id for n in list(missing)[:5]]}")
 
         # D-leaf ∩ H-leaf = ∅
         overlap = self.evictable_device_leaves & self.evictable_host_leaves
@@ -1665,12 +1665,12 @@ class UnifiedRadixCache(BasePrefixCache):
         stale = self.evictable_device_leaves - all_node_set
         if stale:
             E(
-                f"[INV-3] {len(stale)} stale nodes in device_leaves: {[n.id for n in list(stale)[:5]]}"
+                f"{len(stale)} stale nodes in device_leaves: {[n.id for n in list(stale)[:5]]}"
             )
         stale = self.evictable_host_leaves - all_node_set
         if stale:
             E(
-                f"[INV-4] {len(stale)} stale nodes in host_leaves: {[n.id for n in list(stale)[:5]]}"
+                f"{len(stale)} stale nodes in host_leaves: {[n.id for n in list(stale)[:5]]}"
             )
 
         # Per-component LRU tracking
@@ -1679,13 +1679,13 @@ class UnifiedRadixCache(BasePrefixCache):
             if ct == FCT:
                 # Full uses leaf sets, not LRU
                 if len(lru.cache) > 0:
-                    E(f"[INV-1] Full device LRU not empty: {len(lru.cache)}")
+                    E(f"Full device LRU not empty: {len(lru.cache)}")
                 if len(self.host_lru_lists[ct].cache) > 0:
                     E(
-                        f"[INV-2] Full host LRU not empty: {len(self.host_lru_lists[ct].cache)}"
+                        f"Full host LRU not empty: {len(self.host_lru_lists[ct].cache)}"
                     )
             else:
-                # INV-1: Aux device value ↔ device LRU
+                # Aux device values must match the device LRU.
                 tree_ids = {
                     n.id
                     for n in all_nodes
@@ -1695,10 +1695,10 @@ class UnifiedRadixCache(BasePrefixCache):
                 lru_ids = set(lru.cache.keys())
                 if tree_ids != lru_ids:
                     E(
-                        f"[INV-1] {ct} device LRU: "
+                        f"{ct} device LRU: "
                         f"+tree={tree_ids - lru_ids}, +lru={lru_ids - tree_ids}"
                     )
-                # INV-2: Aux S3 (value=None, host_value!=None) ↔ host LRU
+                # Aux host-only states must match the host LRU.
                 host_lru = self.host_lru_lists[ct]
                 s3_ids = {
                     n.id
@@ -1710,13 +1710,13 @@ class UnifiedRadixCache(BasePrefixCache):
                 host_lru_ids = set(host_lru.cache.keys())
                 if s3_ids != host_lru_ids:
                     E(
-                        f"[INV-2] {ct} host LRU: "
+                        f"{ct} host LRU: "
                         f"+S3={s3_ids - host_lru_ids}, +lru={host_lru_ids - s3_ids}"
                     )
-                # INV-5: same aux not in both device and host LRU
+                # The same aux node must not appear in both device and host LRU.
                 inv5_overlap = lru_ids & host_lru_ids
                 if inv5_overlap:
-                    E(f"[INV-5] {ct} in both device and host LRU: {inv5_overlap}")
+                    E(f"{ct} in both device and host LRU: {inv5_overlap}")
                 # Linked-list integrity
                 self._check_lru_linked_list(lru, ct, "device", errors)
                 self._check_lru_linked_list(host_lru, ct, "host", errors)

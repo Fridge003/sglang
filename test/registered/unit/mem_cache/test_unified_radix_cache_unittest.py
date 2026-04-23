@@ -908,11 +908,11 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     # ================================================================
-    # Evict Chain Tests (T3/T5/T6 state transitions, cascade, tombstone)
+    # Evict chain tests covering demotion, cascade, and tombstone cleanup.
     # ================================================================
 
     def test_evict_leaf_frees_all_components(self):
-        """T5: evicting a D-leaf frees Full + all aux components atomically."""
+        """Evicting a device leaf frees Full and all aux components atomically."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         seq = self._make_seq(1, 3)
         self._insert(tree, allocator, req_to_token_pool, seq)
@@ -1216,7 +1216,7 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     def test_hicache_evict_to_host(self):
-        """T3: backuped D-leaf eviction demotes to S3 (host only)."""
+        """Evicting a backed-up device leaf demotes it to host-only state."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
@@ -1288,7 +1288,7 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     def test_hicache_host_leaf_eviction(self):
-        """T6: H-leaf eviction removes node from tree entirely."""
+        """Evicting a host leaf removes the node from the tree entirely."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
@@ -1312,7 +1312,7 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     def test_hicache_unevict_on_insert(self):
-        """T7: inserting through an evicted node restores Full device."""
+        """Inserting through an evicted node restores Full device state."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         base = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, base)
@@ -1335,7 +1335,7 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     def test_hicache_backup_continuity(self):
-        """A4: backed-up nodes form a continuous prefix from root."""
+        """Backed-up nodes form a continuous prefix from the root."""
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
         chain = self._make_seq(1, 4)
         ps = self.cfg.page_size
@@ -1354,12 +1354,12 @@ class UnifiedRadixCacheSuite:
                 parent = node.parent
                 self.assertTrue(
                     parent is tree.root_node or parent.backuped,
-                    f"A4 violated: node {node.id} backed up but parent {parent.id} not",
+                    f"Backup continuity violated: node {node.id} backed up but parent {parent.id} not",
                 )
         tree.sanity_check()
 
     def test_hicache_evict_to_host_updates_aux_lru(self):
-        """T3: aux components move from device LRU to host LRU on D->H eviction."""
+        """Aux components move from device LRU to host LRU on device-to-host eviction."""
         if not self.cfg.has_mamba:
             self.skipTest("requires Mamba component")
         tree, allocator, req_to_token_pool = build_fixture(self.cfg)
