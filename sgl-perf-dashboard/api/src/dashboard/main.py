@@ -272,36 +272,102 @@ def get_previous_run(run_id: int) -> dict[str, int | None]:
 
 @app.get("/api/configs", response_model=list[ConfigSummary])
 def list_configs() -> list[ConfigSummary]:
+    """Per-config summary.
+
+    `latest_status` aggregates the most recent *workflow's* rows for a config
+    (not a single row): any `failed` → failed, else any `partial` → partial,
+    else `passed`. Makes the card colour a reliable "was the last nightly
+    clean?" signal.
+
+    `latest_run_id` points at the most problematic row in that workflow
+    (failed > partial > passed) so clicking the card lands on whatever needs
+    attention.
+    """
+    out: list[ConfigSummary] = []
     with connect(settings.db_path) as conn:
-        rows = conn.execute("""
+        config_rows = conn.execute("""
             SELECT
                 config_name,
-                MAX(started_at) AS latest_started_at,
                 GROUP_CONCAT(DISTINCT concurrency) AS concurrency_csv
             FROM runs
             GROUP BY config_name
             ORDER BY config_name
-            """).fetchall()
-        out = []
-        for r in rows:
-            latest = conn.execute(
+        """).fetchall()
+
+        for cr in config_rows:
+            config_name = cr["config_name"]
+
+            latest_wf = conn.execute(
                 """
-                SELECT id, status FROM runs
-                WHERE config_name = ? AND started_at = ?
+                SELECT github_run_id, github_run_attempt,
+                       MAX(started_at) AS started_at
+                FROM runs
+                WHERE config_name = ?
+                GROUP BY github_run_id, github_run_attempt
+                ORDER BY started_at DESC
                 LIMIT 1
                 """,
-                (r["config_name"], r["latest_started_at"]),
+                (config_name,),
             ).fetchone()
-            concs = sorted(int(c) for c in (r["concurrency_csv"] or "").split(",") if c)
+            if latest_wf is None:
+                continue
+
+            agg = conn.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status = 'failed'  THEN 1 ELSE 0 END) AS n_failed,
+                    SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) AS n_partial,
+                    MAX(started_at) AS latest_started_at
+                FROM runs
+                WHERE config_name = ?
+                  AND github_run_id = ?
+                  AND github_run_attempt = ?
+                """,
+                (
+                    config_name,
+                    latest_wf["github_run_id"],
+                    latest_wf["github_run_attempt"],
+                ),
+            ).fetchone()
+
+            if agg["n_failed"]:
+                status = "failed"
+            elif agg["n_partial"]:
+                status = "partial"
+            else:
+                status = "passed"
+
+            representative = conn.execute(
+                """
+                SELECT id FROM runs
+                WHERE config_name = ?
+                  AND github_run_id = ?
+                  AND github_run_attempt = ?
+                ORDER BY
+                  CASE status WHEN 'failed' THEN 0 WHEN 'partial' THEN 1 ELSE 2 END,
+                  concurrency
+                LIMIT 1
+                """,
+                (
+                    config_name,
+                    latest_wf["github_run_id"],
+                    latest_wf["github_run_attempt"],
+                ),
+            ).fetchone()
+
+            concs = sorted(
+                int(c) for c in (cr["concurrency_csv"] or "").split(",") if c
+            )
             out.append(
                 ConfigSummary(
-                    config_name=r["config_name"],
-                    latest_run_id=latest["id"] if latest else None,
-                    latest_started_at=r["latest_started_at"],
-                    latest_status=latest["status"] if latest else None,
+                    config_name=config_name,
+                    latest_run_id=representative["id"] if representative else None,
+                    latest_started_at=agg["latest_started_at"],
+                    latest_status=status,
                     concurrency_levels=concs,
                 )
             )
+
     return out
 
 
