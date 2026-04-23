@@ -378,19 +378,6 @@ install_extra_dependencies() {
     fi
     $PIP_CMD uninstall xformers || true
 
-    kernels download python || true
-    kernels lock python || true
-    [ -e "${HOME}/.cache/sglang" ] && [ ! -d "${HOME}/.cache/sglang" ] && rm -f "${HOME}/.cache/sglang"
-    mkdir -p "${HOME}/.cache/sglang/"
-    mv python/kernels.lock "${HOME}/.cache/sglang/" || true
-
-    $PIP_CMD install "setuptools==70.0.0" $PIP_INSTALL_SUFFIX
-    [ -d human-eval ] || git clone https://github.com/merrymercy/human-eval.git
-    (
-        cd human-eval
-        $PIP_CMD install -e . --no-build-isolation $PIP_INSTALL_SUFFIX
-    )
-
     mark_step_done "${FUNCNAME[0]}"
 }
 
@@ -416,6 +403,23 @@ fix_other_dependencies() {
     else
         $PIP_CMD install ${CUDNN_PKG}==${NVIDIA_CUDNN_VERSION} $PIP_INSTALL_SUFFIX
     fi
+
+    mark_step_done "${FUNCNAME[0]}"
+}
+
+install_kernels_and_human_eval() {
+    kernels download python || true
+    kernels lock python || true
+    [ -e "${HOME}/.cache/sglang" ] && [ ! -d "${HOME}/.cache/sglang" ] && rm -f "${HOME}/.cache/sglang"
+    mkdir -p "${HOME}/.cache/sglang/"
+    mv python/kernels.lock "${HOME}/.cache/sglang/" || true
+
+    $PIP_CMD install "setuptools==70.0.0" $PIP_INSTALL_SUFFIX
+    [ -d human-eval ] || git clone https://github.com/merrymercy/human-eval.git
+    (
+        cd human-eval
+        $PIP_CMD install -e . --no-build-isolation $PIP_INSTALL_SUFFIX
+    )
 
     mark_step_done "${FUNCNAME[0]}"
 }
@@ -471,6 +475,7 @@ main() {
     stabilize_flashinfer_jit_paths
     install_extra_dependencies
     fix_other_dependencies
+    install_kernels_and_human_eval
     prepare_runner
     setup_ld_library_path
     verify_imports
