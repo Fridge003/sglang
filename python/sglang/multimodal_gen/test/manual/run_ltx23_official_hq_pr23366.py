@@ -637,7 +637,13 @@ def _patch_stage2_block_probe_hooks() -> None:
         prompt_timestep,
         context_mask,
         cross_attention_adaln=False,
+        probe_path=None,
     ):
+        call_kwargs = {
+            "cross_attention_adaln": cross_attention_adaln,
+        }
+        if "probe_path" in original_apply_text_cross_attention.__code__.co_varnames:
+            call_kwargs["probe_path"] = probe_path
         out = original_apply_text_cross_attention(
             self,
             x,
@@ -648,7 +654,7 @@ def _patch_stage2_block_probe_hooks() -> None:
             timestep,
             prompt_timestep,
             context_mask,
-            cross_attention_adaln=cross_attention_adaln,
+            **call_kwargs,
         )
 
         state = _STAGE2_BLOCK_PROBE_STATE
