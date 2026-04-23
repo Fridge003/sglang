@@ -31,6 +31,11 @@ services:
       context: ./web
     container_name: dashboard-web
     restart: unless-stopped
+    # Bound to 127.0.0.1 so the Brev tunnel agent (running on the host) can
+    # reach it without exposing port 3000 to the public internet. Caddy still
+    # reaches the container over the docker network by service name.
+    ports:
+      - "127.0.0.1:3000:3000"
     environment:
       API_INTERNAL_URL: http://dashboard-api:8000
       NEXT_PUBLIC_API_URL: /api
