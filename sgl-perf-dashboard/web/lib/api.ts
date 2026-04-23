@@ -71,6 +71,13 @@ export interface TrendPoint {
   value: number;
 }
 
+export interface RunSummaryAI {
+  body: string;
+  model: string | null;
+  tokens_used: number | null;
+  generated_at: string;
+}
+
 export interface HealthStatus {
   status: string;
   runs: number;
@@ -178,6 +185,7 @@ export const api = {
     return request<RunSummary[]>(`/runs${q ? `?${q}` : ""}`);
   },
   getRun: (id: number) => request<RunDetail>(`/runs/${id}`),
+  getRunSummary: (id: number) => request<RunSummaryAI>(`/runs/${id}/summary`),
   listConfigs: () => request<ConfigSummary[]>("/configs"),
   configTrend: (
     config: string,

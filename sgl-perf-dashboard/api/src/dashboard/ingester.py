@@ -106,6 +106,92 @@ def _read_json(s3, key: str) -> dict[str, Any] | None:
         return None
 
 
+def _read_text(s3, key: str) -> str | None:
+    try:
+        obj = s3.get_object(Bucket=settings.minio_bucket, Key=key)
+        return obj["Body"].read().decode("utf-8", errors="replace")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("failed to fetch %s: %s", key, exc)
+        return None
+
+
+def _list_ai_analysis_keys(s3) -> list[str]:
+    """Every object ending in `/ai_analysis.md` across the bucket."""
+    paginator = s3.get_paginator("list_objects_v2")
+    out: list[str] = []
+    for page in paginator.paginate(Bucket=settings.minio_bucket):
+        for obj in page.get("Contents") or []:
+            if obj["Key"].endswith("/ai_analysis.md"):
+                out.append(obj["Key"])
+    return out
+
+
+def _sync_ai_analyses(conn: sqlite3.Connection, s3) -> int:
+    """For each `ai_analysis.md` in S3, attach it to every run row that shares
+    the same (github_run_id, attempt, config_name). A single markdown file
+    applies to the whole matrix job — every concurrency row under that config.
+
+    Idempotent: skips analyses already stored in ai_summaries for all matching
+    runs. Returns count of newly-inserted rows.
+    """
+    keys = _list_ai_analysis_keys(s3)
+    inserted = 0
+    for key in keys:
+        parts = key.split("/")
+        # Expected: <trigger>/<run-attempt>/<seq_len>/<config>/ai_analysis.md
+        if len(parts) != 5 or "-" not in parts[1]:
+            continue
+        run_attempt = parts[1]
+        config_name = parts[3]
+        try:
+            github_run_id, attempt_str = run_attempt.rsplit("-", 1)
+            attempt = int(attempt_str)
+        except ValueError:
+            continue
+
+        run_rows = conn.execute(
+            """
+            SELECT id FROM runs
+            WHERE github_run_id = ? AND github_run_attempt = ? AND config_name = ?
+            """,
+            (github_run_id, attempt, config_name),
+        ).fetchall()
+        if not run_rows:
+            continue
+
+        run_ids = [r["id"] for r in run_rows]
+        placeholders = ",".join("?" for _ in run_ids)
+        existing = conn.execute(
+            f"""
+            SELECT run_id FROM ai_summaries
+            WHERE summary_type = 'log_analysis' AND run_id IN ({placeholders})
+            """,
+            run_ids,
+        ).fetchall()
+        existing_ids = {e["run_id"] for e in existing}
+
+        missing = [rid for rid in run_ids if rid not in existing_ids]
+        if not missing:
+            continue
+
+        body = _read_text(s3, key)
+        if body is None:
+            continue
+
+        now = _now_iso()
+        for rid in missing:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO ai_summaries
+                    (run_id, summary_type, body, model, generated_at)
+                VALUES (?, 'log_analysis', ?, 'opencode-via-modal', ?)
+                """,
+                (rid, body, now),
+            )
+            inserted += 1
+    return inserted
+
+
 def _list_result_keys(s3, cursor: str | None) -> list[tuple[str, datetime]]:
     """Return (key, last_modified) for every result_concurrency_*.json in the bucket.
 
@@ -294,6 +380,7 @@ def run_once() -> dict[str, Any]:
         "reconcile_failed": 0,
         "reconcile_partial": 0,
         "reconcile_orphans": 0,
+        "ai_summaries_fetched": 0,
     }
 
     newly_inserted_run_ids: list[int] = []
@@ -379,6 +466,13 @@ def run_once() -> dict[str, Any]:
             stats["reconcile_orphans"] = rc.get("orphans_found", 0)
         except Exception as exc:  # noqa: BLE001
             logger.warning("reconciler failed: %s", exc)
+
+        try:
+            stats["ai_summaries_fetched"] = _sync_ai_analyses(conn, s3)
+            if stats["ai_summaries_fetched"]:
+                conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ai-analysis sync failed: %s", exc)
 
     github.close()
     logger.info("ingest complete: %s", stats)

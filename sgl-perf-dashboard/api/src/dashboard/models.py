@@ -154,3 +154,12 @@ class CommitRunsResult(BaseModel):
     pr_number: int | None
     pr_title: str | None
     runs: list[RunSummary]
+
+
+class RunSummaryAI(BaseModel):
+    """Claude-generated narrative attached to a single run."""
+
+    body: str
+    model: str | None
+    tokens_used: int | None
+    generated_at: str
