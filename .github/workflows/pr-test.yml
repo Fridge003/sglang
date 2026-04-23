@@ -452,7 +452,7 @@ jobs:
         (!inputs.target_stage && needs.call-gate.result == 'success') ||
         (inputs.target_stage && inputs.include_wheel_build)
       )
-    runs-on: x64-kernel-build-node
+    runs-on: x64-kernel-build-node-test
     timeout-minutes: 240
     strategy:
       matrix:

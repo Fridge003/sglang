@@ -18,6 +18,7 @@ limitations under the License.
 
 #include "sgl_kernel_ops.h"
 
+// dummy change to trigger sgl-kernel build on test runners
 TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   /*
    * From csrc/allreduce
