@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { CopyLinkButton } from "@/components/copy-link-button";
 import { RerunLink } from "@/components/rerun-link";
+import { StatusTooltip } from "@/components/status-tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -36,27 +37,29 @@ export default async function RunDetailPage({
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <Badge variant="outline" className="font-mono lowercase">{run.trigger}</Badge>
-          <Badge
-            variant={
-              run.status === "passed"
-                ? "success"
-                : run.status === "partial"
-                  ? "warning"
-                  : "destructive"
-            }
-          >
-            <span
-              className={`inline-block h-1.5 w-1.5 rounded-full ${
+          <StatusTooltip status={run.status} extraNote={run.failure_reason}>
+            <Badge
+              variant={
                 run.status === "passed"
-                  ? "bg-success"
+                  ? "success"
                   : run.status === "partial"
-                    ? "bg-warning"
-                    : "bg-destructive"
-              }`}
-              aria-hidden
-            />
-            {run.status}
-          </Badge>
+                    ? "warning"
+                    : "destructive"
+              }
+            >
+              <span
+                className={`inline-block h-1.5 w-1.5 rounded-full ${
+                  run.status === "passed"
+                    ? "bg-success"
+                    : run.status === "partial"
+                      ? "bg-warning"
+                      : "bg-destructive"
+                }`}
+                aria-hidden
+              />
+              {run.status}
+            </Badge>
+          </StatusTooltip>
           <RerunLink prNumber={run.pr_number} configName={run.config_name} />
           <CopyLinkButton />
         </div>

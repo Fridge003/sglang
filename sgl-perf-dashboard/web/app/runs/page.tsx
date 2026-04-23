@@ -4,6 +4,7 @@ import { formatRelative } from "@/lib/format";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AutoRefresh } from "@/components/auto-refresh";
+import { StatusTooltip } from "@/components/status-tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -117,27 +118,29 @@ export default async function RunsPage({
                     )}
                   </td>
                   <td className="px-4 py-2.5">
-                    <Badge
-                      variant={
-                        r.status === "passed"
-                          ? "success"
-                          : r.status === "partial"
-                            ? "warning"
-                            : "destructive"
-                      }
-                    >
-                      <span
-                        className={`inline-block h-1.5 w-1.5 rounded-full ${
+                    <StatusTooltip status={r.status} extraNote={r.failure_reason}>
+                      <Badge
+                        variant={
                           r.status === "passed"
-                            ? "bg-success"
+                            ? "success"
                             : r.status === "partial"
-                              ? "bg-warning"
-                              : "bg-destructive"
-                        }`}
-                        aria-hidden
-                      />
-                      {r.status}
-                    </Badge>
+                              ? "warning"
+                              : "destructive"
+                        }
+                      >
+                        <span
+                          className={`inline-block h-1.5 w-1.5 rounded-full ${
+                            r.status === "passed"
+                              ? "bg-success"
+                              : r.status === "partial"
+                                ? "bg-warning"
+                                : "bg-destructive"
+                          }`}
+                          aria-hidden
+                        />
+                        {r.status}
+                      </Badge>
+                    </StatusTooltip>
                   </td>
                 </tr>
               ))}

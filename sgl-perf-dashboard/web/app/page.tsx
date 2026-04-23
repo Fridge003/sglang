@@ -4,6 +4,7 @@ import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { AutoRefresh } from "@/components/auto-refresh";
+import { StatusTooltip } from "@/components/status-tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -198,10 +199,12 @@ function ConfigCard({ config }: { config: ConfigSummary }) {
             <CardTitle className="font-mono text-[13px] leading-tight text-foreground/90">
               {config.config_name}
             </CardTitle>
-            <Badge variant={isPassing ? "success" : isPartial ? "warning" : "destructive"}>
-              <StatusDot passing={isPassing} />
-              {config.latest_status ?? "—"}
-            </Badge>
+            <StatusTooltip status={config.latest_status ?? ""}>
+              <Badge variant={isPassing ? "success" : isPartial ? "warning" : "destructive"}>
+                <StatusDot passing={isPassing} />
+                {config.latest_status ?? "—"}
+              </Badge>
+            </StatusTooltip>
           </div>
           <CardDescription>
             {config.concurrency_levels.length} concurrency level
@@ -268,18 +271,20 @@ function RunsTable({ runs }: { runs: RunSummary[] }) {
                 {r.commit_author ?? "—"}
               </td>
               <td className="px-4 py-2.5">
-                <Badge
-                  variant={
-                    r.status === "passed"
-                      ? "success"
-                      : r.status === "partial"
-                        ? "warning"
-                        : "destructive"
-                  }
-                >
-                  <StatusDot passing={r.status === "passed"} />
-                  {r.status}
-                </Badge>
+                <StatusTooltip status={r.status}>
+                  <Badge
+                    variant={
+                      r.status === "passed"
+                        ? "success"
+                        : r.status === "partial"
+                          ? "warning"
+                          : "destructive"
+                    }
+                  >
+                    <StatusDot passing={r.status === "passed"} />
+                    {r.status}
+                  </Badge>
+                </StatusTooltip>
               </td>
             </tr>
           ))}

@@ -5,6 +5,7 @@ import { formatRelative } from "@/lib/format";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { CopyLinkButton } from "@/components/copy-link-button";
+import { StatusTooltip } from "@/components/status-tooltip";
 
 export const dynamic = "force-dynamic";
 
@@ -107,17 +108,19 @@ export default async function CommitPage({
                     {r.concurrency.toLocaleString()}
                   </td>
                   <td className="px-4 py-2.5">
-                    <Badge
-                      variant={
-                        r.status === "passed"
-                          ? "success"
-                          : r.status === "partial"
-                            ? "warning"
-                            : "destructive"
-                      }
-                    >
-                      {r.status}
-                    </Badge>
+                    <StatusTooltip status={r.status} extraNote={r.failure_reason}>
+                      <Badge
+                        variant={
+                          r.status === "passed"
+                            ? "success"
+                            : r.status === "partial"
+                              ? "warning"
+                              : "destructive"
+                        }
+                      >
+                        {r.status}
+                      </Badge>
+                    </StatusTooltip>
                   </td>
                 </tr>
               ))}
