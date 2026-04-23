@@ -102,7 +102,7 @@ ARG USE_CCACHE=1
 #   BUILD_JOBS: number of parallel compilation units (ninja -j)
 #   NVCC_THREADS: per-compilation-unit NVCC --threads (multi-arch PTXAS)
 ARG BUILD_JOBS=0
-ARG NVCC_THREADS=32
+ARG NVCC_THREADS=4
 
 RUN --mount=type=cache,id=sgl-kernel-ccache,target=/ccache \
     --mount=type=cache,id=sgl-kernel-pip,target=/root/.cache/pip \
@@ -129,7 +129,15 @@ RUN --mount=type=cache,id=sgl-kernel-ccache,target=/ccache \
     elif [ "${BUILD_JOBS}" -gt 0 ] 2>/dev/null; then \
       export CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}; \
     else \
-      export CMAKE_BUILD_PARALLEL_LEVEL=$(echo "$(( $(nproc) * 2 / 3 )) 64" | awk '{print ($1 < $2) ? $1 : $2}'); \
+      CPU_JOBS=$(( $(nproc) * 2 / 3 )); \
+      MEM_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo); \
+      MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 )); \
+      [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1; \
+      JOBS=${CPU_JOBS}; \
+      [ "${MEM_BOUND}" -lt "${JOBS}" ] && JOBS=${MEM_BOUND}; \
+      [ "${JOBS}" -gt 64 ] && JOBS=64; \
+      echo "Auto parallelism: CPU_JOBS=${CPU_JOBS}, MEM_KB=${MEM_KB:-unknown}, MEM_BOUND=${MEM_BOUND} -> JOBS=${JOBS}"; \
+      export CMAKE_BUILD_PARALLEL_LEVEL=${JOBS}; \
     fi; \
     export CMAKE_ARGS="${CMAKE_ARGS:-} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS}"; \
     if [ -n "${ENABLE_CMAKE_PROFILE:-}" ]; then \

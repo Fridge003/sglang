@@ -57,7 +57,7 @@ echo "Buildx cache:   ${BUILDX_CACHE_DIR}"
 echo "ccache dir:     ${CCACHE_HOST_DIR}"
 echo "Builder:        ${BUILDER_NAME}"
 echo "BUILD_JOBS:     ${BUILD_JOBS:-auto}"
-echo "NVCC_THREADS:   ${NVCC_THREADS:-32}"
+echo "NVCC_THREADS:   ${NVCC_THREADS:-4}"
 echo "USE_CCACHE:     ${USE_CCACHE:-1}"
 echo "RESET_BUILDER:  ${RESET_BUILDER:-0}"
 echo "----------------------------------------"
@@ -95,7 +95,7 @@ echo "Deps image ready: ${DEPS_TAG}"
 # This allows ccache to persist on the host filesystem across builds.
 CCACHE_FLAG="${USE_CCACHE:-1}"
 BUILD_JOBS_FLAG="${BUILD_JOBS:-0}"
-NVCC_THREADS_FLAG="${NVCC_THREADS:-32}"
+NVCC_THREADS_FLAG="${NVCC_THREADS:-4}"
 
 docker run --rm \
   --network=host \
@@ -134,7 +134,17 @@ if [ "'"${ARCH}"'" = "aarch64" ]; then
 elif [ "${BUILD_JOBS}" -gt 0 ] 2>/dev/null; then
   export CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 else
-  export CMAKE_BUILD_PARALLEL_LEVEL=$(echo "$(( $(nproc) * 2 / 3 )) 64" | awk "{print (\$1 < \$2) ? \$1 : \$2}")
+  # Default: clamp by both CPU and available RAM. CUTLASS/flashinfer TUs peak
+  # around ~5 GB each, so big-CPU/modest-RAM runners OOM without a mem clamp.
+  CPU_JOBS=$(( $(nproc) * 2 / 3 ))
+  MEM_KB=$(awk "/MemAvailable/ {print \$2}" /proc/meminfo)
+  MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 ))
+  [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1
+  JOBS=${CPU_JOBS}
+  [ "${MEM_BOUND}" -lt "${JOBS}" ] && JOBS=${MEM_BOUND}
+  [ "${JOBS}" -gt 64 ] && JOBS=64
+  echo "Auto parallelism: CPU_JOBS=${CPU_JOBS}, MEM_KB=${MEM_KB:-unknown}, MEM_BOUND=${MEM_BOUND} -> JOBS=${JOBS}"
+  export CMAKE_BUILD_PARALLEL_LEVEL=${JOBS}
 fi
 
 export CMAKE_ARGS="${CMAKE_ARGS:-} -DSGL_KERNEL_COMPILE_THREADS=${NVCC_THREADS}"

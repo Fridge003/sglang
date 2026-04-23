@@ -150,8 +150,8 @@ set(SGL_KERNEL_CUDA_FLAGS
 
     # The following flag leads to the CMAKE_BUILD_PARALLEL_LEVEL breaking,
     # it triggers OOM with low memory host. Extract the threads number to
-    # option named SGL_KERNEL_COMPILE_THREADS, default value 32.
-    # "--threads=32"
+    # option named SGL_KERNEL_COMPILE_THREADS, default value 4.
+    # "--threads=4"
 
     # Supress warnings
     "-Xcompiler=-Wno-clang-format-violations"
@@ -168,7 +168,7 @@ set(SGL_KERNEL_CUDA_FLAGS
     # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
 )
 
-set(SGL_KERNEL_COMPILE_THREADS 32 CACHE STRING "Set compilation threads, default 32")
+set(SGL_KERNEL_COMPILE_THREADS 4 CACHE STRING "Set compilation threads, default 4")
 
 # When SGL_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
 if (NOT SGL_KERNEL_COMPILE_THREADS MATCHES "^[0-9]+$")
