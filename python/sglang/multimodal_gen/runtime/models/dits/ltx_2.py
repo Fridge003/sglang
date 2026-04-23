@@ -2318,6 +2318,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "video": hidden_states,
                 "shift": shift,
                 "scale": scale,
+                "embedded_timestep": embedded_timestep,
+                "scale_shift_table": self.scale_shift_table,
             },
         )
         hidden_states = hidden_states * (1 + scale) + shift
@@ -2330,6 +2332,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             else None,
             {
                 "video": hidden_states,
+                "proj_out_weight": self.proj_out.weight,
+                "proj_out_bias": self.proj_out.bias,
             },
         )
         hidden_states, _ = self.proj_out(hidden_states)
@@ -2366,6 +2370,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 "audio": audio_hidden_states,
                 "shift": audio_shift,
                 "scale": audio_scale,
+                "embedded_timestep": audio_embedded_timestep,
+                "scale_shift_table": self.audio_scale_shift_table,
             },
         )
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
@@ -2378,6 +2384,8 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
             else None,
             {
                 "audio": audio_hidden_states,
+                "proj_out_weight": self.audio_proj_out.weight,
+                "proj_out_bias": self.audio_proj_out.bias,
             },
         )
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
