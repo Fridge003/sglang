@@ -496,3 +496,4 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
 }
 
 REGISTER_EXTENSION(common_ops)
+// dummy: trigger sgl-kernel rebuild for cu129/cu130 matrix CI test
