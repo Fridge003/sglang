@@ -27,8 +27,11 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+import boto3
 import yaml
+from botocore.client import Config as BotoConfig
 from dashboard.s3_paths import parse_config_name, parse_seq_len
 
 logger = logging.getLogger(__name__)
@@ -191,6 +194,123 @@ def _insert_placeholder(
     return cur.rowcount > 0
 
 
+def _make_s3_client():
+    from dashboard.config import settings
+
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.minio_endpoint,
+        aws_access_key_id=settings.minio_access_key,
+        aws_secret_access_key=settings.minio_secret_key,
+        region_name=settings.minio_region,
+        config=BotoConfig(signature_version="s3v4"),
+    )
+
+
+def _discover_orphan_workflows(s3: Any) -> list[dict]:
+    """Find workflow_run_id prefixes in S3 that contain no result JSONs.
+
+    These represent workflows that crashed before any benchmark finished but
+    still uploaded log artifacts. The ingester can't see them because it only
+    indexes `results_concurrency_*.json`.
+
+    Returns a list of dicts: {trigger, github_run_id, github_run_attempt,
+    first_seen_at}.
+    """
+    from dashboard.config import settings
+
+    orphans: list[dict] = []
+    paginator = s3.get_paginator("list_objects_v2")
+
+    for trigger in ("cron", "manual"):
+        resp = s3.list_objects_v2(
+            Bucket=settings.minio_bucket, Prefix=f"{trigger}/", Delimiter="/"
+        )
+        for p in resp.get("CommonPrefixes") or []:
+            prefix = p["Prefix"]  # e.g. "manual/24803056480-1/"
+            has_result = False
+            earliest: datetime | None = None
+            # Paginated scan — a workflow's log upload can exceed 1000 keys.
+            for page in paginator.paginate(Bucket=settings.minio_bucket, Prefix=prefix):
+                for obj in page.get("Contents") or []:
+                    if "/results_concurrency_" in obj["Key"]:
+                        has_result = True
+                    lm = obj.get("LastModified")
+                    if lm and (earliest is None or lm < earliest):
+                        earliest = lm
+                if has_result:
+                    break
+            if has_result:
+                continue
+
+            # Parse "<trigger>/<run_id>-<attempt>/"
+            parts = prefix.strip("/").split("/")
+            if len(parts) != 2 or "-" not in parts[1]:
+                continue
+            run_id, attempt_str = parts[1].rsplit("-", 1)
+            try:
+                attempt = int(attempt_str)
+            except ValueError:
+                continue
+
+            orphans.append(
+                {
+                    "trigger": trigger,
+                    "github_run_id": run_id,
+                    "github_run_attempt": attempt,
+                    "started_at": (earliest or datetime.now(UTC)).isoformat(),
+                }
+            )
+
+    return orphans
+
+
+def _insert_orphan_placeholder(
+    conn: sqlite3.Connection,
+    orphan: dict,
+    config_name: str,
+    concurrency: int,
+    now_iso: str,
+) -> bool:
+    """Insert a failed placeholder for a workflow that produced no JSONs at all."""
+    from dashboard.config import settings
+
+    model_prefix, precision, recipe = parse_config_name(config_name)
+    github_run_url = (
+        f"https://github.com/{settings.github_repo}/actions/runs/"
+        f"{orphan['github_run_id']}/attempts/{orphan['github_run_attempt']}"
+    )
+    cur = conn.execute(
+        """
+        INSERT OR IGNORE INTO runs (
+            github_run_id, github_run_attempt, github_run_url,
+            trigger, config_name,
+            model_prefix, precision, recipe,
+            concurrency,
+            started_at, status,
+            s3_log_prefix, ingested_at, failure_reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            orphan["github_run_id"],
+            orphan["github_run_attempt"],
+            github_run_url,
+            orphan["trigger"],
+            config_name,
+            model_prefix,
+            precision,
+            recipe,
+            concurrency,
+            orphan["started_at"],
+            "failed",
+            f"{orphan['trigger']}/{orphan['github_run_id']}-{orphan['github_run_attempt']}/",
+            now_iso,
+            "workflow produced no result JSONs",
+        ),
+    )
+    return cur.rowcount > 0
+
+
 def reconcile(conn: sqlite3.Connection) -> dict[str, int]:
     """Scan recent workflows, insert failed/partial rows for missing expected pairs."""
     from dashboard.config import settings
@@ -199,6 +319,7 @@ def reconcile(conn: sqlite3.Connection) -> dict[str, int]:
         "workflows_examined": 0,
         "failed_inserted": 0,
         "partial_inserted": 0,
+        "orphans_found": 0,
     }
 
     expected = load_expected_matrix(
@@ -262,7 +383,46 @@ def reconcile(conn: sqlite3.Connection) -> dict[str, int]:
             (f"{wf['github_run_id']}-{wf['github_run_attempt']}", now_iso),
         )
 
+    # Orphan workflows: S3 prefixes with no result JSONs. The ingester never
+    # sees these, so they'd be invisible to the dashboard without this pass.
+    try:
+        s3 = _make_s3_client()
+        orphans = _discover_orphan_workflows(s3)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("orphan discovery failed: %s", exc)
+        orphans = []
+
+    for orphan in orphans:
+        existing = conn.execute(
+            """
+            SELECT 1 FROM runs
+            WHERE github_run_id = ? AND github_run_attempt = ?
+            LIMIT 1
+            """,
+            (orphan["github_run_id"], orphan["github_run_attempt"]),
+        ).fetchone()
+        if existing:
+            # Either an earlier orphan pass already populated this, or the
+            # ingester has since picked up a JSON (unlikely for orphans).
+            continue
+        stats["orphans_found"] += 1
+        for cfg_name, concs in expected.items():
+            for conc in concs:
+                if _insert_orphan_placeholder(conn, orphan, cfg_name, conc, now_iso):
+                    stats["failed_inserted"] += 1
+        conn.execute(
+            """
+            INSERT INTO reconciliation_state (workflow_run_id, reconciled_at)
+            VALUES (?, ?)
+            ON CONFLICT(workflow_run_id) DO UPDATE SET reconciled_at = excluded.reconciled_at
+            """,
+            (
+                f"{orphan['github_run_id']}-{orphan['github_run_attempt']}",
+                now_iso,
+            ),
+        )
+
     conn.commit()
-    if stats["failed_inserted"] or stats["partial_inserted"]:
+    if stats["failed_inserted"] or stats["partial_inserted"] or stats["orphans_found"]:
         logger.info("reconcile: %s", stats)
     return stats

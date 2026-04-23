@@ -293,6 +293,7 @@ def run_once() -> dict[str, Any]:
         "errors": 0,
         "reconcile_failed": 0,
         "reconcile_partial": 0,
+        "reconcile_orphans": 0,
     }
 
     newly_inserted_run_ids: list[int] = []
@@ -375,6 +376,7 @@ def run_once() -> dict[str, Any]:
             rc = reconciler.reconcile(conn)
             stats["reconcile_failed"] = rc.get("failed_inserted", 0)
             stats["reconcile_partial"] = rc.get("partial_inserted", 0)
+            stats["reconcile_orphans"] = rc.get("orphans_found", 0)
         except Exception as exc:  # noqa: BLE001
             logger.warning("reconciler failed: %s", exc)
 
