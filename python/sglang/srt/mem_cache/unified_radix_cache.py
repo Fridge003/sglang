@@ -1626,13 +1626,9 @@ class UnifiedRadixCache(BasePrefixCache):
                 p_dev = node.parent.component_data[FCT].value is not None
                 p_hst = node.parent.component_data[FCT].host_value is not None
                 if full_dev and not p_dev:
-                    E(
-                        f"node {nid} device present but parent {node.parent.id} evicted"
-                    )
+                    E(f"node {nid} device present but parent {node.parent.id} evicted")
                 if full_hst and not p_hst:
-                    E(
-                        f"node {nid} backed up but parent {node.parent.id} not backed up"
-                    )
+                    E(f"node {nid} backed up but parent {node.parent.id} not backed up")
 
             # Lock hierarchy and counters must stay sane.
             fl = node.component_data[FCT].lock_ref
@@ -1700,9 +1696,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 if len(lru.cache) > 0:
                     E(f"Full device LRU not empty: {len(lru.cache)}")
                 if len(self.host_lru_lists[ct].cache) > 0:
-                    E(
-                        f"Full host LRU not empty: {len(self.host_lru_lists[ct].cache)}"
-                    )
+                    E(f"Full host LRU not empty: {len(self.host_lru_lists[ct].cache)}")
             else:
                 # Aux device values must match the device LRU.
                 tree_ids = {

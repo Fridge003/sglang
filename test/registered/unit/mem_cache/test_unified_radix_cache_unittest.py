@@ -3,6 +3,7 @@
 import unittest
 from dataclasses import dataclass
 from typing import Optional
+from unittest import mock
 
 import torch
 
@@ -204,17 +205,17 @@ def build_fixture(cfg: CacheConfig):
             need_sort=False,
         )
 
-    tree = UnifiedRadixCache(
-        params=CacheInitParams(
-            req_to_token_pool=req_to_token_pool,
-            token_to_kv_pool_allocator=allocator,
-            page_size=cfg.page_size,
-            disable=False,
-            sliding_window_size=cfg.sliding_window_size,
-            tree_components=cfg.components,
-            enable_mamba_extra_buffer=cfg.enable_mamba_extra_buffer,
-        ),
+    cache_init_params = CacheInitParams(
+        req_to_token_pool=req_to_token_pool,
+        token_to_kv_pool_allocator=allocator,
+        page_size=cfg.page_size,
+        disable=False,
+        sliding_window_size=cfg.sliding_window_size,
+        tree_components=cfg.components,
+        enable_mamba_extra_buffer=cfg.enable_mamba_extra_buffer,
     )
+    tree = UnifiedRadixCache(params=cache_init_params)
+    tree.cache_init_params = cache_init_params
 
     return tree, allocator, req_to_token_pool
 
@@ -1165,33 +1166,128 @@ class UnifiedRadixCacheSuite:
         tree.sanity_check()
 
     # ================================================================
-    # HiCache Unit Tests (simulated D<->H without real cache_controller)
+    # HiCache Unit Tests (real cache_controller D<->H backup/load)
     # ================================================================
 
-    def _simulate_backup(self, tree, node):
-        """Simulate D->H backup by manually setting host_value on Full."""
-        ct = ComponentType.FULL
-        cd = node.component_data[ct]
-        if cd.value is not None and cd.host_value is None:
-            cd.host_value = cd.value.clone()
-        # Backup mamba host_value if present
-        if self.cfg.has_mamba:
-            mcd = node.component_data[ComponentType.MAMBA]
-            if mcd.value is not None and mcd.host_value is None:
-                mcd.host_value = mcd.value.clone()
+    def _skip_unsupported_hicache_test(self):
+        if self.cfg.has_swa:
+            self.skipTest("HiCache tests do not run on SWA stacks")
+        return False
 
-    def _simulate_backup_tree(self, tree):
-        """Backup all non-root nodes (simulates write-through)."""
+    def _init_hicache(self, tree):
+        import sglang.srt.mem_cache.hybrid_cache.hybrid_pool_assembler as assembler
+
+        orig_kv_host_pool = assembler.MHATokenToKVPoolHost
+        orig_mamba_host_pool = assembler.MambaPoolHost
+
+        def kv_host_pool_wrapper(*args, **kwargs):
+            kwargs["pin_memory"] = False
+            return orig_kv_host_pool(*args, **kwargs)
+
+        def mamba_host_pool_wrapper(*args, **kwargs):
+            kwargs["pin_memory"] = False
+            return orig_mamba_host_pool(*args, **kwargs)
+
+        patchers = [
+            mock.patch.object(
+                assembler,
+                "MHATokenToKVPoolHost",
+                side_effect=kv_host_pool_wrapper,
+            ),
+            mock.patch.object(
+                assembler,
+                "MambaPoolHost",
+                side_effect=mamba_host_pool_wrapper,
+            ),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        server_args = ServerArgs(
+            model_path="dummy",
+            page_size=self.cfg.page_size,
+            hicache_io_backend="direct",
+            hicache_write_policy="write_through",
+        )
+        set_global_server_args_for_scheduler(server_args)
+        tree.init_hicache(server_args, tree.cache_init_params)
+        tree.write_through_threshold = 1 << 30
+        tree.load_back_threshold = 0
+
+    def _build_hicache_fixture(self):
+        fixture = build_fixture(self.cfg)
+        tree, _, _ = fixture
+        self._init_hicache(tree)
+        return fixture
+
+    def _backup_node(self, tree, node):
+        backed_up = tree.write_backup(node, write_back=True)
+        self.assertGreater(backed_up, 0)
+        tree.writing_check(write_back=True)
+        return backed_up
+
+    def _backup_tree(self, tree):
         stack = [tree.root_node]
         while stack:
             node = stack.pop()
+            children = list(node.children.values())
+            stack.extend(reversed(children))
             if node is not tree.root_node:
-                self._simulate_backup(tree, node)
-            stack.extend(node.children.values())
+                self._backup_node(tree, node)
+
+    def _load_back_node(self, tree, node):
+        device_indices = tree.load_back(node)
+        self.assertIsNotNone(device_indices)
+        producer_id = tree.ready_to_load_host_cache()
+        self.assertNotEqual(producer_id, -1)
+        for _, finish_event, _ in list(tree.cache_controller.ack_load_queue):
+            finish_event.synchronize()
+        tree.loading_check()
+        return device_indices
+
+    def _get_full_kv_pool(self, allocator):
+        kv_pool = allocator.get_kvcache()
+        return getattr(kv_pool, "full_kv_pool", kv_pool)
+
+    def _fill_full_kv(self, allocator, indices, marker):
+        kv_pool = self._get_full_kv_pool(allocator)
+        layer_id = kv_pool.start_layer
+        k_buf = kv_pool.get_key_buffer(layer_id)
+        v_buf = kv_pool.get_value_buffer(layer_id)
+        k_buf[indices].fill_(marker)
+        v_buf[indices].fill_(marker + 1)
+
+    def _snapshot_full_kv(self, allocator, indices):
+        kv_pool = self._get_full_kv_pool(allocator)
+        layer_id = kv_pool.start_layer
+        return (
+            kv_pool.get_key_buffer(layer_id)[indices].float().cpu().clone(),
+            kv_pool.get_value_buffer(layer_id)[indices].float().cpu().clone(),
+        )
+
+    def _fill_mamba_state(self, req_to_token_pool, indices, marker):
+        if not self.cfg.has_mamba:
+            return
+        mamba_indices = indices.reshape(-1)
+        mamba_cache = req_to_token_pool.mamba_pool.mamba_cache
+        mamba_cache.temporal[:, mamba_indices].fill_(marker)
+        for offset, conv_buf in enumerate(mamba_cache.conv, start=1):
+            conv_buf[:, mamba_indices].fill_(marker + offset)
+
+    def _snapshot_mamba_state(self, req_to_token_pool, indices):
+        mamba_indices = indices.reshape(-1)
+        mamba_cache = req_to_token_pool.mamba_pool.mamba_cache
+        return (
+            mamba_cache.temporal[:, mamba_indices].float().cpu().clone(),
+            [conv[:, mamba_indices].float().cpu().clone() for conv in mamba_cache.conv],
+        )
 
     def test_hicache_node_states(self):
-        """Verify S0/S1/S2 states after insert and simulated backup."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        """Verify device-only to device+host transition after real backup."""
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
 
@@ -1207,8 +1303,7 @@ class UnifiedRadixCacheSuite:
         self.assertFalse(node.backuped)
         self.assertFalse(node.evicted)
 
-        # Simulate backup -> S2
-        self._simulate_backup(tree, node)
+        self._backup_node(tree, node)
         self.assertIsNotNone(node.component_data[ct].value)
         self.assertIsNotNone(node.component_data[ct].host_value)
         self.assertTrue(node.backuped)
@@ -1217,15 +1312,16 @@ class UnifiedRadixCacheSuite:
 
     def test_hicache_evict_to_host(self):
         """Evicting a backed-up device leaf demotes it to host-only state."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
 
         m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
         node = m.last_device_node
 
-        # Simulate backup to make it S2
-        self._simulate_backup(tree, node)
+        self._backup_node(tree, node)
         self.assertTrue(node.backuped)
 
         # Evict -> should demote to host (S3)
@@ -1245,14 +1341,15 @@ class UnifiedRadixCacheSuite:
 
     def test_hicache_match_through_evicted_node(self):
         """Match can traverse evicted (S3) nodes using host_value."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         base = self._make_seq(1, 2)
         leaf = base + self._make_seq(500, 2)
         self._insert(tree, allocator, req_to_token_pool, base)
         self._insert(tree, allocator, req_to_token_pool, leaf)
 
-        # Backup everything
-        self._simulate_backup_tree(tree)
+        self._backup_tree(tree)
 
         # Lock leaf so only base can be evicted
         m = tree.match_prefix(MatchPrefixParams(key=RadixKey(leaf)))
@@ -1265,19 +1362,22 @@ class UnifiedRadixCacheSuite:
             m.last_device_node,
             DecLockRefParams(swa_uuid_for_lock=getattr(lr, "swa_uuid_for_lock", None)),
         )
+        m = tree.match_prefix(MatchPrefixParams(key=RadixKey(leaf)))
+        self.assertGreaterEqual(len(m.device_indices), len(base))
         tree.sanity_check()
 
     def test_hicache_d_leaf_h_leaf_mutual_exclusion(self):
         """D-leaf and H-leaf sets are always disjoint."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seqs = [self._make_seq(i * 100, 2) for i in range(4)]
         for s in seqs:
             self._insert(tree, allocator, req_to_token_pool, s)
 
-        # Backup some nodes
         for i in range(2):
             m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seqs[i])))
-            self._simulate_backup(tree, m.last_device_node)
+            self._backup_node(tree, m.last_device_node)
 
         # Evict one backed-up node
         tree.evict(EvictParams(num_tokens=len(seqs[0])))
@@ -1289,15 +1389,16 @@ class UnifiedRadixCacheSuite:
 
     def test_hicache_host_leaf_eviction(self):
         """Evicting a host leaf removes the node from the tree entirely."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
 
         m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seq)))
         node = m.last_device_node
 
-        # Backup then evict to host (S2->S3)
-        self._simulate_backup(tree, node)
+        self._backup_node(tree, node)
         tree.evict(EvictParams(num_tokens=len(seq)))
 
         self.assertTrue(node.evicted)
@@ -1311,39 +1412,68 @@ class UnifiedRadixCacheSuite:
         self.assertEqual(len(tree.root_node.children), 0)
         tree.sanity_check()
 
-    def test_hicache_unevict_on_insert(self):
-        """Inserting through an evicted node restores Full device state."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+    def test_hicache_load_back_restores_data(self):
+        """Loading back an evicted node restores the backed-up cache data."""
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         base = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, base)
 
         m = tree.match_prefix(MatchPrefixParams(key=RadixKey(base)))
         node = m.last_device_node
+        original_device_indices = m.device_indices.clone()
+        self._fill_full_kv(allocator, original_device_indices, marker=3)
+        expected_k, expected_v = self._snapshot_full_kv(
+            allocator, original_device_indices
+        )
+        original_mamba_indices = None
+        expected_temporal = None
+        expected_conv = None
+        if self.cfg.has_mamba:
+            original_mamba_indices = node.component_data[
+                ComponentType.MAMBA
+            ].value.clone()
+            self._fill_mamba_state(req_to_token_pool, original_mamba_indices, marker=11)
+            expected_temporal, expected_conv = self._snapshot_mamba_state(
+                req_to_token_pool, original_mamba_indices
+            )
 
-        # Backup and evict
-        self._simulate_backup(tree, node)
+        self._backup_node(tree, node)
         tree.evict(EvictParams(num_tokens=len(base)))
         self.assertTrue(node.evicted)
+        self._fill_full_kv(allocator, original_device_indices, marker=9)
+        if original_mamba_indices is not None:
+            self._fill_mamba_state(req_to_token_pool, original_mamba_indices, marker=21)
 
-        # Insert through the evicted node
-        extended = base + self._make_seq(500, 2)
-        self._insert(tree, allocator, req_to_token_pool, extended)
-
-        # Base node should be un-evicted now
+        loaded_indices = self._load_back_node(tree, node)
         self.assertFalse(node.evicted)
         self.assertIsNotNone(node.component_data[ComponentType.FULL].value)
+        loaded_k, loaded_v = self._snapshot_full_kv(allocator, loaded_indices)
+        self.assertTrue(torch.equal(loaded_k, expected_k))
+        self.assertTrue(torch.equal(loaded_v, expected_v))
+        if self.cfg.has_mamba:
+            loaded_mamba_indices = node.component_data[ComponentType.MAMBA].value
+            loaded_temporal, loaded_conv = self._snapshot_mamba_state(
+                req_to_token_pool, loaded_mamba_indices
+            )
+            self.assertTrue(torch.equal(loaded_temporal, expected_temporal))
+            self.assertEqual(len(loaded_conv), len(expected_conv))
+            for actual_conv, expected_conv_buf in zip(loaded_conv, expected_conv):
+                self.assertTrue(torch.equal(actual_conv, expected_conv_buf))
         tree.sanity_check()
 
     def test_hicache_backup_continuity(self):
         """Backed-up nodes form a continuous prefix from the root."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         chain = self._make_seq(1, 4)
         ps = self.cfg.page_size
         self._insert(tree, allocator, req_to_token_pool, chain[: 2 * ps])
         self._insert(tree, allocator, req_to_token_pool, chain)
 
-        # Backup all
-        self._simulate_backup_tree(tree)
+        self._backup_tree(tree)
 
         # Verify: every backed-up node's parent is also backed-up (or root)
         all_nodes = tree._collect_all_nodes()
@@ -1360,9 +1490,11 @@ class UnifiedRadixCacheSuite:
 
     def test_hicache_evict_to_host_updates_aux_lru(self):
         """Aux components move from device LRU to host LRU on device-to-host eviction."""
+        if self._skip_unsupported_hicache_test():
+            return
         if not self.cfg.has_mamba:
             self.skipTest("requires Mamba component")
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seq = self._make_seq(1, 2)
         self._insert(tree, allocator, req_to_token_pool, seq)
 
@@ -1375,8 +1507,7 @@ class UnifiedRadixCacheSuite:
         self.assertTrue(mamba_lru.in_list(node))
         self.assertFalse(host_mamba_lru.in_list(node))
 
-        # Backup and evict to host
-        self._simulate_backup(tree, node)
+        self._backup_node(tree, node)
         tree.evict(EvictParams(num_tokens=len(seq)))
 
         # Mamba should move to host LRU
@@ -1387,7 +1518,9 @@ class UnifiedRadixCacheSuite:
 
     def test_hicache_mixed_backup_evict_insert(self):
         """Complex scenario: backup some, evict, insert new, verify invariants."""
-        tree, allocator, req_to_token_pool = build_fixture(self.cfg)
+        if self._skip_unsupported_hicache_test():
+            return
+        tree, allocator, req_to_token_pool = self._build_hicache_fixture()
         seqs = [self._make_seq(i * 100, 2) for i in range(5)]
 
         # Insert all
@@ -1395,10 +1528,9 @@ class UnifiedRadixCacheSuite:
             self._insert(tree, allocator, req_to_token_pool, s)
         tree.sanity_check()
 
-        # Backup first 3
         for i in range(3):
             m = tree.match_prefix(MatchPrefixParams(key=RadixKey(seqs[i])))
-            self._simulate_backup(tree, m.last_device_node)
+            self._backup_node(tree, m.last_device_node)
 
         # Evict to free some tokens
         tree.evict(EvictParams(num_tokens=len(seqs[0]) * 2))
