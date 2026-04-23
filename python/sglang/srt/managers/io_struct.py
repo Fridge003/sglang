@@ -1907,7 +1907,12 @@ class SpeculativeMetrics:
     """Speculative decoding metrics."""
 
     accept_length: float = field(
-        metadata={"metric": ("gauge", "Avg accepted tokens per step")}
+        metadata={
+            "metric": (
+                "gauge",
+                "Mean acceptance length (accepted drafts + bonus token per forward)",
+            )
+        }
     )
     accept_rate: float = field(
         metadata={"metric": ("gauge", "Speculative acceptance rate")}
