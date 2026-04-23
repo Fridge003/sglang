@@ -643,7 +643,11 @@ if not current_platform.is_hip():
         )
     )
 
-ONE_GPU_CASES = [*ONE_GPU_CASES_A, *ONE_GPU_CASES_B, *ONE_GPU_CASES_C]
+# ONE_GPU_CASES_C (ModelOpt) is exercised only through test_server_c.py, which
+# runs in the B200 CI job. Including it here would drag the Blackwell-only
+# NVFP4 cases onto H100 runners (e.g. via GT-gen), where flashinfer's cudnn
+# mm_fp4 backend is unsupported on sm90.
+ONE_GPU_CASES = [*ONE_GPU_CASES_A, *ONE_GPU_CASES_B]
 TWO_GPU_CASES_A = _with_default_num_gpus(TWO_GPU_CASES_A, 2)
 TWO_GPU_CASES_B = _with_default_num_gpus(TWO_GPU_CASES_B, 2)
 TWO_GPU_CASES = [*TWO_GPU_CASES_A, *TWO_GPU_CASES_B]
