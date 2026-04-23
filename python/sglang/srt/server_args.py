@@ -379,6 +379,7 @@ class ServerArgs:
     pp_max_micro_batch_size: Optional[int] = None
     pp_async_batch_depth: int = 0
     stream_interval: int = 1
+    batch_notify_size: int = 16
     stream_response_default_include_usage: bool = False
     incremental_streaming_output: bool = False
     enable_streaming_session: bool = False
@@ -409,7 +410,7 @@ class ServerArgs:
     crash_dump_folder: Optional[str] = None
     show_time_cost: bool = False
     enable_metrics: bool = False
-    metrics_http_port: Optional[int] = None
+    grpc_http_sidecar_port: Optional[int] = None
     enable_mfu_metrics: bool = False
     enable_metrics_for_all_schedulers: bool = False
     tokenizer_metrics_custom_labels_header: str = "x-custom-labels"
@@ -537,6 +538,7 @@ class ServerArgs:
         "none", "deepep", "mooncake", "nixl", "mori", "ascend_fuseep", "flashinfer"
     ] = "none"
     moe_runner_backend: str = "auto"
+    record_nolora_graph: bool = True
     flashinfer_mxfp4_moe_precision: Literal["default", "bf16"] = "default"
     enable_flashinfer_allreduce_fusion: bool = False
     enforce_disable_flashinfer_allreduce_fusion: bool = False
@@ -4543,6 +4545,13 @@ class ServerArgs:
             help="The interval (or buffer size) for streaming in terms of the token length. A smaller value makes streaming smoother, while a larger value makes the throughput higher",
         )
         parser.add_argument(
+            "--batch-notify-size",
+            type=int,
+            default=ServerArgs.batch_notify_size,
+            help="Number of streaming notifications to batch before yielding to the event loop. "
+            "Reduces asyncio wakeup overhead under high concurrency.",
+        )
+        parser.add_argument(
             "--incremental-streaming-output",
             action="store_true",
             help="Whether to output as a sequence of disjoint segments.",
@@ -4708,12 +4717,12 @@ class ServerArgs:
             help="Enable log prometheus metrics.",
         )
         parser.add_argument(
-            "--metrics-http-port",
+            "--grpc-http-sidecar-port",
             type=int,
-            default=ServerArgs.metrics_http_port,
-            help="Port for the Prometheus metrics HTTP server. "
-            "Only used in gRPC mode (--grpc-mode); in HTTP mode, metrics are served on the main --port. "
-            "Defaults to --port + 1 when --enable-metrics is set.",
+            default=ServerArgs.grpc_http_sidecar_port,
+            help="Port for the HTTP sidecar server in gRPC mode (--grpc-mode). "
+            "Serves Prometheus metrics and profiling endpoints. "
+            "Defaults to --port + 1. Not used in HTTP mode.",
         )
         parser.add_argument(
             "--enable-mfu-metrics",
@@ -5398,6 +5407,14 @@ class ServerArgs:
             choices=MOE_RUNNER_BACKEND_CHOICES,
             default=ServerArgs.moe_runner_backend,
             help="Choose the runner backend for MoE.",
+        )
+        parser.add_argument(
+            "--record-nolora-graph",
+            action=argparse.BooleanOptionalAction,
+            default=ServerArgs.record_nolora_graph,
+            help="Capture a second set of CUDA graphs without LoRA hooks. "
+            "Batches without active adapters replay the faster nolora graph. "
+            "Enabled by default.",
         )
         parser.add_argument(
             "--flashinfer-mxfp4-moe-precision",
