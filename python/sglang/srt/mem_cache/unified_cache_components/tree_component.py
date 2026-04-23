@@ -34,7 +34,6 @@ class ComponentType(int, Enum):
     FULL = 0
     SWA = 1
     MAMBA = 2
-    SHARED_ANCHOR = 3
 
     def __str__(self) -> str:  # keep human-readable logging
         return self.name.lower()
@@ -50,10 +49,6 @@ class ComponentType(int, Enum):
     @property
     def is_mamba(self) -> bool:
         return self == ComponentType.MAMBA
-
-    @property
-    def is_shared_anchor(self) -> bool:
-        return self == ComponentType.SHARED_ANCHOR
 
 
 BASE_COMPONENT_TYPE = ComponentType.FULL

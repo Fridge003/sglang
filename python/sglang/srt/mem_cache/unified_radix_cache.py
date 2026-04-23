@@ -22,7 +22,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchPrefixParams,
     MatchResult,
 )
-from sglang.srt.mem_cache.hicache_storage import PoolName, PoolTransfer
+from sglang.srt.mem_cache.hicache_storage import PoolHitPolicy, PoolName, PoolTransfer
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.unified_cache_components import (
     _NUM_COMPONENT_TYPES,
@@ -33,7 +33,6 @@ from sglang.srt.mem_cache.unified_cache_components import (
     EvictLayer,
     FullComponent,
     MambaComponent,
-    SharedAnchorComponent,
     SWAComponent,
     TreeComponent,
     get_and_increase_time_counter,
@@ -191,7 +190,6 @@ COMPONENT_REGISTRY: dict[ComponentType, type[TreeComponent]] = {
     ComponentType.FULL: FullComponent,
     ComponentType.MAMBA: MambaComponent,
     ComponentType.SWA: SWAComponent,
-    ComponentType.SHARED_ANCHOR: SharedAnchorComponent,
 }
 
 logger = logging.getLogger(__name__)
@@ -224,6 +222,9 @@ class UnifiedRadixCache(BasePrefixCache):
         self._components_tuple: tuple[TreeComponent, ...] = tuple(
             self.components.values()
         )
+        self.hicache_anchor_kv_shared_indices_pools: list[
+            tuple[PoolName, PoolHitPolicy]
+        ] = []
         if self.is_eagle:
             self.key_convert_fn = convert_to_bigram_key
         else:
@@ -300,6 +301,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 )
 
         self.load_cache_event = threading.Event()
+        self.hicache_anchor_kv_shared_indices_pools.clear()
         attach_hybrid_pool_to_unified_cache(
             self,
             params,
@@ -320,6 +322,13 @@ class UnifiedRadixCache(BasePrefixCache):
             f"tp_world_size={self.tp_world_size}, "
             f"transfer_layer_num={self.cache_controller.layer_num}"
         )
+
+    def register_hicache_anchor_kv_shared_indices_pool(
+        self,
+        pool_name: PoolName,
+        hit_policy: PoolHitPolicy = PoolHitPolicy.ALL_PAGES,
+    ) -> None:
+        self.hicache_anchor_kv_shared_indices_pools.append((pool_name, hit_policy))
 
     def match_prefix(self, params: MatchPrefixParams) -> MatchResult:
         result = self.session.try_match_prefix(params)
@@ -1139,6 +1148,10 @@ class UnifiedRadixCache(BasePrefixCache):
             t = comp.build_hicache_transfers(node, CacheTransferPhase.BACKUP_HOST)
             if t:
                 comp_xfers[comp.component_type] = t
+        anchor_kv_shared_indices_xfers = [
+            PoolTransfer(name=pool_name, hit_policy=hit_policy)
+            for pool_name, hit_policy in self.hicache_anchor_kv_shared_indices_pools
+        ]
 
         # Pre-evict host if insufficient
         device_value = node.component_data[BASE_COMPONENT_TYPE].value
@@ -1151,6 +1164,7 @@ class UnifiedRadixCache(BasePrefixCache):
                 return 0
 
         aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
+        aux_xfers.extend(anchor_kv_shared_indices_xfers)
         host_indices = self.cache_controller.write(
             device_value, node_id=node.id, extra_pools=aux_xfers or None
         )
@@ -1208,6 +1222,10 @@ class UnifiedRadixCache(BasePrefixCache):
             )
             if t:
                 comp_xfers[comp.component_type] = t
+        anchor_kv_shared_indices_xfers = [
+            PoolTransfer(name=pool_name, hit_policy=hit_policy)
+            for pool_name, hit_policy in self.hicache_anchor_kv_shared_indices_pools
+        ]
 
         # Skip if there is nothing to load, or if the Full-KV transfer is too
         # small / exceeds memory quota. Aux transfers should still run even
@@ -1234,6 +1252,7 @@ class UnifiedRadixCache(BasePrefixCache):
 
         # Load H→D
         aux_xfers = [x for xfers in comp_xfers.values() for x in xfers]
+        aux_xfers.extend(anchor_kv_shared_indices_xfers)
         device_indices = self.cache_controller.load(
             host_indices=kv_xfer.host_indices,
             node_id=last_hit_node.id,
