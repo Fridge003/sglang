@@ -2089,9 +2089,8 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                     recv_obj.completion_tokens[i] / recv_obj.spec_verify_ct[i]
                 )
 
-                # FIXME: to be removed or clarified
-                meta_info["spec_accept_token_num"] = accepted_drafts
-                meta_info["spec_draft_token_num"] = all_drafts
+                meta_info["spec_accepted_drafts"] = accepted_drafts
+                meta_info["spec_proposed_drafts"] = all_drafts
                 meta_info["spec_verify_ct"] = recv_obj.spec_verify_ct[i]
 
             # Acceptance histogram: tracks how many decoding steps accepted a certain number of draft tokens.
