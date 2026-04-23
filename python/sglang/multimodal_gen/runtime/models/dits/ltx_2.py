@@ -2282,6 +2282,24 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
                 )
 
         # 6. Output layers
+        output_probe_prefix = (
+            f"{internal_probe_phase}_transformer_output"
+            if internal_probe_root_path
+            else None
+        )
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_pre_norm.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "video": hidden_states,
+                "audio": audio_hidden_states,
+            },
+        )
+
         # Video
         scale_shift_values = self.scale_shift_table[None, None].to(
             device=hidden_states.device, dtype=hidden_states.dtype
@@ -2289,8 +2307,43 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         shift, scale = scale_shift_values[:, :, 0], scale_shift_values[:, :, 1]
         with torch.autocast(device_type=hidden_states.device.type, enabled=False):
             hidden_states = self.norm_out(hidden_states)
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_video_norm.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "video": hidden_states,
+                "shift": shift,
+                "scale": scale,
+            },
+        )
         hidden_states = hidden_states * (1 + scale) + shift
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_video_mod.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "video": hidden_states,
+            },
+        )
         hidden_states, _ = self.proj_out(hidden_states)
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_video_proj.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "video": hidden_states,
+            },
+        )
 
         # Audio
         audio_scale_shift_values = self.audio_scale_shift_table[None, None].to(
@@ -2302,8 +2355,43 @@ class LTX2VideoTransformer3DModel(CachableDiT, OffloadableDiTMixin):
         )
         with torch.autocast(device_type=audio_hidden_states.device.type, enabled=False):
             audio_hidden_states = self.audio_norm_out(audio_hidden_states)
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_audio_norm.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "audio": audio_hidden_states,
+                "shift": audio_shift,
+                "scale": audio_scale,
+            },
+        )
         audio_hidden_states = audio_hidden_states * (1 + audio_scale) + audio_shift
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_audio_mod.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "audio": audio_hidden_states,
+            },
+        )
         audio_hidden_states, _ = self.audio_proj_out(audio_hidden_states)
+        _maybe_dump_internal_probe(
+            _derive_internal_probe_path(
+                internal_probe_root_path,
+                f"{output_probe_prefix}_audio_proj.pt",
+            )
+            if output_probe_prefix
+            else None,
+            {
+                "audio": audio_hidden_states,
+            },
+        )
         # Unpatchify if requested (default True for pipeline compatibility)
         return_latents = kwargs.get("return_latents", True)
 
