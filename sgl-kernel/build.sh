@@ -57,7 +57,7 @@ echo "Buildx cache:   ${BUILDX_CACHE_DIR}"
 echo "ccache dir:     ${CCACHE_HOST_DIR}"
 echo "Builder:        ${BUILDER_NAME}"
 echo "BUILD_JOBS:     ${BUILD_JOBS:-auto}"
-echo "NVCC_THREADS:   ${NVCC_THREADS:-4}"
+echo "NVCC_THREADS:   ${NVCC_THREADS:-2}"
 echo "USE_CCACHE:     ${USE_CCACHE:-1}"
 echo "RESET_BUILDER:  ${RESET_BUILDER:-0}"
 echo "----------------------------------------"
@@ -95,7 +95,7 @@ echo "Deps image ready: ${DEPS_TAG}"
 # This allows ccache to persist on the host filesystem across builds.
 CCACHE_FLAG="${USE_CCACHE:-1}"
 BUILD_JOBS_FLAG="${BUILD_JOBS:-0}"
-NVCC_THREADS_FLAG="${NVCC_THREADS:-4}"
+NVCC_THREADS_FLAG="${NVCC_THREADS:-2}"
 
 docker run --rm \
   --network=host \
@@ -130,16 +130,26 @@ if [ "'"${ARCH}"'" = "aarch64" ]; then
   export MAKEFLAGS="-j8"
   export CMAKE_BUILD_PARALLEL_LEVEL=2
   export NINJAFLAGS="-j4"
-  echo "ARM detected: Using extra conservative settings (2 parallel jobs)"
+  # Hand-tuned aarch64 path predates the cmake-side auto pool; turn the pool
+  # off so it does not further clamp these conservative settings to 1.
+  export CMAKE_ARGS="${CMAKE_ARGS:-} -DSGL_KERNEL_MINIMIZE_BUILD_MEMORY=OFF"
+  echo "ARM detected: CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}, MAKEFLAGS=${MAKEFLAGS}, NINJAFLAGS=${NINJAFLAGS}"
 elif [ "${BUILD_JOBS}" -gt 0 ] 2>/dev/null; then
   export CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}
 else
   # Default: clamp by both CPU and available RAM. CUTLASS/flashinfer TUs peak
   # around ~5 GB each, so big-CPU/modest-RAM runners OOM without a mem clamp.
+  # The cmake JOB_POOLS in CMakeLists.txt do the precise per-stage budgeting;
+  # this block is a coarser ninja -j ceiling for callers who skip the pool.
   CPU_JOBS=$(( $(nproc) * 2 / 3 ))
   MEM_KB=$(awk "/MemAvailable/ {print \$2}" /proc/meminfo)
-  MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 ))
-  [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1
+  if [ -z "${MEM_KB}" ]; then
+    echo "WARNING: MemAvailable not present in /proc/meminfo; falling back to CPU-only sizing" >&2
+    MEM_BOUND=${CPU_JOBS}
+  else
+    MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 ))
+    [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1
+  fi
   JOBS=${CPU_JOBS}
   [ "${MEM_BOUND}" -lt "${JOBS}" ] && JOBS=${MEM_BOUND}
   [ "${JOBS}" -gt 64 ] && JOBS=64

@@ -115,6 +115,113 @@ if(CCACHE_FOUND AND ENABLE_CCACHE AND DEFINED ENV{CCACHE_DIR})
     set_property(GLOBAL PROPERTY RULE_LAUNCH_LINK "ccache")
 endif()
 
+# Build memory model: at any moment ninja can have N compile commands and M
+# link commands running. Heavy links (common_ops_sm90/sm100 pulling CUTLASS +
+# flashinfer + DeepGEMM + mscclpp) peak at ~18 GB under the always-on memory-
+# frugal ld flags below; CUDA TUs at ~5 GB with NVCC_THREADS=2 fanning ptxas
+# across SM arches. Plus a fixed overhead reserve for ld/ccache/buildx/python/
+# ninja (~8 GB cumulative). Without coordination, parallel link + parallel
+# compile push past available RAM and OOM the runner agent. Size both ninja
+# pools off cmake_host_system_information so big-RAM hosts go fast and modest
+# hosts auto-throttle.
+option(SGL_KERNEL_MINIMIZE_BUILD_MEMORY
+    "Auto-size ninja link/compile pools by available RAM and pass GNU ld memory-reduction flags. Default ON." ON)
+set(SGL_KERNEL_LINK_PEAK_MB "18000" CACHE STRING
+    "Estimated peak RSS per link in MB (assumes always-on memory-frugal ld).")
+set(SGL_KERNEL_COMPILE_PEAK_MB "5000" CACHE STRING
+    "Estimated peak RSS per CUDA TU compile in MB (assumes NVCC_THREADS=2).")
+set(SGL_KERNEL_BUILD_OVERHEAD_MB "8000" CACHE STRING
+    "Fixed memory reserve in MB for ld, ccache, buildx, python, ninja, etc.")
+set(SGL_KERNEL_MAX_LINK_JOBS "2" CACHE STRING
+    "Cap on parallel links; only common_ops_sm90 and sm100 are truly heavy, so >2 wastes RAM reserve.")
+if(SGL_KERNEL_MINIMIZE_BUILD_MEMORY)
+    # Validate cache-var overrides up front: a 0 here would make math(EXPR)
+    # divide-by-zero and abort the whole configure.
+    foreach(_var SGL_KERNEL_LINK_PEAK_MB SGL_KERNEL_COMPILE_PEAK_MB SGL_KERNEL_MAX_LINK_JOBS)
+        if(NOT ${_var} MATCHES "^[1-9][0-9]*$")
+            message(FATAL_ERROR "${_var} must be a positive integer; got '${${_var}}'")
+        endif()
+    endforeach()
+    if(NOT SGL_KERNEL_BUILD_OVERHEAD_MB MATCHES "^[0-9]+$")
+        message(FATAL_ERROR "SGL_KERNEL_BUILD_OVERHEAD_MB must be a non-negative integer; got '${SGL_KERNEL_BUILD_OVERHEAD_MB}'")
+    endif()
+
+    cmake_host_system_information(RESULT _mem_avail_mb QUERY AVAILABLE_PHYSICAL_MEMORY)
+    cmake_host_system_information(RESULT _nproc QUERY NUMBER_OF_LOGICAL_CORES)
+    # Some platforms (or restricted hosts) return empty/0 from these queries.
+    # Don't silently degrade to a tiny pool -- warn and fall back to safe
+    # conservative numbers so the surprise is visible in the configure log.
+    if(NOT _mem_avail_mb OR _mem_avail_mb LESS ${SGL_KERNEL_COMPILE_PEAK_MB})
+        message(WARNING "sgl-kernel: cmake_host_system_information returned available memory '${_mem_avail_mb}' MB; falling back to conservative defaults")
+        set(_mem_avail_mb ${SGL_KERNEL_LINK_PEAK_MB})
+    endif()
+    if(NOT _nproc OR _nproc LESS 1)
+        message(WARNING "sgl-kernel: cmake_host_system_information returned core count '${_nproc}'; falling back to 1")
+        set(_nproc 1)
+    endif()
+
+    # Subtract fixed overhead before pool sizing so ld/ccache/buildx/python
+    # have real headroom and the worst-case pool sum stays within MemAvailable.
+    math(EXPR _usable_mb "${_mem_avail_mb} - ${SGL_KERNEL_BUILD_OVERHEAD_MB}")
+    if(_usable_mb LESS ${SGL_KERNEL_COMPILE_PEAK_MB})
+        # Tiny host: skip overhead reservation, force serial.
+        set(_usable_mb ${SGL_KERNEL_COMPILE_PEAK_MB})
+    endif()
+
+    # Link pool: don't pick a value so high it leaves no budget for at least
+    # one concurrent compile (otherwise the link blocks all compile progress).
+    math(EXPR _link_room "${_usable_mb} - ${SGL_KERNEL_COMPILE_PEAK_MB}")
+    if(_link_room LESS ${SGL_KERNEL_LINK_PEAK_MB})
+        set(_link_jobs 1)
+    else()
+        math(EXPR _link_jobs "${_link_room} / ${SGL_KERNEL_LINK_PEAK_MB}")
+    endif()
+    if(_link_jobs LESS 1)
+        set(_link_jobs 1)
+    endif()
+    if(_link_jobs GREATER ${SGL_KERNEL_MAX_LINK_JOBS})
+        set(_link_jobs ${SGL_KERNEL_MAX_LINK_JOBS})
+    endif()
+
+    # Compile pool gets whatever RAM is left after the link reservation, so
+    # simultaneous compile + link + overhead cannot exceed MemAvailable.
+    # Bounded by logical core count so big-RAM/small-CPU hosts don't
+    # oversubscribe.
+    math(EXPR _link_reserve "${_link_jobs} * ${SGL_KERNEL_LINK_PEAK_MB}")
+    math(EXPR _compile_budget "${_usable_mb} - ${_link_reserve}")
+    if(_compile_budget LESS ${SGL_KERNEL_COMPILE_PEAK_MB})
+        set(_compile_jobs 1)
+    else()
+        math(EXPR _compile_jobs "${_compile_budget} / ${SGL_KERNEL_COMPILE_PEAK_MB}")
+    endif()
+    if(_compile_jobs GREATER ${_nproc})
+        set(_compile_jobs ${_nproc})
+    endif()
+
+    set_property(GLOBAL PROPERTY JOB_POOLS link_pool=${_link_jobs} compile_pool=${_compile_jobs})
+    set(CMAKE_JOB_POOL_LINK link_pool)
+    set(CMAKE_JOB_POOL_COMPILE compile_pool)
+
+    # Promote the announcement to WARNING when memory has forced a sub-half-
+    # core compile pool -- this is the case humans need to notice in CI logs.
+    math(EXPR _half_nproc "${_nproc} / 2")
+    if(_compile_jobs LESS_EQUAL _half_nproc OR _compile_jobs EQUAL 1)
+        set(_msg_level WARNING)
+    else()
+        set(_msg_level STATUS)
+    endif()
+    message(${_msg_level} "sgl-kernel: auto pools (avail ${_mem_avail_mb} MB, usable ${_usable_mb} MB after ${SGL_KERNEL_BUILD_OVERHEAD_MB} MB overhead, ${_nproc} cores) -> link_pool=${_link_jobs}, compile_pool=${_compile_jobs}")
+
+    # GNU ld memory-frugal flags: trade ~10-20% link time for steadier peak
+    # RSS. Cheap insurance against bursty link-time spikes that exceed our
+    # static estimate.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        foreach(_flag_var CMAKE_EXE_LINKER_FLAGS CMAKE_SHARED_LINKER_FLAGS CMAKE_MODULE_LINKER_FLAGS)
+            string(APPEND ${_flag_var} " -Wl,--no-keep-memory -Wl,--reduce-memory-overheads")
+        endforeach()
+    endif()
+endif()
+
 # Configure gencode below SM90
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
     set(DEFAULT_ENABLE_BELOW_SM90 OFF)
@@ -150,8 +257,8 @@ set(SGL_KERNEL_CUDA_FLAGS
 
     # The following flag leads to the CMAKE_BUILD_PARALLEL_LEVEL breaking,
     # it triggers OOM with low memory host. Extract the threads number to
-    # option named SGL_KERNEL_COMPILE_THREADS, default value 4.
-    # "--threads=4"
+    # option named SGL_KERNEL_COMPILE_THREADS, default value 2.
+    # "--threads=2"
 
     # Supress warnings
     "-Xcompiler=-Wno-clang-format-violations"
@@ -168,7 +275,7 @@ set(SGL_KERNEL_CUDA_FLAGS
     # "--ptxas-options=--verbose,--register-usage-level=10,--warn-on-local-memory-usage"
 )
 
-set(SGL_KERNEL_COMPILE_THREADS 4 CACHE STRING "Set compilation threads, default 4")
+set(SGL_KERNEL_COMPILE_THREADS 2 CACHE STRING "Set compilation threads, default 2")
 
 # When SGL_KERNEL_COMPILE_THREADS value is less than 1, set it to 1
 if (NOT SGL_KERNEL_COMPILE_THREADS MATCHES "^[0-9]+$")

@@ -102,7 +102,7 @@ ARG USE_CCACHE=1
 #   BUILD_JOBS: number of parallel compilation units (ninja -j)
 #   NVCC_THREADS: per-compilation-unit NVCC --threads (multi-arch PTXAS)
 ARG BUILD_JOBS=0
-ARG NVCC_THREADS=4
+ARG NVCC_THREADS=2
 
 RUN --mount=type=cache,id=sgl-kernel-ccache,target=/ccache \
     --mount=type=cache,id=sgl-kernel-pip,target=/root/.cache/pip \
@@ -125,14 +125,20 @@ RUN --mount=type=cache,id=sgl-kernel-ccache,target=/ccache \
       export MAKEFLAGS="-j2"; \
       export CMAKE_BUILD_PARALLEL_LEVEL=2; \
       export NINJAFLAGS="-j2"; \
-      echo "ARM detected: Using extra conservative settings (2 parallel jobs)"; \
+      export CMAKE_ARGS="${CMAKE_ARGS:-} -DSGL_KERNEL_MINIMIZE_BUILD_MEMORY=OFF"; \
+      echo "ARM detected: CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}, MAKEFLAGS=${MAKEFLAGS}, NINJAFLAGS=${NINJAFLAGS}"; \
     elif [ "${BUILD_JOBS}" -gt 0 ] 2>/dev/null; then \
       export CMAKE_BUILD_PARALLEL_LEVEL=${BUILD_JOBS}; \
     else \
       CPU_JOBS=$(( $(nproc) * 2 / 3 )); \
       MEM_KB=$(awk '/MemAvailable/ {print $2}' /proc/meminfo); \
-      MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 )); \
-      [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1; \
+      if [ -z "${MEM_KB}" ]; then \
+        echo "WARNING: MemAvailable not present in /proc/meminfo; falling back to CPU-only sizing" >&2; \
+        MEM_BOUND=${CPU_JOBS}; \
+      else \
+        MEM_BOUND=$(( MEM_KB / 1024 / 1024 / 5 )); \
+        [ "${MEM_BOUND}" -lt 1 ] && MEM_BOUND=1; \
+      fi; \
       JOBS=${CPU_JOBS}; \
       [ "${MEM_BOUND}" -lt "${JOBS}" ] && JOBS=${MEM_BOUND}; \
       [ "${JOBS}" -gt 64 ] && JOBS=64; \
