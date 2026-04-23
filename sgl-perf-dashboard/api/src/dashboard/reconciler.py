@@ -88,24 +88,25 @@ def _workflow_runs_in_window(
 ) -> list[sqlite3.Row]:
     """Distinct (github_run_id, attempt) pairs eligible for reconciliation.
 
-    Guards:
-    - Only ``trigger = 'cron'`` workflows are reconciled. Manual triggers often
-      run an intentionally partial matrix; reconciling them would produce
-      false-positive "failed" rows.
-    - Skip workflows whose most recent row is within INFLIGHT_GRACE of now —
-      the job may still be producing output and we don't want to race it.
+    Skip workflows whose most recent row is within INFLIGHT_GRACE of now —
+    the job may still be producing output and we don't want to race it.
+
+    Trigger-specific rules are applied later in ``reconcile()``:
+      - cron: flag both whole-config failures and within-config partials.
+      - manual: flag only within-config partials (users may run a filtered
+        matrix via the workflow's ``configs`` input, so a whole-config gap is
+        ambiguous without querying GH Actions — deferred to Phase 2).
     """
     now = datetime.now(UTC)
     cutoff_start = (now - timedelta(days=window_days)).isoformat()
     cutoff_inflight = (now - INFLIGHT_GRACE).isoformat()
     return conn.execute(
         """
-        SELECT github_run_id, github_run_attempt,
+        SELECT github_run_id, github_run_attempt, trigger,
                MIN(started_at) AS first_started,
                MAX(started_at) AS last_started
         FROM runs
         WHERE started_at >= ?
-          AND trigger = 'cron'
         GROUP BY github_run_id, github_run_attempt
         HAVING MAX(started_at) < ?
         """,
@@ -216,6 +217,7 @@ def reconcile(conn: sqlite3.Connection) -> dict[str, int]:
         if not rows:
             continue
         context = rows[0]
+        is_cron = wf["trigger"] == "cron"
 
         actual_by_config: dict[str, set[int]] = {}
         for r in rows:
@@ -227,8 +229,16 @@ def reconcile(conn: sqlite3.Connection) -> dict[str, int]:
             if not missing:
                 continue
 
-            # No actual data for this config = whole-job failure. Some data = partial.
-            status = "failed" if not actual_concs else "partial"
+            # No actual data for this config = whole-job failure ('failed').
+            # Some data present but missing some concurrencies = 'partial'.
+            # For manual runs, skip whole-config gaps — may have been an
+            # intentional filtered matrix via the workflow's `configs` input.
+            if not actual_concs:
+                if not is_cron:
+                    continue
+                status = "failed"
+            else:
+                status = "partial"
 
             for conc in missing:
                 if _insert_placeholder(
