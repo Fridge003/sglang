@@ -138,7 +138,7 @@ def test_ltx23_hq_pipeline_registers_pipeline_specific_sampling_params():
     assert sampling_params_cls is LTX23HQSamplingParams
 
 
-def test_ltx2_hq_uses_batched_guided_passes_but_ti2v_keeps_split_path():
+def test_ltx2_hq_and_ti2v_use_split_guided_passes():
     hq_batch = SimpleNamespace(ltx2_num_image_tokens=0)
     ti2v_batch = SimpleNamespace(ltx2_num_image_tokens=128)
     server_args = SimpleNamespace(
@@ -146,14 +146,23 @@ def test_ltx2_hq_uses_batched_guided_passes_but_ti2v_keeps_split_path():
         num_gpus=1,
         tp_size=1,
     )
+    non_hq_server_args = SimpleNamespace(
+        pipeline_class_name="LTX2TwoStagePipeline",
+        num_gpus=1,
+        tp_size=1,
+    )
 
-    assert not LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
+    assert LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
         hq_batch,
         server_args,
     )
     assert LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
         ti2v_batch,
         server_args,
+    )
+    assert not LTX2DenoisingStage._should_use_split_two_stage_guided_passes(
+        hq_batch,
+        non_hq_server_args,
     )
 
 

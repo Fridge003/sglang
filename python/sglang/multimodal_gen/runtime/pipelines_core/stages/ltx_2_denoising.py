@@ -754,12 +754,13 @@ class LTX2DenoisingStage(DenoisingStage):
         batch: Req,
         server_args: ServerArgs,
     ) -> bool:
-        return (
-            is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
-            and int(server_args.num_gpus) == 1
-            and int(server_args.tp_size or 1) == 1
-            and int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
-        )
+        if not is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name):
+            return False
+        if int(server_args.num_gpus) != 1 or int(server_args.tp_size or 1) != 1:
+            return False
+        if server_args.pipeline_class_name == "LTX2TwoStageHQPipeline":
+            return True
+        return int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
 
     @classmethod
     def _ltx2_calculate_guided_x0(
