@@ -234,8 +234,14 @@ def benchmark(batch_size, provider, N, K, dtype, correctness, csv_file):
     elif provider == "cutlass":
         with autotune():
             _run_mm_fp4(
-                a_fp4, b_fp4_T, a_scale_interleaved, b_sf_T,
-                alpha, dtype, res_fi, backend="cutlass",
+                a_fp4,
+                b_fp4_T,
+                a_scale_interleaved,
+                b_sf_T,
+                alpha,
+                dtype,
+                res_fi,
+                backend="cutlass",
             )
         times_ms = bench_gpu_time(
             fn=partial(_run_mm_fp4, backend="cutlass"),
@@ -253,8 +259,14 @@ def benchmark(batch_size, provider, N, K, dtype, correctness, csv_file):
     elif provider == "cudnn":
         with autotune():
             _run_mm_fp4(
-                a_fp4, b_fp4_T, a_scale_interleaved, b_sf_T,
-                alpha, dtype, res_fi, backend="cudnn",
+                a_fp4,
+                b_fp4_T,
+                a_scale_interleaved,
+                b_sf_T,
+                alpha,
+                dtype,
+                res_fi,
+                backend="cudnn",
             )
         times_ms = bench_gpu_time(
             fn=partial(_run_mm_fp4, backend="cudnn"),
@@ -274,8 +286,14 @@ def benchmark(batch_size, provider, N, K, dtype, correctness, csv_file):
         b_sf_u8_T = b_sf_T.to(torch.uint8)
         with autotune():
             _run_mm_fp4(
-                a_fp4, b_fp4_T, a_sf_u8, b_sf_u8_T,
-                alpha, dtype, res_fi, backend="trtllm",
+                a_fp4,
+                b_fp4_T,
+                a_sf_u8,
+                b_sf_u8_T,
+                alpha,
+                dtype,
+                res_fi,
+                backend="trtllm",
             )
         times_ms = bench_gpu_time(
             fn=partial(_run_mm_fp4, backend="trtllm"),
@@ -285,8 +303,14 @@ def benchmark(batch_size, provider, N, K, dtype, correctness, csv_file):
     elif provider == "cute-dsl":
         with autotune():
             _run_mm_fp4(
-                a_fp4, b_fp4_T, a_scale_interleaved, b_sf_T,
-                alpha, dtype, res_fi, backend="cute-dsl",
+                a_fp4,
+                b_fp4_T,
+                a_scale_interleaved,
+                b_sf_T,
+                alpha,
+                dtype,
+                res_fi,
+                backend="cute-dsl",
             )
         times_ms = bench_gpu_time(
             fn=partial(_run_mm_fp4, backend="cute-dsl"),
@@ -304,8 +328,14 @@ def benchmark(batch_size, provider, N, K, dtype, correctness, csv_file):
     elif provider == "auto":
         with autotune():
             _run_mm_fp4(
-                a_fp4, b_fp4_T, a_scale_interleaved, b_sf_T,
-                alpha, dtype, res_fi, backend="auto",
+                a_fp4,
+                b_fp4_T,
+                a_scale_interleaved,
+                b_sf_T,
+                alpha,
+                dtype,
+                res_fi,
+                backend="auto",
             )
         times_ms = bench_gpu_time(
             fn=partial(_run_mm_fp4, backend="auto"),
