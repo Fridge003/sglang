@@ -9,7 +9,7 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
     PDDisaggregationServerBase,
 )
 from sglang.test.test_utils import (
-    DEFAULT_SMALL_MODEL_NAME_FOR_TEST,
+    DEFAULT_MODEL_NAME_FOR_TEST,
     is_in_ci,
     try_cached_model,
 )
@@ -35,7 +35,7 @@ class TestDisaggregationDecodeRadixCache(PDDisaggregationServerBase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
-        cls.model = try_cached_model(DEFAULT_SMALL_MODEL_NAME_FOR_TEST)
+        cls.model = try_cached_model(DEFAULT_MODEL_NAME_FOR_TEST)
         cls.transfer_backend = ["--disaggregation-transfer-backend", "nixl"]
         cls.launch_all()
 
