@@ -96,6 +96,7 @@ class LTX23HQSamplingParams(LTX23SamplingParams):
     height: int = 1088
     width: int = 1920
     num_inference_steps: int = 15
+    max_batch_size: int = 1
     distilled_lora_strength_stage_1: float = 0.25
     distilled_lora_strength_stage_2: float = 0.5
 
@@ -113,8 +114,20 @@ class LTX23HQSamplingParams(LTX23SamplingParams):
     audio_skip_step: int | None = 0
     audio_stg_blocks: list[int] | None = dataclasses.field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if (
+            isinstance(self.max_batch_size, bool)
+            or not isinstance(self.max_batch_size, int)
+            or self.max_batch_size <= 0
+        ):
+            raise ValueError(
+                f"max_batch_size must be a positive int, got {self.max_batch_size!r}"
+            )
+
     def build_request_extra(self) -> dict[str, Any]:
         extra = super().build_request_extra()
+        extra["ltx2_guided_max_batch_size"] = int(self.max_batch_size)
         extra["ltx2_distilled_lora_strength_stage_1"] = float(
             self.distilled_lora_strength_stage_1
         )

@@ -1,4 +1,5 @@
 import copy
+import os
 from dataclasses import dataclass, field
 
 import torch
@@ -300,6 +301,24 @@ class LTX2DenoisingStage(DenoisingStage):
         return True
 
     @staticmethod
+    def _ltx2_probe_step_selected(step_index: int) -> bool:
+        raw_steps = os.environ.get("SGLANG_DIFFUSION_LTX2_PROBE_STEPS")
+        if not raw_steps:
+            return step_index == 0
+        selected_steps = {item.strip().lower() for item in raw_steps.split(",")}
+        selected_steps.discard("")
+        if selected_steps & {"*", "all"}:
+            return True
+        try:
+            return step_index in {int(item) for item in selected_steps}
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid SGLANG_DIFFUSION_LTX2_PROBE_STEPS=%r",
+                raw_steps,
+            )
+            return step_index == 0
+
+    @staticmethod
     def _maybe_dump_phase_step0_probe(
         batch: Req,
         *,
@@ -353,13 +372,24 @@ class LTX2DenoisingStage(DenoisingStage):
         step_index: int,
         payload: dict[str, object],
     ) -> None:
-        if step_index != 0:
+        if not LTX2DenoisingStage._ltx2_probe_step_selected(step_index):
             return
+        probe_steps_env = os.environ.get("SGLANG_DIFFUSION_LTX2_PROBE_STEPS")
+        probe_key = (
+            f"transformer_step{step_index:03d}_probe"
+            if probe_steps_env
+            else "transformer_step0_probe"
+        )
         if not LTX2DenoisingStage._should_dump_phase_probe_once(
-            batch, "transformer_step0_probe", phase=phase
+            batch, probe_key, phase=phase
         ):
             return
-        dump_probe_payload(batch, f"denoising/{phase}_transformer_step0", payload)
+        probe_name = (
+            f"{phase}_transformer_step{step_index:03d}"
+            if probe_steps_env
+            else f"{phase}_transformer_step0"
+        )
+        dump_probe_payload(batch, f"denoising/{probe_name}", payload)
 
     @staticmethod
     def _maybe_dump_phase_step_probe(
@@ -770,6 +800,12 @@ class LTX2DenoisingStage(DenoisingStage):
             return False
         if int(server_args.num_gpus) != 1 or int(server_args.tp_size or 1) != 1:
             return False
+        batch_extra = getattr(batch, "extra", {}) or {}
+        guided_max_batch_size = int(
+            batch_extra.get("ltx2_guided_max_batch_size", 1)
+        )
+        if guided_max_batch_size > 1:
+            return False
         if server_args.pipeline_class_name == "LTX2TwoStageHQPipeline":
             return True
         return int(getattr(batch, "ltx2_num_image_tokens", 0)) > 0
@@ -1036,9 +1072,17 @@ class LTX2DenoisingStage(DenoisingStage):
         probe_request_dir = get_probe_request_dir(batch)
         internal_probe_path = None
         phase = str(batch.extra.get("ltx2_phase") or "")
-        if step.step_index == 0 and phase in {"stage1", "stage2"} and probe_request_dir is not None:
+        internal_probe_phase = phase
+        if (
+            phase in {"stage1", "stage2"}
+            and probe_request_dir is not None
+            and self._ltx2_probe_step_selected(step.step_index)
+        ):
+            if os.environ.get("SGLANG_DIFFUSION_LTX2_PROBE_STEPS"):
+                internal_probe_phase = f"{phase}_step{step.step_index:03d}"
             internal_probe_path = str(
-                probe_request_dir / f"denoising/{phase}_transformer_preprocessed.pt"
+                probe_request_dir
+                / f"denoising/{internal_probe_phase}_transformer_preprocessed.pt"
             )
         use_raw_sigma_timestep = (
             ctx.is_ltx23_variant and not ctx.use_ltx23_legacy_one_stage
@@ -1127,6 +1171,7 @@ class LTX2DenoisingStage(DenoisingStage):
             skip_audio_self_attn_blocks: tuple[int, ...] | None = None,
             disable_a2v_cross_attn: bool = False,
             disable_v2a_cross_attn: bool = False,
+            internal_probe_phase_input: str | None = None,
         ) -> dict[str, object]:
             kwargs: dict[str, object] = {
                 "hidden_states": (
@@ -1173,7 +1218,11 @@ class LTX2DenoisingStage(DenoisingStage):
                 kwargs.update(
                     {
                         "_sglang_internal_probe_path": internal_probe_path,
-                        "_sglang_internal_probe_phase": phase,
+                        "_sglang_internal_probe_phase": (
+                            internal_probe_phase
+                            if internal_probe_phase_input is None
+                            else internal_probe_phase_input
+                        ),
                         "prompt_timestep": (
                             prompt_timestep_video
                             if prompt_timestep_video_input is None
@@ -1937,6 +1986,11 @@ class LTX2DenoisingStage(DenoisingStage):
                     )
                     if use_split_two_stage_guided_passes:
                         split_sizes = [1] * expanded_batch_size
+                        batched_probe_phases = [
+                            f"{internal_probe_phase}_{pass_name}"
+                            for pass_name, _, _, _, _ in pass_specs
+                            for _ in range(local_batch_size)
+                        ]
 
                         def split_or_none(
                             tensor: torch.Tensor | None,
@@ -1969,6 +2023,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 a2v_cross_attention_mask_chunk,
                                 v2a_cross_attention_mask_chunk,
                                 perturbation_config_chunk,
+                                probe_phase_chunk,
                             ) in zip(
                                 batched_hidden_states.split(split_sizes, dim=0),
                                 batched_audio_hidden_states.split(split_sizes, dim=0),
@@ -1989,6 +2044,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 split_or_none(batched_a2v_cross_attention_mask),
                                 split_or_none(batched_v2a_cross_attention_mask),
                                 ((cfg,) for cfg in perturbation_configs),
+                                batched_probe_phases,
                                 strict=True,
                             ):
                                 video_chunk, audio_chunk = step.current_model(
@@ -2015,7 +2071,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 v2a_cross_attention_mask=v2a_cross_attention_mask_chunk,
                                 audio_replicated_for_sp=ctx.replicate_audio_for_sp,
                                 _sglang_internal_probe_path=internal_probe_path,
-                                _sglang_internal_probe_phase=phase,
+                                _sglang_internal_probe_phase=probe_phase_chunk,
                                 perturbation_configs=perturbation_config_chunk,
                                 return_latents=False,
                                 return_dict=False,
@@ -2054,7 +2110,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 v2a_cross_attention_mask=batched_v2a_cross_attention_mask,
                                 audio_replicated_for_sp=ctx.replicate_audio_for_sp,
                                 _sglang_internal_probe_path=internal_probe_path,
-                                _sglang_internal_probe_phase=phase,
+                                _sglang_internal_probe_phase=internal_probe_phase,
                                 perturbation_configs=perturbation_configs,
                                 return_latents=False,
                                 return_dict=False,

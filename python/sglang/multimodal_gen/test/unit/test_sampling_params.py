@@ -334,6 +334,8 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
                 "0.3",
                 "--distilled-lora-strength-stage-2",
                 "0.6",
+                "--max-batch-size",
+                "4",
             ]
         )
         kwargs = LTX23HQSamplingParams.get_cli_args(args)
@@ -343,6 +345,7 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
         self.assertEqual(kwargs["video_stg_blocks"], [7, 9])
         self.assertEqual(kwargs["distilled_lora_strength_stage_1"], 0.3)
         self.assertEqual(kwargs["distilled_lora_strength_stage_2"], 0.6)
+        self.assertEqual(kwargs["max_batch_size"], 4)
 
     def test_explicit_pipeline_class_accepts_pipeline_specific_user_kwargs(self):
         server_args = MagicMock()
@@ -359,6 +362,7 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
             audio_stg_scale=0.25,
             distilled_lora_strength_stage_1=0.3,
             distilled_lora_strength_stage_2=0.6,
+            max_batch_size=4,
         )
 
         self.assertIsInstance(params, LTX23HQSamplingParams)
@@ -366,6 +370,10 @@ class TestSamplingParamsCliArgs(unittest.TestCase):
         self.assertEqual(params.audio_stg_scale, 0.25)
         self.assertEqual(params.distilled_lora_strength_stage_1, 0.3)
         self.assertEqual(params.distilled_lora_strength_stage_2, 0.6)
+        self.assertEqual(params.max_batch_size, 4)
+        self.assertEqual(
+            params.build_request_extra()["ltx2_guided_max_batch_size"], 4
+        )
 
 
 if __name__ == "__main__":

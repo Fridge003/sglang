@@ -891,6 +891,15 @@ class SamplingParams:
             help="Official LTX-2.3 HQ stage-2 distilled LoRA strength override.",
         )
         add_argument(
+            "--max-batch-size",
+            type=int,
+            dest="max_batch_size",
+            help=(
+                "Official LTX-2.3 HQ maximum guided transformer batch size. "
+                "Default 1 runs guidance passes sequentially; use 4 to batch all passes."
+            ),
+        )
+        add_argument(
             "--cfg-normalization",
             type=float,
             dest="cfg_normalization",
