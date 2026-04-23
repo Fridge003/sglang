@@ -1574,6 +1574,7 @@ class LTX2DenoisingStage(DenoisingStage):
             audio_latents: torch.Tensor,
             sigma_value: torch.Tensor,
             update_skip_cache: bool,
+            probe_phase_suffix: str = "",
         ) -> tuple[torch.Tensor, torch.Tensor]:
             step_inputs = build_stage1_step_inputs(
                 video_latents=video_latents,
@@ -1581,6 +1582,14 @@ class LTX2DenoisingStage(DenoisingStage):
                 sigma_value=sigma_value,
             )
             local_batch_size = int(video_latents.shape[0])
+            eval_internal_probe_phase = (
+                internal_probe_phase
+                if not probe_phase_suffix
+                else f"{internal_probe_phase}_{probe_phase_suffix}"
+            )
+            eval_probe_phase = (
+                phase if not probe_phase_suffix else f"{phase}_{probe_phase_suffix}"
+            )
 
             def cat_or_none(items: list[torch.Tensor | None]) -> torch.Tensor | None:
                 if items[0] is None:
@@ -1987,7 +1996,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     if use_split_two_stage_guided_passes:
                         split_sizes = [1] * expanded_batch_size
                         batched_probe_phases = [
-                            f"{internal_probe_phase}_{pass_name}"
+                            f"{eval_internal_probe_phase}_{pass_name}"
                             for pass_name, _, _, _, _ in pass_specs
                             for _ in range(local_batch_size)
                         ]
@@ -2110,7 +2119,7 @@ class LTX2DenoisingStage(DenoisingStage):
                                 v2a_cross_attention_mask=batched_v2a_cross_attention_mask,
                                 audio_replicated_for_sp=ctx.replicate_audio_for_sp,
                                 _sglang_internal_probe_path=internal_probe_path,
-                                _sglang_internal_probe_phase=internal_probe_phase,
+                                _sglang_internal_probe_phase=eval_internal_probe_phase,
                                 perturbation_configs=perturbation_configs,
                                 return_latents=False,
                                 return_dict=False,
@@ -2123,7 +2132,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     ).expand(expanded_batch_size)
                     self._maybe_dump_phase_transformer_step0_probe(
                         batch,
-                        phase=phase,
+                        phase=eval_probe_phase,
                         step_index=step.step_index,
                         payload={
                             "pass_names": [item[0] for item in pass_specs],
@@ -2371,6 +2380,7 @@ class LTX2DenoisingStage(DenoisingStage):
                         audio_latents=midpoint_audio_latents,
                         sigma_value=sub_sigma,
                         update_skip_cache=False,
+                        probe_phase_suffix="substep",
                     )
                 )
                 eps2_video = midpoint_denoised_video.double() - anchor_video
