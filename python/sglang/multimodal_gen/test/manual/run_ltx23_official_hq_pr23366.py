@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
+import json
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 try:
     import ltx_pipelines.ti2vid_two_stages_hq as ltx2_hq_module
@@ -16,10 +21,14 @@ try:
     from ltx_core.model.transformer.transformer import BasicAVTransformerBlock
     from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
     from ltx_core.text_encoders.gemma.config import GEMMA3_CONFIG_FOR_LTX
+    from ltx_core.text_encoders.gemma.encoders.base_encoder import GemmaTextEncoder
     from ltx_core.text_encoders.gemma.encoders import encoder_configurator as gemma_encoder_configurator
+    from ltx_core.text_encoders.gemma.tokenizer import LTXVGemmaTokenizer
     from ltx_pipelines.ti2vid_two_stages_hq import TI2VidTwoStagesHQPipeline
     from ltx_pipelines.utils.constants import DEFAULT_NEGATIVE_PROMPT
+    from ltx_pipelines.utils.helpers import cleanup_memory
     from ltx_pipelines.utils.media_io import encode_video
+    from transformers import AutoImageProcessor, Gemma3ForConditionalGeneration, Gemma3Processor
     from transformers.models.gemma3.modeling_gemma3 import (
         Gemma3RotaryEmbedding,
         Gemma3TextScaledWordEmbedding,
@@ -160,10 +169,77 @@ def _patch_official_builder_for_gemma_buffers() -> None:
         return
 
     original_return_model = SingleGPUModelBuilder._return_model
+    original_model_config = SingleGPUModelBuilder.model_config
+    original_meta_model = SingleGPUModelBuilder.meta_model
+    original_with_sd_ops = SingleGPUModelBuilder.with_sd_ops
+    original_with_module_ops = SingleGPUModelBuilder.with_module_ops
+    original_with_loras = SingleGPUModelBuilder.with_loras
+    original_embeddings_processor_from_config = (
+        gemma_encoder_configurator.EmbeddingsProcessorConfigurator.from_config.__func__
+    )
 
     def _patched_return_model(self, meta_model: torch.nn.Module, device: torch.device):
         _materialize_known_meta_buffers(meta_model, device)
         return original_return_model(self, meta_model, device)
+
+    def _normalize_embeddings_processor_config(config: dict) -> dict:
+        if "transformer" in config:
+            return config
+
+        transformer_config = dict(config)
+        if (
+            "connector_num_attention_heads" not in transformer_config
+            and "video_connector_num_attention_heads" in transformer_config
+        ):
+            transformer_config["connector_num_attention_heads"] = transformer_config[
+                "video_connector_num_attention_heads"
+            ]
+        if (
+            "connector_attention_head_dim" not in transformer_config
+            and "video_connector_attention_head_dim" in transformer_config
+        ):
+            transformer_config["connector_attention_head_dim"] = transformer_config[
+                "video_connector_attention_head_dim"
+            ]
+        if (
+            "connector_num_layers" not in transformer_config
+            and "video_connector_num_layers" in transformer_config
+        ):
+            transformer_config["connector_num_layers"] = transformer_config[
+                "video_connector_num_layers"
+            ]
+        return {"transformer": transformer_config}
+
+    def _patched_model_config(self):
+        override = getattr(self, "_pr23366_model_config_override", None)
+        if override is not None:
+            return override
+        config = original_model_config(self)
+        if getattr(self.model_class_configurator, "__name__", "") != "EmbeddingsProcessorConfigurator":
+            return config
+        return _normalize_embeddings_processor_config(config)
+
+    def _patched_meta_model(self, config: dict, module_ops):
+        if getattr(self.model_class_configurator, "__name__", "") == "EmbeddingsProcessorConfigurator":
+            config = _normalize_embeddings_processor_config(config)
+        return original_meta_model(self, config, module_ops)
+
+    def _carry_builder_override(src, dst):
+        override = getattr(src, "_pr23366_model_config_override", None)
+        if override is not None:
+            object.__setattr__(dst, "_pr23366_model_config_override", override)
+        return dst
+
+    def _patched_with_sd_ops(self, sd_ops):
+        return _carry_builder_override(self, original_with_sd_ops(self, sd_ops))
+
+    def _patched_with_module_ops(self, module_ops):
+        return _carry_builder_override(
+            self, original_with_module_ops(self, module_ops)
+        )
+
+    def _patched_with_loras(self, loras):
+        return _carry_builder_override(self, original_with_loras(self, loras))
 
     def _patched_create_and_populate(module):
         model = module.model
@@ -206,9 +282,41 @@ def _patch_official_builder_for_gemma_buffers() -> None:
             model.config.text_config.hidden_size**0.5, device="cpu"
         )
         l_model.embed_tokens.register_buffer("embed_scale", embed_scale)
-        l_model.rotary_emb_local.register_buffer("inv_freq", local_rope_freqs)
+        if hasattr(l_model, "rotary_emb_local"):
+            l_model.rotary_emb_local.register_buffer("inv_freq", local_rope_freqs)
         l_model.rotary_emb.register_buffer("inv_freq", inv_freqs)
         return module
+
+    def _patched_embeddings_processor_from_config(cls, config: dict):
+        if "transformer" not in config and (
+            "video_connector_attention_head_dim" in config
+            or "audio_connector_attention_head_dim" in config
+            or "text_proj_in_factor" in config
+        ):
+            transformer_config = dict(config)
+            if (
+                "connector_num_attention_heads" not in transformer_config
+                and "video_connector_num_attention_heads" in transformer_config
+            ):
+                transformer_config["connector_num_attention_heads"] = (
+                    transformer_config["video_connector_num_attention_heads"]
+                )
+            if (
+                "connector_attention_head_dim" not in transformer_config
+                and "video_connector_attention_head_dim" in transformer_config
+            ):
+                transformer_config["connector_attention_head_dim"] = (
+                    transformer_config["video_connector_attention_head_dim"]
+                )
+            if (
+                "connector_num_layers" not in transformer_config
+                and "video_connector_num_layers" in transformer_config
+            ):
+                transformer_config["connector_num_layers"] = transformer_config[
+                    "video_connector_num_layers"
+                ]
+            config = {"transformer": transformer_config}
+        return original_embeddings_processor_from_config(cls, config)
 
     gemma_encoder_configurator.create_and_populate = _patched_create_and_populate
     gemma_encoder_configurator.GEMMA_MODEL_OPS = (
@@ -216,9 +324,189 @@ def _patch_official_builder_for_gemma_buffers() -> None:
             mutator=_patched_create_and_populate
         )
     )
+    gemma_encoder_configurator.EmbeddingsProcessorConfigurator.from_config = classmethod(
+        _patched_embeddings_processor_from_config
+    )
     ltx2_blocks_module.GEMMA_MODEL_OPS = gemma_encoder_configurator.GEMMA_MODEL_OPS
+    SingleGPUModelBuilder.model_config = _patched_model_config
+    SingleGPUModelBuilder.meta_model = _patched_meta_model
+    SingleGPUModelBuilder.with_sd_ops = _patched_with_sd_ops
+    SingleGPUModelBuilder.with_module_ops = _patched_with_module_ops
+    SingleGPUModelBuilder.with_loras = _patched_with_loras
     SingleGPUModelBuilder._return_model = _patched_return_model
     SingleGPUModelBuilder._pr23366_meta_patch_applied = True
+
+
+def _retarget_componentized_checkpoint_builders(
+    pipeline: TI2VidTwoStagesHQPipeline, checkpoint_root: Path
+) -> None:
+    model_index_path = checkpoint_root / "model_index.json"
+    if not model_index_path.is_file():
+        return
+
+    def _require(path: Path) -> str:
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing componentized checkpoint file: {path}")
+        return str(path)
+
+    transformer_path = _require(checkpoint_root / "transformer" / "model.safetensors")
+    transformer_config = json.loads(
+        (checkpoint_root / "transformer" / "config.json").read_text()
+    )
+    image_encoder_path = _require(
+        checkpoint_root / "vae" / "ltx23_image_encoder" / "model.safetensors"
+    )
+    image_encoder_config = json.loads(
+        (checkpoint_root / "vae" / "ltx23_image_encoder" / "config.json").read_text()
+    )
+    raw_connector_path = checkpoint_root / "connectors" / "model.safetensors"
+    connector_path = _require(
+        _ensure_official_connector_checkpoint(raw_connector_path)
+    )
+    vae_path = _require(checkpoint_root / "vae" / "model.safetensors")
+    audio_vae_path = _require(
+        checkpoint_root / "audio_vae" / "diffusion_pytorch_model.safetensors"
+    )
+    vocoder_path = _require(checkpoint_root / "vocoder" / "model.safetensors")
+
+    embeddings_processor_builder = dataclasses.replace(
+        pipeline.prompt_encoder._embeddings_processor_builder,
+        model_path=connector_path,
+        model_sd_ops=None,
+    )
+    object.__setattr__(
+        embeddings_processor_builder,
+        "_pr23366_model_config_override",
+        {"transformer": transformer_config},
+    )
+    pipeline.prompt_encoder._embeddings_processor_builder = embeddings_processor_builder
+    image_encoder_builder = dataclasses.replace(
+        pipeline.image_conditioner._encoder_builder,
+        model_path=image_encoder_path,
+        model_sd_ops=None,
+    )
+    object.__setattr__(
+        image_encoder_builder,
+        "_pr23366_model_config_override",
+        image_encoder_config,
+    )
+    pipeline.image_conditioner._encoder_builder = image_encoder_builder
+    upsampler_encoder_builder = dataclasses.replace(
+        pipeline.upsampler._encoder_builder,
+        model_path=image_encoder_path,
+        model_sd_ops=None,
+    )
+    object.__setattr__(
+        upsampler_encoder_builder,
+        "_pr23366_model_config_override",
+        image_encoder_config,
+    )
+    pipeline.upsampler._encoder_builder = upsampler_encoder_builder
+    pipeline.video_decoder._decoder_builder = dataclasses.replace(
+        pipeline.video_decoder._decoder_builder,
+        model_path=vae_path,
+        model_sd_ops=None,
+    )
+    pipeline.audio_decoder._decoder_builder = dataclasses.replace(
+        pipeline.audio_decoder._decoder_builder,
+        model_path=audio_vae_path,
+        model_sd_ops=None,
+    )
+    pipeline.audio_decoder._vocoder_builder = dataclasses.replace(
+        pipeline.audio_decoder._vocoder_builder,
+        model_path=vocoder_path,
+        model_sd_ops=None,
+    )
+    stage1_transformer_builder = dataclasses.replace(
+        pipeline.stage_1._transformer_builder,
+        model_path=transformer_path,
+        model_sd_ops=None,
+    )
+    object.__setattr__(
+        stage1_transformer_builder,
+        "_pr23366_model_config_override",
+        {"transformer": transformer_config},
+    )
+    pipeline.stage_1._transformer_builder = stage1_transformer_builder
+    stage2_transformer_builder = dataclasses.replace(
+        pipeline.stage_2._transformer_builder,
+        model_path=transformer_path,
+        model_sd_ops=None,
+    )
+    object.__setattr__(
+        stage2_transformer_builder,
+        "_pr23366_model_config_override",
+        {"transformer": transformer_config},
+    )
+    pipeline.stage_2._transformer_builder = stage2_transformer_builder
+
+
+def _remap_componentized_connector_key_for_official(key: str) -> str:
+    if key.startswith("video_aggregate_embed."):
+        return "feature_extractor.video_aggregate_embed." + key[len("video_aggregate_embed.") :]
+    if key.startswith("audio_aggregate_embed."):
+        return "feature_extractor.audio_aggregate_embed." + key[len("audio_aggregate_embed.") :]
+    if key.startswith("text_proj_in."):
+        return "feature_extractor.aggregate_embed." + key[len("text_proj_in.") :]
+    if key.startswith("video_connector."):
+        suffix = key[len("video_connector.") :]
+        suffix = suffix.replace("transformer_blocks", "transformer_1d_blocks")
+        suffix = suffix.replace(".attn1.norm_q.", ".attn1.q_norm.")
+        suffix = suffix.replace(".attn1.norm_k.", ".attn1.k_norm.")
+        return f"video_connector.{suffix}"
+    if key.startswith("audio_connector."):
+        suffix = key[len("audio_connector.") :]
+        suffix = suffix.replace("transformer_blocks", "transformer_1d_blocks")
+        suffix = suffix.replace(".attn1.norm_q.", ".attn1.q_norm.")
+        suffix = suffix.replace(".attn1.norm_k.", ".attn1.k_norm.")
+        return f"audio_connector.{suffix}"
+    return key
+
+
+def _ensure_official_connector_checkpoint(connector_path: Path) -> Path:
+    legacy_path = connector_path.with_name("model.official.safetensors")
+    if legacy_path.is_file():
+        legacy_path.unlink()
+
+    stat = connector_path.stat()
+    cache_key = hashlib.sha1(
+        f"{connector_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:16]
+    cache_dir = (
+        Path(tempfile.gettempdir()) / "ltx23_official_connector_cache" / cache_key
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    official_path = cache_dir / "model.safetensors"
+    if official_path.is_file():
+        return official_path
+
+    tensors: dict[str, torch.Tensor] = {}
+    with safe_open(str(connector_path), framework="pt") as f:
+        for key in f.keys():
+            tensors[_remap_componentized_connector_key_for_official(key)] = (
+                f.get_tensor(key)
+            )
+    save_file(tensors, str(official_path))
+    return official_path
+
+
+def _resolve_gemma_component_roots(gemma_root: Path) -> tuple[Path, Path, Path]:
+    text_encoder_root = gemma_root / "text_encoder"
+    tokenizer_root = gemma_root / "tokenizer"
+    if text_encoder_root.is_dir() and tokenizer_root.is_dir():
+        return text_encoder_root, tokenizer_root, tokenizer_root
+    model_candidates = sorted(gemma_root.rglob("model*.safetensors"))
+    tokenizer_candidates = sorted(gemma_root.rglob("tokenizer.model"))
+    processor_candidates = sorted(gemma_root.rglob("preprocessor_config.json"))
+    if not model_candidates or not tokenizer_candidates or not processor_candidates:
+        raise FileNotFoundError(
+            f"Could not resolve Gemma component roots under {gemma_root}"
+        )
+    return (
+        model_candidates[0].parent,
+        tokenizer_candidates[0].parent,
+        processor_candidates[0].parent,
+    )
 
 
 def _to_probe_payload(value):
@@ -565,6 +853,8 @@ def _clone_video_chunks(chunks):
 def main() -> None:
     args = parse_args()
     _patch_official_builder_for_gemma_buffers()
+    checkpoint_path = Path(args.checkpoint_path).expanduser().resolve()
+    gemma_root = Path(args.gemma_root).expanduser().resolve()
     output_path = Path(args.output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     probe_dir = Path(args.probe_dir).expanduser().resolve() if args.probe_dir else None
@@ -572,7 +862,7 @@ def main() -> None:
         probe_dir.mkdir(parents=True, exist_ok=True)
 
     pipeline = TI2VidTwoStagesHQPipeline(
-        checkpoint_path=str(Path(args.checkpoint_path).expanduser().resolve()),
+        checkpoint_path=str(checkpoint_path),
         distilled_lora=[
             LoraPathStrengthAndSDOps(
                 str(Path(args.distilled_lora_path).expanduser().resolve()),
@@ -585,9 +875,45 @@ def main() -> None:
         spatial_upsampler_path=str(
             Path(args.spatial_upsampler_path).expanduser().resolve()
         ),
-        gemma_root=str(Path(args.gemma_root).expanduser().resolve()),
+        gemma_root=str(gemma_root),
         loras=(),
     )
+    _retarget_componentized_checkpoint_builders(pipeline, checkpoint_path)
+    gemma_model_root, tokenizer_root, processor_root = _resolve_gemma_component_roots(
+        gemma_root
+    )
+
+    @contextmanager
+    def _hf_text_encoder_ctx(_: int | None):
+        model = Gemma3ForConditionalGeneration.from_pretrained(
+            str(gemma_model_root),
+            local_files_only=True,
+            dtype=pipeline.prompt_encoder._dtype,
+            low_cpu_mem_usage=True,
+        ).to(pipeline.prompt_encoder._device)
+        tokenizer = LTXVGemmaTokenizer(str(tokenizer_root), 1024)
+        processor = Gemma3Processor(
+            image_processor=AutoImageProcessor.from_pretrained(
+                str(processor_root), local_files_only=True
+            ),
+            tokenizer=tokenizer.tokenizer,
+        )
+        text_encoder = GemmaTextEncoder(
+            model=model.eval(),
+            tokenizer=tokenizer,
+            processor=processor,
+            dtype=pipeline.prompt_encoder._dtype,
+        ).eval()
+        try:
+            yield text_encoder
+        finally:
+            del text_encoder
+            del processor
+            del tokenizer
+            del model
+            cleanup_memory()
+
+    pipeline.prompt_encoder._text_encoder_ctx = _hf_text_encoder_ctx
 
     tiling_config = TilingConfig.default()
     original_stage2_loop = _patch_stage2_probe_loop(probe_dir)
