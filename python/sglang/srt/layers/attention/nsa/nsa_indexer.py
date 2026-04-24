@@ -115,11 +115,8 @@ class BaseIndexerMetadata(ABC):
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
-    # from sgl_kernel import hadamard_transform
-    if _is_hip:
-        from fast_hadamard_transform import hadamard_transform
-    else:
-        from sgl_kernel import hadamard_transform
+    # B300: sgl_kernel hadamard_transform not available (reason unclear), fallback to fast_hadamard_transform
+    from fast_hadamard_transform import hadamard_transform
 
     hidden_size = x.size(-1)
     assert (
