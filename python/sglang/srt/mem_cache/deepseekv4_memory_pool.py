@@ -556,17 +556,41 @@ class DeepSeekV4TokenToKVPool(KVCache):
 
         return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
 
+    def _mla_pp_compression_ranges(self) -> Tuple[int, int, int, int]:
+        """Return (c4_off_s, c4_off_e, c128_off_s, c128_off_e): absolute
+        indices of this PP stage's layer range inside the compression-ratio
+        sub-lists (c4_kv_pool.kv_buffer, c128_kv_pool.kv_buffer, etc.).
+
+        The c4/c128 pools are built from the full-model compression_ratios
+        list, so each PP stage needs to locate its contiguous sub-range
+        inside them.
+        """
+        ratios = self.compression_ratios
+        start = self.start_layer if self.start_layer is not None else 0
+        end = self.end_layer if self.end_layer is not None else len(ratios)
+
+        if len(ratios) < end:
+            start = 0
+            end = len(ratios)
+        c4_off_s = sum(1 for r in ratios[:start] if r == 4)
+        c4_off_e = sum(1 for r in ratios[:end] if r == 4)
+        c128_off_s = sum(1 for r in ratios[:start] if r == 128)
+        c128_off_e = sum(1 for r in ratios[:end] if r == 128)
+        return c4_off_s, c4_off_e, c128_off_s, c128_off_e
+
     def get_contiguous_buf_infos(self) -> Tuple[List[int], List[int], List[int]]:
         data_ptrs: List[int] = []
         data_lens: List[int] = []
         item_lens: List[int] = []
 
-        for bufs in [
-            self.c4_kv_pool.kv_buffer,
-            self.c4_indexer_kv_pool.index_k_with_scale_buffer,
-            self.c128_kv_pool.kv_buffer,
-        ]:
-            for buf in bufs:
+        c4_s, c4_e, c128_s, c128_e = self._mla_pp_compression_ranges()
+        sections = [
+            (self.c4_kv_pool.kv_buffer, c4_s, c4_e),
+            (self.c4_indexer_kv_pool.index_k_with_scale_buffer, c4_s, c4_e),
+            (self.c128_kv_pool.kv_buffer, c128_s, c128_e),
+        ]
+        for bufs, s, e in sections:
+            for buf in bufs[s:e]:
                 assert buf.ndim == 2, f"expected 2D buffer, got {buf.ndim}D"
                 data_ptrs.append(buf.data_ptr())
                 data_lens.append(buf.nbytes)
@@ -585,11 +609,20 @@ class DeepSeekV4TokenToKVPool(KVCache):
             data_lens.append(buf.nbytes)
             item_lens.append(buf[0].nbytes)
 
+        start = self.start_layer if self.start_layer is not None else 0
+        end = (
+            self.end_layer
+            if self.end_layer is not None
+            else len(self.compression_ratios)
+        )
+        if len(self.compression_ratios) < end:
+            start = 0
+            end = len(self.compression_ratios)
         for pools in [
             self.compress_state_pools,
             self.indexer_compress_state_pools,
         ]:
-            for pool in pools:
+            for pool in pools[start:end]:
                 if pool is None:
                     continue
                 t = pool.kv_score_buffer.kv_score
