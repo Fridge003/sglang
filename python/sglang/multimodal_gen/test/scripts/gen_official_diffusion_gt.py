@@ -336,7 +336,11 @@ def _apply_sglang_condition_size(
     width = kwargs.get("width") if "width" in explicit_fields else calculated_width
     height = kwargs.get("height") if "height" in explicit_fields else calculated_height
 
-    multiple_of = config.vae_config.get_vae_scale_factor() * 2
+    vae_arch = config.vae_config.arch_config
+    vae_scale_factor = getattr(
+        vae_arch, "vae_scale_factor", vae_arch.spatial_compression_ratio
+    )
+    multiple_of = vae_scale_factor * 2
     kwargs["width"] = width // multiple_of * multiple_of
     kwargs["height"] = height // multiple_of * multiple_of
 
