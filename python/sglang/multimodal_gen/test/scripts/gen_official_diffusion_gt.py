@@ -286,7 +286,7 @@ def _filter_kwargs(pipe: DiffusionPipeline, kwargs: dict[str, Any]) -> tuple[dic
     return kept, ignored
 
 
-def _load_input_images(image_path: Any) -> list[Image.Image]:
+def _load_input_images(image_path: Any, *, force_rgba: bool = False) -> list[Image.Image]:
     if image_path is None:
         return []
     paths = image_path if isinstance(image_path, list) else [image_path]
@@ -294,7 +294,7 @@ def _load_input_images(image_path: Any) -> list[Image.Image]:
     for path in paths:
         local_path = download_image_from_url(path) if is_image_url(path) else Path(path)
         image = Image.open(local_path)
-        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+        if force_rgba or image.mode in ("RGBA", "LA") or "transparency" in image.info:
             images.append(image.convert("RGBA"))
         else:
             images.append(image.convert("RGB"))
@@ -348,7 +348,8 @@ def _build_call_kwargs(
     if getattr(req, "num_outputs_per_prompt", 1) > 1:
         kwargs["num_images_per_prompt"] = req.num_outputs_per_prompt
 
-    input_images = _load_input_images(getattr(req, "image_path", None))
+    force_rgba = type(pipe).__name__ == "QwenImageLayeredPipeline"
+    input_images = _load_input_images(getattr(req, "image_path", None), force_rgba=force_rgba)
     if input_images:
         sig = _call_signature(pipe)
         valid = set(sig.parameters) if sig is not None else set()
@@ -367,6 +368,9 @@ def _build_call_kwargs(
         if key.startswith("enable_") or key.endswith("_scale") or key.endswith("_exp"):
             continue
         kwargs.setdefault(key, value)
+
+    if "guidance_scale_2" in kwargs and getattr(pipe, "boundary_ratio", None) is None:
+        kwargs.pop("guidance_scale_2")
 
     kwargs.setdefault("output_type", "pil")
     return _filter_kwargs(pipe, kwargs)
