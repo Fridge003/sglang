@@ -494,16 +494,24 @@ class LoRAPipeline(ComposedPipelineBase):
                 examples = ", ".join(missing_layers[:example_limit])
                 if missing_count > example_limit:
                     examples += ", ..."
-                log_fn = logger.warning if applied_count == 0 else logger.info
-                log_fn(
-                    "LoRA adapter %s missing weights for %d/%d layers; those layers will use base weights. "
-                    "Applied to %d layers. Examples: %s",
-                    path,
-                    missing_count,
-                    total_layers,
-                    applied_count,
-                    examples,
-                )
+                if applied_count == 0:
+                    logger.warning(
+                        "LoRA adapter %s did not match any LoRA layer. "
+                        "Checked %d layers; examples: %s",
+                        path,
+                        total_layers,
+                        examples,
+                    )
+                else:
+                    logger.info(
+                        "LoRA adapter %s covers %d/%d LoRA layers; "
+                        "%d layers use base weights. Examples: %s",
+                        path,
+                        applied_count,
+                        total_layers,
+                        missing_count,
+                        examples,
+                    )
         return adapted_count
 
     def is_lora_effective(self, target: str = "all") -> bool:

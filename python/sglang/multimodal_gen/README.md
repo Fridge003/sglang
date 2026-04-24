@@ -89,6 +89,9 @@ sglang generate \
   --save-output
 ```
 
+For video LoRAs, including LTX-2.3 transition LoRAs with `--lora-weight-name`
+and `--lora-scale`, see [cli.md](https://github.com/sgl-project/sglang/tree/main/docs/diffusion/api/cli.md).
+
 For more usage examples (e.g. OpenAI compatible API, server mode), check [cli.md](https://github.com/sgl-project/sglang/tree/main/docs/diffusion/api/cli.md).
 
 ## Contributing
