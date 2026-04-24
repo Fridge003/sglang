@@ -991,6 +991,10 @@ class LTX2DenoisingStage(DenoisingStage):
             ctx.is_ltx23_variant
             and self._should_use_ltx23_hq_timestep_semantics(server_args)
         )
+        if server_args.pipeline_class_name == "LTX2TwoStageHQPipeline":
+            # Official HQ runs bf16 modules directly, without wrapping the DiT
+            # forward in a global autocast context.
+            ctx.autocast_enabled = False
         ctx.stage = (
             phase
             if phase is not None
