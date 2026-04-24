@@ -9,7 +9,10 @@ from sglang.multimodal_gen.configs.models.encoders import (
     BaseEncoderOutput,
     EncoderConfig,
 )
-from sglang.multimodal_gen.configs.models.encoders.gemma_3 import Gemma3Config
+from sglang.multimodal_gen.configs.models.encoders.gemma_3 import (
+    Gemma3ArchConfig,
+    Gemma3Config,
+)
 from sglang.multimodal_gen.configs.models.vaes.ltx_audio import LTXAudioVAEConfig
 from sglang.multimodal_gen.configs.models.vaes.ltx_video import LTXVideoVAEConfig
 from sglang.multimodal_gen.configs.pipeline_configs.base import (
@@ -693,6 +696,15 @@ class LTX2PipelineConfig(PipelineConfig):
         )
 
         return latents, audio_latents
+
+
+@dataclasses.dataclass
+class LTX23HQPipelineConfig(LTX2PipelineConfig):
+    text_encoder_configs: tuple[EncoderConfig, ...] = field(
+        default_factory=lambda: (
+            Gemma3Config(arch_config=Gemma3ArchConfig(text_len=256)),
+        )
+    )
 
 
 @dataclasses.dataclass

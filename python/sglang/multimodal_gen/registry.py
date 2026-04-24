@@ -55,7 +55,10 @@ from sglang.multimodal_gen.configs.pipeline_configs.glm_image import (
 from sglang.multimodal_gen.configs.pipeline_configs.hunyuan3d import (
     Hunyuan3D2PipelineConfig,
 )
-from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import LTX2PipelineConfig
+from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
+    LTX23HQPipelineConfig,
+    LTX2PipelineConfig,
+)
 from sglang.multimodal_gen.configs.pipeline_configs.mova import (
     MOVA360PConfig,
     MOVA720PConfig,
@@ -636,7 +639,7 @@ def _register_configs():
     # register dedicated sampling params for LTX2TwoStageHQPipeline
     _PIPELINE_CONFIG_REGISTRY.setdefault(
         "LTX2TwoStageHQPipeline",
-        (LTX2PipelineConfig, LTX23HQSamplingParams),
+        (LTX23HQPipelineConfig, LTX23HQSamplingParams),
     )
 
     # Hunyuan

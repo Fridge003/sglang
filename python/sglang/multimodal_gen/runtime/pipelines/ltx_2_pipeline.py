@@ -6,6 +6,7 @@ import torch
 from diffusers import FlowMatchEulerDiscreteScheduler
 
 from sglang.multimodal_gen.configs.pipeline_configs.ltx_2 import (
+    LTX23HQPipelineConfig,
     LTX2PipelineConfig,
     is_ltx23_native_variant,
     sync_ltx23_runtime_vae_markers,
@@ -993,7 +994,7 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
 class LTX2TwoStageHQPipeline(LTX2TwoStagePipeline):
     pipeline_name = "LTX2TwoStageHQPipeline"
-    pipeline_config_cls = LTX2PipelineConfig
+    pipeline_config_cls = LTX23HQPipelineConfig
     sampling_params_cls = LTX23HQSamplingParams
     STAGE_1_DISTILLED_LORA_STRENGTH = 0.25
     STAGE_2_DISTILLED_LORA_STRENGTH = 0.5
