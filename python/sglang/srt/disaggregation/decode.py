@@ -116,7 +116,6 @@ class DecodeReqToTokenPool:
         memory_saver_adapter = TorchMemorySaverAdapter.create(
             enable=enable_memory_saver
         )
-
         self.size = size
         self.max_context_len = max_context_len
         self.device = device
