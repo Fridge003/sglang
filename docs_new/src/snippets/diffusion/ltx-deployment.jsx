@@ -142,7 +142,7 @@ export const LTXDeployment = () => {
       command += ` \\\n  --lora-path ${selectedLora.path} \\\n  --lora-weight-name ${selectedLora.weightName}`;
     }
 
-    command += ` \\\n  --pin-cpu-memory \\\n  --port 30000`;
+    command += ` \\\n  --port 30000`;
     return command;
   };
 
