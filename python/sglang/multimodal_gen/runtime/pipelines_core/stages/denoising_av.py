@@ -14,6 +14,8 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
+LTX23_HQ_RES2S_FINAL_SIGMA = 0.0011
+
 
 class LTX2AVDenoisingStage(LTX2DenoisingStage):
     """
@@ -345,15 +347,19 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             scheduler_sigmas = torch.cat(
                 [
                     self.distilled_sigmas[:-1],
-                    torch.tensor([0.0011, 0.0], dtype=self.distilled_sigmas.dtype),
+                    torch.tensor(
+                        [LTX23_HQ_RES2S_FINAL_SIGMA, 0.0],
+                        dtype=self.distilled_sigmas.dtype,
+                    ),
                 ],
                 dim=0,
             )
+            num_steps = len(scheduler_sigmas) - 1
         else:
             scheduler_sigmas = self.distilled_sigmas
         self.scheduler.sigmas = scheduler_sigmas.to(distilled_device)
         self.scheduler.num_inference_steps = num_steps
-        self.scheduler.timesteps = (self.distilled_sigmas[:num_steps] * 1000).to(
+        self.scheduler.timesteps = (scheduler_sigmas[:num_steps] * 1000).to(
             distilled_device
         )
         self.scheduler._step_index = None
