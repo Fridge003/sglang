@@ -17,7 +17,6 @@ import torch
 
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
-from sglang.srt.observability.metrics_collector import RadixCacheMetricsCollector
 
 if TYPE_CHECKING:
     from sglang.srt.managers.schedule_batch import Req
@@ -150,9 +149,6 @@ class MatchResult(NamedTuple):
 class BasePrefixCache(ABC, PrefixCacheTrait):
     """Cache can be indexed by either rid or key."""
 
-    metrics_collector: Optional[RadixCacheMetricsCollector] = (
-        None  # metrics collector for the cache
-    )
 
     def init_metrics_collector(self):
         from sglang.srt.server_args import get_global_server_args
@@ -161,7 +157,8 @@ class BasePrefixCache(ABC, PrefixCacheTrait):
         labels = {"cache_type": self.__class__.__name__}
         if server_args.extra_metric_labels:
             labels.update(server_args.extra_metric_labels)
-        self.metrics_collector = RadixCacheMetricsCollector(labels=labels)
+        # self.metrics_collector = RadixCacheMetricsCollector(labels=labels)
+        self.metrics_collector = None
 
     def update_eviction_metrics(self, num_evicted: int, start_time: float):
         if self.metrics_collector is not None and num_evicted > 0:

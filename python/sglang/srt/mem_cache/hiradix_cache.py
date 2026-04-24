@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 
 import torch
 
-from sglang.srt.disaggregation.kv_events import StorageMedium
 from sglang.srt.managers.cache_controller import HiCacheController, PrefetchOperation
 from sglang.srt.mem_cache.base_prefix_cache import (
     DecLockRefParams,
@@ -722,9 +721,7 @@ class HiRadixCache(RadixCache):
                     for ack_id in ack_list:
                         backuped_node = self.ongoing_write_through.pop(ack_id)
                         # DMA confirmed -- block is now on host.
-                        self._record_store_event(
-                            backuped_node, medium=StorageMedium.CPU
-                        )
+                        self._record_store_event(backuped_node)
                         if self.enable_storage:
                             self.write_backup_storage(backuped_node)
                 self.cache_controller.ack_write_queue.clear()
@@ -756,7 +753,7 @@ class HiRadixCache(RadixCache):
             for ack_id in ack_list:
                 backuped_node = self.ongoing_write_through.pop(ack_id)
                 # DMA confirmed -- block is now on host.
-                self._record_store_event(backuped_node, medium=StorageMedium.CPU)
+                self._record_store_event(backuped_node)
                 self.dec_lock_ref(backuped_node)
                 if self.enable_storage:
                     self.write_backup_storage(backuped_node)
@@ -893,7 +890,7 @@ class HiRadixCache(RadixCache):
         # GPU -> CPU demotion: block moves from device to host.
         # Emit remove(GPU) so downstream indexers stop scoring it as device-local.
         # The matching store(CPU) was emitted when write_backup() copied to host.
-        self._record_remove_event(node, medium=StorageMedium.GPU)
+        self._record_remove_event(node)
         num_evicted = self.cache_controller.evict_device(node.value)
         assert num_evicted > 0
         self.evictable_size_ -= num_evicted
@@ -935,7 +932,7 @@ class HiRadixCache(RadixCache):
 
             # Block deleted entirely (GPU already evicted, now CPU freed) --
             # emit remove(CPU) so the router drops the host-tier entry.
-            self._record_remove_event(x, medium=StorageMedium.CPU)
+            self._record_remove_event(x)
             num_evicted += self.cache_controller.evict_host(x.host_value)
 
             key = self.get_child_key_fn(x.key)
@@ -1009,7 +1006,7 @@ class HiRadixCache(RadixCache):
             offset += len(node.host_value)
             # Block promoted from host to GPU -- emit store(GPU) so downstream
             # indexers see it as device-local again.
-            self._record_store_event(node, medium=StorageMedium.GPU)
+            self._record_store_event(node)
         self.evictable_size_ += len(device_indices)
         self.inc_lock_ref(last_hit_node)
 
@@ -1344,7 +1341,7 @@ class HiRadixCache(RadixCache):
             self._update_host_leaf_status(node)
             # Publish the newly materialized host suffix immediately so downstream
             # cache indexers can resolve descendants that extend this L2-only prefix.
-            self._record_store_event(new_node, medium=StorageMedium.CPU)
+            self._record_store_event(new_node)
 
         return matched_length
 

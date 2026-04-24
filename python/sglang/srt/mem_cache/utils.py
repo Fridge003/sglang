@@ -272,3 +272,13 @@ def convert_to_bigram_key(tokens: List[int]) -> List[Tuple[int, int]]:
     if len(tokens) < 2:
         return []
     return [(tokens[i], tokens[i + 1]) for i in range(len(tokens) - 1)]
+
+def hash_str_to_int64(hash_str: str) -> int:
+    """Convert SHA256 hex string to signed 64-bit integer for events.
+
+    Takes first 16 hex characters (64 bits) and converts to signed int64 range.
+    """
+    uint64_val = int(hash_str[:16], 16)
+    if uint64_val >= 2**63:
+        return uint64_val - 2**64
+    return uint64_val

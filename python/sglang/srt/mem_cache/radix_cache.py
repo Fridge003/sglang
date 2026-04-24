@@ -38,7 +38,6 @@ from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
-    StorageMedium,
 )
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
@@ -60,7 +59,6 @@ from sglang.srt.mem_cache.evict_policy import (
     LRUStrategy,
     MRUStrategy,
     PriorityStrategy,
-    SLRUStrategy,
 )
 from sglang.srt.mem_cache.utils import hash_str_to_int64
 
@@ -351,12 +349,9 @@ class RadixCache(BasePrefixCache):
             self.eviction_strategy: EvictionStrategy = FILOStrategy()
         elif self.eviction_policy == "priority":
             self.eviction_strategy: EvictionStrategy = PriorityStrategy()
-        elif self.eviction_policy == "slru":
-            self.eviction_strategy: EvictionStrategy = SLRUStrategy()
-
         else:
             raise ValueError(
-                f"Unknown eviction policy: {self.eviction_policy}. Supported policies: 'lru', 'lfu', 'fifo', 'mru', 'filo', 'priority', 'slru'."
+                f"Unknown eviction policy: {self.eviction_policy}. Supported policies: 'lru', 'lfu', 'fifo', 'mru', 'filo', 'priority'."
             )
 
         self.evictable_leaves = set()
@@ -855,14 +850,9 @@ class RadixCache(BasePrefixCache):
                 stack.append(child)
         return total_size
 
-    def _record_store_event(self, node: TreeNode, medium=None):
+    def _record_store_event(self, node: TreeNode):
         # One BlockStored per ``page_size`` chunk.
-        # ``medium`` defaults to StorageMedium.GPU but callers may override
-        # for lower-tier insertions (e.g. StorageMedium.CPU for host/L2 cache).
         if self.enable_kv_cache_events:
-            if medium is None:
-                medium = StorageMedium.GPU
-
             # Compute hash_value lazily if not already set
             if node.hash_value is None:
                 node.hash_value = compute_node_hash_values(node, self.page_size)
@@ -899,20 +889,15 @@ class RadixCache(BasePrefixCache):
                         token_ids=page_tokens,
                         block_size=len(page_tokens),
                         lora_id=None,
-                        medium=medium,
                     )
                 )
 
                 parent_block_hash = block_hash
                 page_index += 1
 
-    def _record_remove_event(self, node: TreeNode, medium=None):
+    def _record_remove_event(self, node: TreeNode):
         # One BlockRemoved per chunk.
-        # ``medium`` defaults to StorageMedium.GPU but callers may override for
-        # lower-tier removals (e.g. StorageMedium.CPU when evicting from host).
         if self.enable_kv_cache_events:
-            if medium is None:
-                medium = StorageMedium.GPU
 
             # Compute hash_value lazily if not already set (must match what was stored)
             if node.hash_value is None:
@@ -928,7 +913,7 @@ class RadixCache(BasePrefixCache):
                 block_hash = hash_str_to_int64(node.hash_value[page_index])
 
                 self.kv_event_queue.append(
-                    BlockRemoved(block_hashes=[block_hash], medium=medium)
+                    BlockRemoved(block_hashes=[block_hash])
                 )
 
                 page_index += 1
