@@ -67,6 +67,10 @@ UNSUPPORTED_OFFICIAL_CASES = {
         "The HF repo declares WanDMDPipeline, but the current Diffusers package "
         "does not provide that class and the repo has no custom pipeline.py."
     ),
+    "wan2_2_ti2v_5b": (
+        "The current Diffusers WanPipeline signature does not accept image input, "
+        "so it would generate a T2V sample instead of the TI2V CI case."
+    ),
     "zimage_image_t2i_multi_lora": (
         "Diffusers Z-Image LoRA conversion currently expects alpha keys that are "
         "not present in the CI LoRA checkpoints; keep the existing GT for this case."
@@ -211,7 +215,7 @@ def _final_request_for_case(case: DiffusionTestCase):
         server_args,
         **user_kwargs,
     )
-    return prepare_request(server_args, sampling_params), sampling_params, output_size
+    return prepare_request(server_args, sampling_params), sampling_params, server_args, output_size
 
 
 def _torch_dtype(dtype_arg: str) -> torch.dtype:
@@ -309,6 +313,34 @@ def _load_input_images(image_path: Any, *, force_rgba: bool = False) -> list[Ima
     return images
 
 
+def _apply_sglang_condition_size(
+    kwargs: dict[str, Any],
+    input_images: list[Image.Image],
+    server_args: ServerArgs,
+    req: Any,
+) -> None:
+    """Mirror SGLang's image-conditioned output size adjustment for official runs."""
+    if not input_images:
+        return
+
+    explicit_fields = set(getattr(req, "extra", {}).get("explicit_fields", []))
+    if "width" in explicit_fields and "height" in explicit_fields:
+        return
+
+    config = server_args.pipeline_config
+    calculated_size = config.prepare_calculated_size(input_images[-1])
+    if calculated_size is None:
+        return
+
+    calculated_width, calculated_height = calculated_size
+    width = kwargs.get("width") if "width" in explicit_fields else calculated_width
+    height = kwargs.get("height") if "height" in explicit_fields else calculated_height
+
+    multiple_of = config.vae_config.get_vae_scale_factor() * 2
+    kwargs["width"] = width // multiple_of * multiple_of
+    kwargs["height"] = height // multiple_of * multiple_of
+
+
 def _generator(device_arg: str, seed: int) -> torch.Generator:
     if device_arg == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -340,6 +372,7 @@ def _build_call_kwargs(
     case: DiffusionTestCase,
     req: Any,
     sampling_params: Any,
+    server_args: ServerArgs,
     *,
     generator_device: str,
 ) -> tuple[dict[str, Any], list[str]]:
@@ -359,6 +392,7 @@ def _build_call_kwargs(
     force_rgba = type(pipe).__name__ == "QwenImageLayeredPipeline"
     input_images = _load_input_images(getattr(req, "image_path", None), force_rgba=force_rgba)
     if input_images:
+        _apply_sglang_condition_size(kwargs, input_images, server_args, req)
         sig = _call_signature(pipe)
         valid = set(sig.parameters) if sig is not None else set()
         if "images" in valid:
@@ -528,7 +562,7 @@ def _run_case(
     out_dir: Path,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
-    req, sampling_params, output_size = _final_request_for_case(case)
+    req, sampling_params, server_args, output_size = _final_request_for_case(case)
     is_video = case.server_args.modality == "video"
     device_map = args.device_map
     if device_map == "case":
@@ -562,6 +596,7 @@ def _run_case(
         case,
         req,
         sampling_params,
+        server_args,
         generator_device=args.generator_device,
     )
 
