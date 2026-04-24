@@ -995,24 +995,7 @@ class LTX2TransformerBlock(nn.Module):
         )
         hidden_states = hidden_states + attn_hidden_states * vgate_msa
 
-        ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
-            self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
-        )
-        norm_audio_hidden_states = (
-            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
-        )
-        attn_audio_hidden_states = self.audio_attn1(
-            norm_audio_hidden_states,
-            mask=audio_self_attention_mask,
-            pe=audio_rotary_emb,
-            perturbation_mask=audio_self_attn_perturbation_mask,
-            all_perturbed=skip_audio_self_attn,
-            skip_sequence_parallel_override=audio_replicated_for_sp,
-        )
-        audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
-        # 2. Prompt Cross-Attention
         if self.cross_attention_adaln:
-            # LTX2.3
             if temb_prompt is None or temb_audio_prompt is None:
                 raise ValueError(
                     "cross_attention_adaln requires prompt modulation tensors."
@@ -1036,6 +1019,23 @@ class LTX2TransformerBlock(nn.Module):
             )
             hidden_states = hidden_states + attn_hidden_states * vgate_q
 
+        ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+            self.audio_scale_shift_table, batch_size, temb_audio, slice(0, 3)
+        )
+        norm_audio_hidden_states = (
+            rms_norm(audio_hidden_states, self.norm_eps) * (1 + ascale_msa) + ashift_msa
+        )
+        attn_audio_hidden_states = self.audio_attn1(
+            norm_audio_hidden_states,
+            mask=audio_self_attention_mask,
+            pe=audio_rotary_emb,
+            perturbation_mask=audio_self_attn_perturbation_mask,
+            all_perturbed=skip_audio_self_attn,
+            skip_sequence_parallel_override=audio_replicated_for_sp,
+        )
+        audio_hidden_states = audio_hidden_states + attn_audio_hidden_states * agate_msa
+        # 2. Prompt Cross-Attention
+        if self.cross_attention_adaln:
             ashift_q, ascale_q, agate_q = self.get_ada_values(
                 self.audio_scale_shift_table, batch_size, temb_audio, slice(6, 9)
             )
