@@ -130,6 +130,8 @@ class LTX2UpsampleStage(PipelineStage):
         latents = self._upsample_video_latents(batch.latents, server_args, device)
         logger.info("Upsampled video latents: %s", list(latents.shape))
         self._restore_full_resolution(batch)
+        batch.image_latent = None
+        batch.ltx2_num_image_tokens = 0
         self._pack_video_latents(batch, latents, server_args)
         logger.info(
             "Packed video latents for Stage 2: %s (resolution %dx%d)",
