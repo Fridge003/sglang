@@ -144,7 +144,6 @@ class LTX2VideoResnetBlock3d(nn.Module):
         inject_noise: bool = False,
         timestep_conditioning: bool = False,
         spatial_padding_mode: str = "zeros",
-        use_groupnorm_shortcut: bool = False,
     ) -> None:
         super().__init__()
 
@@ -171,17 +170,10 @@ class LTX2VideoResnetBlock3d(nn.Module):
 
         self.norm3 = None
         self.conv_shortcut = None
-        self.norm3_channels_last = False
         if in_channels != out_channels:
-            if use_groupnorm_shortcut:
-                self.norm3 = nn.GroupNorm(
-                    num_groups=1, num_channels=in_channels, eps=eps, affine=True
-                )
-            else:
-                self.norm3 = nn.LayerNorm(
-                    in_channels, eps=eps, elementwise_affine=True, bias=True
-                )
-                self.norm3_channels_last = True
+            self.norm3 = nn.LayerNorm(
+                in_channels, eps=eps, elementwise_affine=True, bias=True
+            )
             # LTX 2.0 uses a normal nn.Conv3d here rather than LTXVideoCausalConv3d
             self.conv_shortcut = nn.Conv3d(
                 in_channels=in_channels,
@@ -260,10 +252,7 @@ class LTX2VideoResnetBlock3d(nn.Module):
             )
 
         if self.norm3 is not None:
-            if self.norm3_channels_last:
-                inputs = self.norm3(inputs.movedim(1, -1)).movedim(-1, 1)
-            else:
-                inputs = self.norm3(inputs)
+            inputs = self.norm3(inputs.movedim(1, -1)).movedim(-1, 1)
 
         if self.conv_shortcut is not None:
             inputs = self.conv_shortcut(inputs)
@@ -1210,7 +1199,6 @@ def _make_ltx23_decoder_block(
             eps=resnet_norm_eps,
             timestep_conditioning=False,
             spatial_padding_mode=spatial_padding_mode,
-            use_groupnorm_shortcut=True,
         )
     elif block_name == "compress_time":
         out_channels = in_channels // int(block_config.get("multiplier", 1))
