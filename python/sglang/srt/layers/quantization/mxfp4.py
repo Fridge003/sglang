@@ -116,8 +116,6 @@ _is_shuffle_moe_mxfp4 = is_gfx95_supported()
 if _is_hip:
     # import aiter
     try:
-        from aiter import ActivationType, QuantType
-        from aiter.fused_moe import fused_moe
         from aiter.ops.shuffle import (
             shuffle_scale_a16w4,
             shuffle_weight,
@@ -126,9 +124,7 @@ if _is_hip:
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
         from aiter.utility.fp4_utils import e8m0_shuffle
     except ImportError as err:
-        ActivationType = QuantType = fused_moe = dynamic_mxfp4_quant = e8m0_shuffle = (
-            err
-        )
+        dynamic_mxfp4_quant = e8m0_shuffle = err
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
@@ -743,11 +739,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
-        backend = (
-            MoeRunnerBackend.TRITON_KERNELS
-            if self.use_triton_kernels
-            else MoeRunnerBackend.TRITON
-        )
+        # Must match apply() priority: _use_aiter before use_triton_kernels.
+        if _use_aiter:
+            backend = MoeRunnerBackend.AITER
+        elif self.use_triton_kernels:
+            backend = MoeRunnerBackend.TRITON_KERNELS
+        else:
+            backend = MoeRunnerBackend.TRITON
         self.runner = MoeRunner(backend, moe_runner_config)
 
     def apply(
@@ -832,7 +830,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )[0]
             return StandardCombineInput(hidden_states=trtllm_gen_output)
         if _use_aiter:
-            topk_weights, topk_ids, _ = topk_output
+            from sglang.srt.layers.moe.moe_runner.aiter import (
+                AiterMoeQuantInfo,
+                AiterQuantType,
+            )
 
             if hasattr(torch, "float4_e2m1fn_x2"):
                 w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
@@ -841,33 +842,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w13_weight = layer.w13_weight
                 w2_weight = layer.w2_weight
 
-            origi_hidden_size = self.hidden_size - self.hidden_pad
-
-            x = torch.nn.functional.pad(
-                x,
-                (0, self.hidden_pad),
-                mode="constant",
-                value=0.0,
+            x_padded = torch.nn.functional.pad(
+                x, (0, self.hidden_pad), mode="constant", value=0.0
             )
-
-            output = fused_moe(
-                x,
-                w13_weight,
-                w2_weight,
-                topk_weights,
-                topk_ids,
-                expert_mask=layer.dispatcher.expert_mask_gpu,
-                activation=ActivationType.Swiglu,
-                quant_type=QuantType.per_1x32,
-                w1_scale=layer.w13_weight_scale,
+            quant_info = AiterMoeQuantInfo(
+                w13_weight=w13_weight,
+                w2_weight=w2_weight,
+                quant_type=AiterQuantType.PER_1X32,
+                w13_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                b13=layer.w13_weight_bias,
+                b2=layer.w2_weight_bias,
+                expert_mask=layer.dispatcher.expert_mask_gpu,
                 doweight_stage1=self.moe_runner_config.apply_router_weight_on_input,
                 hidden_pad=self.hidden_pad,
                 intermediate_pad=self.intermediate_pad,
-                bias1=layer.w13_weight_bias,
-                bias2=layer.w2_weight_bias,
+                activation_override="swiglu",
             )
-            return StandardCombineInput(hidden_states=output)
+            return self.runner.run(
+                dispatch_output._replace(hidden_states=x_padded), quant_info
+            )
 
         backend = self.runner.runner_backend
         if backend.is_triton_kernels():
@@ -1002,22 +996,17 @@ class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.AITER, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
     ) -> CombineInput:
-        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
-
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-
-        topk_weights, topk_ids, _ = topk_output
-        if _is_hip:
-            topk_weights = topk_weights.to(
-                torch.float32
-            )  # aiter's moe_sorting requires topk_weights to be FP32
+        from sglang.srt.layers.moe.moe_runner.aiter import (
+            AiterMoeQuantInfo,
+            AiterQuantType,
+        )
 
         if hasattr(torch, "float4_e2m1fn_x2"):
             w13_weight = layer.w13_weight.view(torch.float4_e2m1fn_x2)
@@ -1030,21 +1019,12 @@ class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
             w13_weight.is_shuffled = True
             w2_weight.is_shuffled = True
 
-        output = fused_moe(
-            x,
-            w13_weight,
-            w2_weight,
-            topk_weights,
-            topk_ids,
-            quant_type=QuantType.per_1x32,
-            w1_scale=layer.w13_weight_scale,
+        quant_info = AiterMoeQuantInfo(
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            quant_type=AiterQuantType.PER_1X32,
+            w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            activation=(
-                ActivationType.Silu
-                if self.moe_runner_config.activation == "silu"
-                else ActivationType.Gelu
-            ),
-            doweight_stage1=False,
             expert_mask=layer.dispatcher.expert_mask_gpu,
         )
-        return StandardCombineInput(hidden_states=output)
+        return self.runner.run(dispatch_output, quant_info)
