@@ -11,6 +11,8 @@ metatags:
 
 Use `Lightricks/LTX-2` or `Lightricks/LTX-2.3` as `--model-path`. For LTX-2.3, SGLang also supports the two-stage and HQ two-stage variants that use the spatial upsampler and distilled LoRA components from the model snapshot by default.
 
+LTX-2 and LTX-2.3 are released under the LTX-2 Community License Agreement, which includes commercial-use restrictions for some entities; review the [official Lightricks license](https://huggingface.co/Lightricks/LTX-2.3/blob/main/LICENSE) before production or commercial use.
+
 ## 2. Installation
 
 Install SGLang with diffusion dependencies:
@@ -56,15 +58,7 @@ sglang generate \
   --model-path Lightricks/LTX-2 \
   --pipeline-class-name LTX2Pipeline \
   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 40 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx2-one-stage.mp4
+  --save-output
 ```
 
 ### 4.2 LTX-2.3 one-stage text-to-video
@@ -74,15 +68,7 @@ sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2Pipeline \
   --prompt "A quiet coastal town at sunrise, fishing boats moving slowly through golden mist, cinematic camera movement" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-one-stage.mp4
+  --save-output
 ```
 
 ### 4.3 LTX-2.3 two-stage text-to-video
@@ -91,17 +77,8 @@ sglang generate \
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --prompt "A handheld shot follows a red tram crossing a rainy city square at night, reflections on the pavement, cinematic lighting" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-two-stage.mp4
+  --save-output
 ```
 
 ### 4.4 LTX-2.3 HQ text-to-video
@@ -110,17 +87,8 @@ sglang generate \
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStageHQPipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --prompt "A wide cinematic shot of alpine clouds rolling over a mountain ridge, soft morning light, slow aerial camera movement" \
-  --width 1920 \
-  --height 1088 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 15 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-hq.mp4
+  --save-output
 ```
 
 ### 4.5 Image-to-video with one reference image
@@ -131,18 +99,9 @@ Pass one image to `--image-path` for image-conditioned generation:
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --image-path ./inputs/start.png \
   --prompt "The camera slowly pushes forward as the subject turns toward warm window light, subtle natural motion, cinematic" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-i2v.mp4
+  --save-output
 ```
 
 ### 4.6 First-to-last-frame transition with two reference images
@@ -153,23 +112,14 @@ Pass two images to `--image-path` for transition-style TI2V. The first image is 
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --image-path ./inputs/start.png ./inputs/end.png \
   --prompt "A smooth cinematic transition from the first scene into the final scene, dynamic camera motion, motion blur, zhuanchang" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-two-image-transition.mp4
+  --save-output
 ```
 
 ## 5. Use community LoRAs
 
-Use `--lora-path` to load a LoRA adapter. If the Hugging Face repo contains multiple safetensors files, use `--lora-weight-name` to select the exact file. `--lora-scale` maps to the standard LoRA merge scale.
+Use `--lora-path` to load a LoRA adapter. If the Hugging Face repo contains multiple safetensors files, use `--lora-weight-name` to select the exact file. `--lora-scale` maps to the standard LoRA merge scale and defaults to `1.0`.
 
 The following example uses [`valiantcat/LTX-2.3-Transition-LORA`](https://huggingface.co/valiantcat/LTX-2.3-Transition-LORA):
 
@@ -177,20 +127,10 @@ The following example uses [`valiantcat/LTX-2.3-Transition-LORA`](https://huggin
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --lora-path valiantcat/LTX-2.3-Transition-LORA \
   --lora-weight-name ltx2.3-transition.safetensors \
-  --lora-scale 1.0 \
   --prompt "A low-angle tracking shot moves through a foggy forest road. The camera rises above the treetops and transitions into a clear view of a snowy mountain peak under bright sunlight, zhuanchang" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-transition-lora.mp4
+  --save-output
 ```
 
 You can combine the Transition LoRA with two reference images:
@@ -199,21 +139,11 @@ You can combine the Transition LoRA with two reference images:
 sglang generate \
   --model-path Lightricks/LTX-2.3 \
   --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
   --image-path ./inputs/start.png ./inputs/end.png \
   --lora-path valiantcat/LTX-2.3-Transition-LORA \
   --lora-weight-name ltx2.3-transition.safetensors \
-  --lora-scale 1.0 \
   --prompt "A fast cinematic transition from the first image to the second image, whip-pan motion, atmospheric lighting, zhuanchang" \
-  --width 768 \
-  --height 512 \
-  --num-frames 121 \
-  --fps 24 \
-  --num-inference-steps 30 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-transition-lora-two-images.mp4
+  --save-output
 ```
 
 <Note>
