@@ -796,7 +796,7 @@ class DeepSeekV4TokenToKVPool(KVCache):
         cache_k: torch.Tensor,
     ) -> None:
         if self._should_cache_swa:
-            if layer_id == 0:
+            if layer_id == self.start_layer:
                 self.cached_loc = self.translate_loc_from_full_to_swa(raw_loc)
             swa_loc = self.cached_loc
         else:
