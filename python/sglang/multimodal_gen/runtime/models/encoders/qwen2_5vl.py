@@ -431,23 +431,22 @@ class Qwen2_5_VLTextModel(nn.Module):
 
         # It may already have been prepared by e.g. `generate`
         if not isinstance(causal_mask_mapping := attention_mask, dict):
-            # Prepare mask arguments
-            mask_kwargs = {
-                "config": self.config,
-                "inputs_embeds": inputs_embeds,
-                "attention_mask": attention_mask,
-                "cache_position": cache_position,
-                "past_key_values": past_key_values,
-                "position_ids": text_position_ids,
-            }
+            mask_args = (
+                self.config,
+                inputs_embeds,
+                attention_mask,
+                cache_position,
+                past_key_values,
+                text_position_ids,
+            )
             # Create the masks
             causal_mask_mapping = {
-                "full_attention": create_causal_mask(**mask_kwargs),
+                "full_attention": create_causal_mask(*mask_args),
             }
             # The sliding window alternating layers are not always activated depending on the config
             if self.has_sliding_layers:
                 causal_mask_mapping["sliding_attention"] = (
-                    create_sliding_window_causal_mask(**mask_kwargs)
+                    create_sliding_window_causal_mask(*mask_args)
                 )
 
         hidden_states = inputs_embeds
