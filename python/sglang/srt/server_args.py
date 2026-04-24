@@ -1700,6 +1700,9 @@ class ServerArgs:
                         assert (
                             self.tp_size == 8
                         ), "Current multi-machine CP support suffers from precision issues. So context parallel only support Single machine(tp_size == 8)"
+                        # Note(kpham-sgl): Keep attn_tp_size == 1 under NSA CP.
+                        # NSACPLayerCommunicator does not all-reduce attention-TP
+                        # partial o_proj outputs before replicated dense FFNs.
                         self.attn_cp_size = self.tp_size // self.dp_size
                         self.disable_piecewise_cuda_graph = True
                         logger.warning(
@@ -1772,12 +1775,10 @@ class ServerArgs:
                     logger.warning(
                         "For MLA CP, we have the following restrictions: moe_dense_tp_size == 1, moe_a2a_backend == deepep, ep_size == tp_size, batch_size == 1"
                     )
-                    # Only auto-fill attn_cp_size when the user didn't set it
-                    # via --attn-cp-size / --attention-context-parallel-size,
-                    # so topologies like (tp=8, dp=1, attn_cp=4, attn_tp=2) are
-                    # reachable.
-                    if self.attn_cp_size <= 1:
-                        self.attn_cp_size = self.tp_size // self.dp_size
+                    # FIXME(kpham-sgl): Keep attn_tp_size == 1 under MLA CP.
+                    # NSACPLayerCommunicator does not all-reduce attention-TP
+                    # partial o_proj outputs before replicated dense FFNs.
+                    self.attn_cp_size = self.tp_size // self.dp_size
                     self.disable_piecewise_cuda_graph = True
                     logger.warning(
                         f"Enable Context Parallel opt for MLA, "
