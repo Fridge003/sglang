@@ -5,7 +5,9 @@ metatags:
     description: "Deploy and use LTX-2 and LTX-2.3 video generation models with SGLang Diffusion, including one-stage, two-stage, HQ, TI2V, and LoRA examples."
 ---
 
-## 1. Model introduction
+import { LTXDeployment } from '/src/snippets/diffusion/ltx-deployment.jsx';
+
+## 1. Model Introduction
 
 [LTX-2](https://huggingface.co/Lightricks/LTX-2) and [LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) are video generation models from Lightricks. SGLang Diffusion supports the LTX series through native pipelines for text-to-video and image-conditioned video generation.
 
@@ -13,7 +15,7 @@ Use `Lightricks/LTX-2` or `Lightricks/LTX-2.3` as `--model-path`. For LTX-2.3, S
 
 LTX-2 and LTX-2.3 are released under the LTX-2 Community License Agreement, which includes commercial-use restrictions for some entities; review the [official Lightricks license](https://huggingface.co/Lightricks/LTX-2.3/blob/main/LICENSE) before production or commercial use.
 
-## 2. Installation
+## 2. SGLang-diffusion Installation
 
 Install SGLang with diffusion dependencies:
 
@@ -23,7 +25,19 @@ uv pip install "sglang[diffusion]" --prerelease=allow
 
 For platform-specific setup, see the [SGLang Diffusion installation guide](/docs/sglang-diffusion/installation).
 
-## 3. Model deployment
+## 3. Model Deployment
+
+This section provides deployment configurations optimized for different LTX pipelines and hardware targets.
+
+### 3.1 Basic Configuration
+
+The LTX series supports one-stage, two-stage, and HQ two-stage pipelines. The recommended launch configuration depends on whether the target GPU can keep both two-stage DiTs resident.
+
+**Interactive Command Generator**: Use the configuration selector below to generate a deployment command. The default selection targets a single NVIDIA H200 with `resident` two-stage mode, which is the fastest startup path for the specified high-memory environment.
+
+<LTXDeployment />
+
+### 3.2 Configuration Tips
 
 Choose the pipeline class based on the quality and latency target:
 
@@ -33,73 +47,6 @@ Choose the pipeline class based on the quality and latency target:
 | Two-stage generation | `LTX2TwoStagePipeline` | Uses a base stage and a refinement stage. Recommended default for LTX-2.3 quality. |
 | Two-stage HQ generation | `LTX2TwoStageHQPipeline` | HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
 
-### 3.1 Fastest launch on H200 or high-memory CUDA GPUs
-
-For a single NVIDIA H200, or another CUDA GPU with at least 130 GiB of VRAM, keep both two-stage DiTs resident on GPU. This is the fastest serving mode because stage switching does not need to reload transformer weights.
-
-```bash Command
-sglang serve \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode resident \
-  --pin-cpu-memory \
-  --port 30000
-```
-
-Use the same deployment mode for the HQ pipeline when you want the higher-resolution two-stage path:
-
-```bash Command
-sglang serve \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStageHQPipeline \
-  --ltx2-two-stage-device-mode resident \
-  --pin-cpu-memory \
-  --port 30000
-```
-
-To preload the Transition LoRA on the same H200-class environment, add only the LoRA selector:
-
-```bash Command
-sglang serve \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode resident \
-  --lora-path valiantcat/LTX-2.3-Transition-LORA \
-  --lora-weight-name ltx2.3-transition.safetensors \
-  --pin-cpu-memory \
-  --port 30000
-```
-
-### 3.2 Standard CUDA GPUs
-
-Use `snapshot` mode when the GPU cannot keep both two-stage DiTs resident. It is the default on lower-VRAM CUDA GPUs and prefetches stage-2 weights when possible.
-
-```bash Command
-sglang serve \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
-  --pin-cpu-memory \
-  --port 30000
-```
-
-### 3.3 Official switching semantics
-
-Use `original` mode when validating against the original LTX two-stage loading behavior:
-
-```bash Command
-sglang serve \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode original \
-  --pin-cpu-memory \
-  --port 30000
-```
-
-<Note>
-For native LTX-2.3 two-stage serving without a user LoRA, `resident` is the fastest high-VRAM path. When you pass `--lora-path`, SGLang still applies the user LoRA during the two-stage switch, so use `resident` on H200-class GPUs for enough VRAM, but do not expect the same premerged-stage2 benefit as the no-user-LoRA path.
-</Note>
-
 For two-stage pipelines, `--ltx2-two-stage-device-mode` controls transformer residency:
 
 | Mode | When to use it |
@@ -107,6 +54,20 @@ For two-stage pipelines, `--ltx2-two-stage-device-mode` controls transformer res
 | `snapshot` | Recommended default. Balances latency and VRAM. |
 | `resident` | Best latency on high-VRAM GPUs because both DiTs can stay resident. |
 | `original` | Closest to the original two-stage switching semantics. |
+
+Other deployment flags:
+
+- `--pin-cpu-memory`: Recommended with LTX deployment because SGLang uses CPU offload paths for large video components.
+- `--lora-path`: Preload a community LoRA adapter.
+- `--lora-weight-name`: Select the exact safetensors file when the LoRA repository contains multiple weight files.
+
+<Note>
+For native LTX-2.3 two-stage serving without a user LoRA, `resident` is the fastest high-VRAM path. When you pass `--lora-path`, SGLang still applies the user LoRA during the two-stage switch, so use `resident` on H200-class GPUs for enough VRAM, but do not expect the same premerged-stage2 benefit as the no-user-LoRA path.
+</Note>
+
+## 4. Model Invocation
+
+### 4.1 Basic Usage
 
 The examples below spell out the current SGLang sampling defaults for reproducibility:
 
@@ -116,9 +77,7 @@ The examples below spell out the current SGLang sampling defaults for reproducib
 | `Lightricks/LTX-2.3` | 768x512 | 121 | 30 |
 | `Lightricks/LTX-2.3` with `LTX2TwoStageHQPipeline` | 1920x1088 | 121 | 15 |
 
-## 4. Generate videos
-
-### 4.1 LTX-2 one-stage text-to-video
+#### 4.1.1 LTX-2 one-stage text-to-video
 
 ```bash Command
 sglang generate \
@@ -128,7 +87,7 @@ sglang generate \
   --save-output
 ```
 
-### 4.2 LTX-2.3 one-stage text-to-video
+#### 4.1.2 LTX-2.3 one-stage text-to-video
 
 ```bash Command
 sglang generate \
@@ -138,7 +97,7 @@ sglang generate \
   --save-output
 ```
 
-### 4.3 LTX-2.3 two-stage text-to-video
+#### 4.1.3 LTX-2.3 two-stage text-to-video
 
 ```bash Command
 sglang generate \
@@ -148,7 +107,7 @@ sglang generate \
   --save-output
 ```
 
-### 4.4 LTX-2.3 HQ text-to-video
+#### 4.1.4 LTX-2.3 HQ text-to-video
 
 ```bash Command
 sglang generate \
@@ -158,7 +117,7 @@ sglang generate \
   --save-output
 ```
 
-### 4.5 Image-to-video with one reference image
+#### 4.1.5 Image-to-video with one reference image
 
 Pass one image to `--image-path` for image-conditioned generation:
 
@@ -171,7 +130,7 @@ sglang generate \
   --save-output
 ```
 
-### 4.6 First-to-last-frame transition with two reference images
+#### 4.1.6 First-to-last-frame transition with two reference images
 
 Pass two images to `--image-path` for transition-style TI2V. The first image is used as the starting condition and the second image is used as the ending condition.
 
@@ -184,7 +143,9 @@ sglang generate \
   --save-output
 ```
 
-## 5. Use community LoRAs
+### 4.2 Advanced Usage
+
+#### 4.2.1 Use community LoRAs
 
 Use `--lora-path` to load a LoRA adapter. If the Hugging Face repo contains multiple safetensors files, use `--lora-weight-name` to select the exact file. `--lora-scale` maps to the standard LoRA merge scale and defaults to `1.0`.
 
@@ -217,7 +178,7 @@ sglang generate \
 Some community LoRAs only include weights for transformer blocks. In that case, SGLang logs a concise coverage summary and leaves unmatched LoRA-capable layers on the base model weights. This is expected when the adapter format intentionally omits those layers.
 </Note>
 
-## 6. Practical tips
+## 5. Practical Tips
 
 - Use `--pipeline-class-name LTX2TwoStagePipeline` as the default LTX-2.3 quality path.
 - Use `--pipeline-class-name LTX2TwoStageHQPipeline` when you want the HQ path and have enough VRAM for larger outputs.
