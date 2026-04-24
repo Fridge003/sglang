@@ -1574,23 +1574,28 @@ class LTX2DenoisingStage(DenoisingStage):
                     v_mod, a_v_mod = pass_outputs.get("modality", (None, None))
 
                 sigma_value_float = float(sigma_value.item())
-                video_sigma_for_x0: float | torch.Tensor = sigma_value_float
-                if ctx.denoise_mask is not None:
+                audio_sigma_for_x0: float | torch.Tensor = sigma_value_float
+                if ctx.use_ltx23_hq_timestep_semantics:
+                    video_sigma_for_x0 = model_inputs_local.timestep_video
+                    audio_sigma_for_x0 = model_inputs_local.timestep_audio
+                elif ctx.denoise_mask is not None:
                     video_sigma_for_x0 = sigma_value.to(
                         device=video_latents.device, dtype=torch.float32
                     ) * ctx.denoise_mask.squeeze(-1)
+                else:
+                    video_sigma_for_x0 = sigma_value_float
 
                 denoised_video_local = self._ltx2_velocity_to_x0(
                     video_latents, v_pos, video_sigma_for_x0
                 )
                 denoised_audio_local = self._ltx2_velocity_to_x0(
-                    audio_latents, a_v_pos, sigma_value_float
+                    audio_latents, a_v_pos, audio_sigma_for_x0
                 )
                 denoised_video_neg = self._ltx2_velocity_to_x0(
                     video_latents, v_neg, video_sigma_for_x0
                 )
                 denoised_audio_neg = self._ltx2_velocity_to_x0(
-                    audio_latents, a_v_neg, sigma_value_float
+                    audio_latents, a_v_neg, audio_sigma_for_x0
                 )
                 denoised_video_perturbed = (
                     None
@@ -1603,7 +1608,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     None
                     if a_v_ptb is None
                     else self._ltx2_velocity_to_x0(
-                        audio_latents, a_v_ptb, sigma_value_float
+                        audio_latents, a_v_ptb, audio_sigma_for_x0
                     )
                 )
                 denoised_video_modality = (
@@ -1617,7 +1622,7 @@ class LTX2DenoisingStage(DenoisingStage):
                     None
                     if a_v_mod is None
                     else self._ltx2_velocity_to_x0(
-                        audio_latents, a_v_mod, sigma_value_float
+                        audio_latents, a_v_mod, audio_sigma_for_x0
                     )
                 )
 
