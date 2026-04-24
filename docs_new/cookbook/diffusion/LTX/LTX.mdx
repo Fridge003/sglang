@@ -9,9 +9,9 @@ import { LTXDeployment } from '/src/snippets/diffusion/ltx-deployment.jsx';
 
 ## 1. Model Introduction
 
-[LTX-2](https://huggingface.co/Lightricks/LTX-2) and [LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) are video generation models from Lightricks. SGLang Diffusion supports the LTX series through native pipelines for text-to-video and image-conditioned video generation.
+[LTX-2](https://huggingface.co/Lightricks/LTX-2) and [LTX-2.3](https://huggingface.co/Lightricks/LTX-2.3) are video generation models from Lightricks. SGLang Diffusion supports the LTX series through native one-stage and two-stage pipelines for text-to-video and image-conditioned video generation.
 
-Use `Lightricks/LTX-2` or `Lightricks/LTX-2.3` as `--model-path`. For LTX-2.3, SGLang also supports the two-stage and HQ two-stage variants that use the spatial upsampler and distilled LoRA components from the model snapshot by default.
+Use `Lightricks/LTX-2` or `Lightricks/LTX-2.3` as `--model-path`. For two-stage generation, SGLang uses the spatial upsampler and distilled LoRA components from the model snapshot by default. LTX-2.3 also supports the HQ two-stage variant.
 
 <Warning>
 **License notice:** LTX-2 and LTX-2.3 are released under the LTX-2 Community License Agreement, not Apache 2.0. The license includes commercial-use restrictions for some entities. Review the [official Lightricks license](https://huggingface.co/Lightricks/LTX-2.3/blob/main/LICENSE) before production or commercial use; SGLang support does not grant additional model usage rights.
@@ -33,7 +33,7 @@ This section provides deployment configurations optimized for different LTX pipe
 
 ### 3.1 Basic Configuration
 
-The LTX series supports one-stage, two-stage, and HQ two-stage pipelines. The recommended launch configuration depends on whether the target GPU can keep both two-stage DiTs resident.
+The LTX series supports one-stage and two-stage pipelines. LTX-2.3 also supports the HQ two-stage pipeline. The recommended launch configuration depends on whether the target GPU can keep both two-stage DiTs resident.
 
 **Interactive Command Generator**: Use the configuration selector below to generate a deployment command. The default selection targets a single NVIDIA H200 with `resident` two-stage mode, which is the fastest startup path for the specified high-memory environment.
 
@@ -46,8 +46,8 @@ Choose the pipeline class based on the quality and latency target:
 | Use case | Pipeline class | Notes |
 | --- | --- | --- |
 | One-stage generation | `LTX2Pipeline` | Fastest LTX native path. Supports T2V and TI2V. |
-| Two-stage generation | `LTX2TwoStagePipeline` | Uses a base stage and a refinement stage. Recommended default for LTX-2.3 quality. |
-| Two-stage HQ generation | `LTX2TwoStageHQPipeline` | HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
+| Two-stage generation | `LTX2TwoStagePipeline` | Uses a base stage and a refinement stage. Supported by LTX-2 and LTX-2.3. |
+| Two-stage HQ generation | `LTX2TwoStageHQPipeline` | LTX-2.3 HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
 
 For two-stage pipelines, `--ltx2-two-stage-device-mode` controls transformer residency:
 
@@ -98,7 +98,17 @@ sglang generate \
   --save-output
 ```
 
-#### 4.1.3 LTX-2.3 two-stage text-to-video
+#### 4.1.3 LTX-2 two-stage text-to-video
+
+```bash Command
+sglang generate \
+  --model-path Lightricks/LTX-2 \
+  --pipeline-class-name LTX2TwoStagePipeline \
+  --prompt "A handheld shot follows a red tram crossing a rainy city square at night, reflections on the pavement, cinematic lighting" \
+  --save-output
+```
+
+#### 4.1.4 LTX-2.3 two-stage text-to-video
 
 ```bash Command
 sglang generate \
@@ -108,7 +118,7 @@ sglang generate \
   --save-output
 ```
 
-#### 4.1.4 LTX-2.3 HQ text-to-video
+#### 4.1.5 LTX-2.3 HQ text-to-video
 
 ```bash Command
 sglang generate \
@@ -118,7 +128,7 @@ sglang generate \
   --save-output
 ```
 
-#### 4.1.5 Image-to-video with one reference image
+#### 4.1.6 Image-to-video with one reference image
 
 Pass one image to `--image-path` for image-conditioned generation:
 
@@ -131,7 +141,7 @@ sglang generate \
   --save-output
 ```
 
-#### 4.1.6 First-to-last-frame transition with two reference images
+#### 4.1.7 First-to-last-frame transition with two reference images
 
 Pass two images to `--image-path` for transition-style TI2V. The first image is used as the starting condition and the second image is used as the ending condition.
 
@@ -181,7 +191,7 @@ Some community LoRAs only include weights for transformer blocks. In that case, 
 
 ## 5. Practical Tips
 
-- Use `--pipeline-class-name LTX2TwoStagePipeline` as the default LTX-2.3 quality path.
+- Use `--pipeline-class-name LTX2TwoStagePipeline` as the default LTX two-stage quality path.
 - Use `--pipeline-class-name LTX2TwoStageHQPipeline` when you want the HQ path and have enough VRAM for larger outputs.
 - Use `--ltx2-two-stage-device-mode resident` on high-VRAM GPUs if latency matters more than memory usage.
 - Use `--ltx2-two-stage-device-mode original` when comparing against official two-stage behavior.

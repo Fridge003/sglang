@@ -21,7 +21,7 @@ export const LTXDeployment = () => {
       name: 'pipeline',
       title: 'Pipeline',
       items: [
-        { id: 'two-stage', label: 'Two Stage', default: true, validModels: ['ltx23'] },
+        { id: 'two-stage', label: 'Two Stage', default: true, validModels: ['ltx2', 'ltx23'] },
         { id: 'two-stage-hq', label: 'Two Stage HQ', default: false, validModels: ['ltx23'] },
         { id: 'one-stage', label: 'One Stage', default: false, validModels: ['ltx2', 'ltx23'] },
       ],
@@ -33,6 +33,7 @@ export const LTXDeployment = () => {
       repoId: 'Lightricks/LTX-2',
       pipelines: {
         'one-stage': 'LTX2Pipeline',
+        'two-stage': 'LTX2TwoStagePipeline',
       },
       supportedLoras: [],
     },
@@ -87,15 +88,11 @@ export const LTXDeployment = () => {
     setValues((prev) => {
       const next = { ...prev, [optionName]: itemId };
 
-      if (optionName === 'model') {
-        next.pipeline = itemId === 'ltx2' ? 'one-stage' : 'two-stage';
-      }
-
       const validPipeline = options.pipeline.items.some((item) => (
         item.id === next.pipeline && item.validModels.includes(next.model)
       ));
       if (!validPipeline) {
-        next.pipeline = next.model === 'ltx2' ? 'one-stage' : 'two-stage';
+        next.pipeline = 'two-stage';
       }
 
       const config = modelConfigs[next.model];
