@@ -445,6 +445,14 @@ def _build_call_kwargs(
     if "guidance_scale_2" in kwargs and getattr(pipe, "boundary_ratio", None) is None:
         kwargs.pop("guidance_scale_2")
 
+    if (
+        type(pipe).__name__.startswith("QwenImage")
+        and "guidance_scale" in kwargs
+        and "true_cfg_scale" not in kwargs
+    ):
+        kwargs["true_cfg_scale"] = kwargs["guidance_scale"]
+        kwargs["guidance_scale"] = None
+
     kwargs.setdefault("output_type", "pil")
     return _filter_kwargs(pipe, kwargs)
 
