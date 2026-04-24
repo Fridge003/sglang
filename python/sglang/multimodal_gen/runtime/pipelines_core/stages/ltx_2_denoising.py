@@ -1308,6 +1308,10 @@ class LTX2DenoisingStage(DenoisingStage):
             ),
         )
         use_official_cfg_path = stage1_guider_params is None
+        use_two_stage_simple_stage2 = (
+            ctx.stage == "stage2"
+            and is_ltx2_two_stage_pipeline_name(server_args.pipeline_class_name)
+        )
         if use_official_cfg_path:
             model_kwargs = self._build_ltx2_model_kwargs(
                 ctx,
@@ -1316,7 +1320,7 @@ class LTX2DenoisingStage(DenoisingStage):
                 audio_encoder_hidden_states=batch.audio_prompt_embeds[0],
                 encoder_attention_mask=prompt_attention_mask,
             )
-            if batch.do_classifier_free_guidance:
+            if batch.do_classifier_free_guidance and not use_two_stage_simple_stage2:
                 cfg_batch_size = batch_size * 2
                 model_kwargs = self._repeat_ltx2_model_kwargs_batch(
                     model_kwargs, cfg_batch_size
@@ -1355,7 +1359,7 @@ class LTX2DenoisingStage(DenoisingStage):
 
             model_video = model_video.float()
             model_audio = model_audio.float()
-            if batch.do_classifier_free_guidance:
+            if batch.do_classifier_free_guidance and not use_two_stage_simple_stage2:
                 model_video_uncond, model_video_text = model_video.chunk(2)
                 model_audio_uncond, model_audio_text = model_audio.chunk(2)
                 model_video = model_video_uncond + (
@@ -1400,7 +1404,10 @@ class LTX2DenoisingStage(DenoisingStage):
                             audio_encoder_hidden_states=batch.audio_prompt_embeds[0],
                             encoder_attention_mask=prompt_attention_mask,
                         )
-                        if batch.do_classifier_free_guidance:
+                        if (
+                            batch.do_classifier_free_guidance
+                            and not use_two_stage_simple_stage2
+                        ):
                             cfg_batch_size = batch_size_local * 2
                             model_kwargs_local = self._repeat_ltx2_model_kwargs_batch(
                                 model_kwargs_local, cfg_batch_size
@@ -1447,7 +1454,10 @@ class LTX2DenoisingStage(DenoisingStage):
 
                         mid_v = mid_v.float()
                         mid_a = mid_a.float()
-                        if batch.do_classifier_free_guidance:
+                        if (
+                            batch.do_classifier_free_guidance
+                            and not use_two_stage_simple_stage2
+                        ):
                             mid_v_u, mid_v_t = mid_v.chunk(2)
                             mid_a_u, mid_a_t = mid_a.chunk(2)
                             mid_v = mid_v_u + batch.guidance_scale * (mid_v_t - mid_v_u)
