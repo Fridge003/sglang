@@ -59,6 +59,14 @@ SUITE_CASES = {
 }
 
 UNSUPPORTED_OFFICIAL_CASES = {
+    "fastwan2_2_ti2v_5b": (
+        "The HF repo declares WanDMDPipeline, but the current Diffusers package "
+        "does not provide that class and the repo has no custom pipeline.py."
+    ),
+    "turbo_wan2_1_t2v_1.3b": (
+        "The HF repo declares WanDMDPipeline, but the current Diffusers package "
+        "does not provide that class and the repo has no custom pipeline.py."
+    ),
     "zimage_image_t2i_multi_lora": (
         "Diffusers Z-Image LoRA conversion currently expects alpha keys that are "
         "not present in the CI LoRA checkpoints; keep the existing GT for this case."
