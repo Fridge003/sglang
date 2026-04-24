@@ -104,6 +104,8 @@ def _jsonable(value: Any) -> Any:
         return str(value)
     if isinstance(value, torch.device):
         return str(value)
+    if isinstance(value, Image.Image):
+        return f"<PIL.Image mode={value.mode} size={value.size}>"
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -291,7 +293,11 @@ def _load_input_images(image_path: Any) -> list[Image.Image]:
     images: list[Image.Image] = []
     for path in paths:
         local_path = download_image_from_url(path) if is_image_url(path) else Path(path)
-        images.append(Image.open(local_path).convert("RGB"))
+        image = Image.open(local_path)
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+            images.append(image.convert("RGBA"))
+        else:
+            images.append(image.convert("RGB"))
     return images
 
 
