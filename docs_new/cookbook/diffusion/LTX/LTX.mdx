@@ -23,7 +23,7 @@ uv pip install "sglang[diffusion]" --prerelease=allow
 
 For platform-specific setup, see the [SGLang Diffusion installation guide](/docs/sglang-diffusion/installation).
 
-## 3. Pipeline selection
+## 3. Model deployment
 
 Choose the pipeline class based on the quality and latency target:
 
@@ -32,6 +32,73 @@ Choose the pipeline class based on the quality and latency target:
 | One-stage generation | `LTX2Pipeline` | Fastest LTX native path. Supports T2V and TI2V. |
 | Two-stage generation | `LTX2TwoStagePipeline` | Uses a base stage and a refinement stage. Recommended default for LTX-2.3 quality. |
 | Two-stage HQ generation | `LTX2TwoStageHQPipeline` | HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
+
+### 3.1 Fastest launch on H200 or high-memory CUDA GPUs
+
+For a single NVIDIA H200, or another CUDA GPU with at least 130 GiB of VRAM, keep both two-stage DiTs resident on GPU. This is the fastest serving mode because stage switching does not need to reload transformer weights.
+
+```bash Command
+sglang serve \
+  --model-path Lightricks/LTX-2.3 \
+  --pipeline-class-name LTX2TwoStagePipeline \
+  --ltx2-two-stage-device-mode resident \
+  --pin-cpu-memory \
+  --port 30000
+```
+
+Use the same deployment mode for the HQ pipeline when you want the higher-resolution two-stage path:
+
+```bash Command
+sglang serve \
+  --model-path Lightricks/LTX-2.3 \
+  --pipeline-class-name LTX2TwoStageHQPipeline \
+  --ltx2-two-stage-device-mode resident \
+  --pin-cpu-memory \
+  --port 30000
+```
+
+To preload the Transition LoRA on the same H200-class environment, add only the LoRA selector:
+
+```bash Command
+sglang serve \
+  --model-path Lightricks/LTX-2.3 \
+  --pipeline-class-name LTX2TwoStagePipeline \
+  --ltx2-two-stage-device-mode resident \
+  --lora-path valiantcat/LTX-2.3-Transition-LORA \
+  --lora-weight-name ltx2.3-transition.safetensors \
+  --pin-cpu-memory \
+  --port 30000
+```
+
+### 3.2 Standard CUDA GPUs
+
+Use `snapshot` mode when the GPU cannot keep both two-stage DiTs resident. It is the default on lower-VRAM CUDA GPUs and prefetches stage-2 weights when possible.
+
+```bash Command
+sglang serve \
+  --model-path Lightricks/LTX-2.3 \
+  --pipeline-class-name LTX2TwoStagePipeline \
+  --ltx2-two-stage-device-mode snapshot \
+  --pin-cpu-memory \
+  --port 30000
+```
+
+### 3.3 Official switching semantics
+
+Use `original` mode when validating against the original LTX two-stage loading behavior:
+
+```bash Command
+sglang serve \
+  --model-path Lightricks/LTX-2.3 \
+  --pipeline-class-name LTX2TwoStagePipeline \
+  --ltx2-two-stage-device-mode original \
+  --pin-cpu-memory \
+  --port 30000
+```
+
+<Note>
+For native LTX-2.3 two-stage serving without a user LoRA, `resident` is the fastest high-VRAM path. When you pass `--lora-path`, SGLang still applies the user LoRA during the two-stage switch, so use `resident` on H200-class GPUs for enough VRAM, but do not expect the same premerged-stage2 benefit as the no-user-LoRA path.
+</Note>
 
 For two-stage pipelines, `--ltx2-two-stage-device-mode` controls transformer residency:
 
