@@ -154,38 +154,6 @@ HTTP server-only arguments are ignored by `sglang generate`.
 
 For diffusers pipelines, Cache-DiT can be enabled with `SGLANG_CACHE_DIT_ENABLED=true` or `--cache-dit-config`. See [Cache-DiT](../performance/cache/cache_dit.md).
 
-### LTX-2.3 Transition LoRA
-
-LTX-2.3 two-stage pipelines can run community transition LoRAs through the native
-LoRA path. For example, the following command loads
-`valiantcat/LTX-2.3-Transition-LORA` with its recommended weight file and scale:
-
-```bash
-sglang generate \
-  --model-path Lightricks/LTX-2.3 \
-  --pipeline-class-name LTX2TwoStagePipeline \
-  --ltx2-two-stage-device-mode snapshot \
-  --lora-path valiantcat/LTX-2.3-Transition-LORA \
-  --lora-weight-name ltx2.3-transition.safetensors \
-  --lora-scale 1.0 \
-  --prompt "A low-angle tracking shot moves through a foggy forest road. The camera rises above the treetops and transitions into a clear view of a snowy mountain peak under bright sunlight, zhuanchang" \
-  --width 768 \
-  --height 512 \
-  --num-frames 49 \
-  --fps 24 \
-  --num-inference-steps 4 \
-  --seed 10 \
-  --save-output \
-  --output-path outputs \
-  --output-file-name ltx23-transition-lora.mp4
-```
-
-For first-to-last-frame transition workflows, pass two images to `--image-path`;
-the first image is used as the starting condition and the second as the ending
-condition. Some LoRAs only contain weights for transformer blocks, so SGLang may
-log a concise coverage summary such as how many LoRA-capable layers were matched.
-Unmatched layers use the base model weights.
-
 ## Serve
 
 `sglang serve` starts the HTTP server and keeps the model loaded for repeated requests.
