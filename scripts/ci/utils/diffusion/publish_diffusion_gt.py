@@ -41,15 +41,15 @@ REPO_NAME = "sglang-ci-data"
 BRANCH = "main"
 DEFAULT_TARGET_DIR = "diffusion-ci/consistency_gt"
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+PUBLISH_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".json"}
 
 
-def collect_images(source_dir, target_dir):
-    """Collect image files from source_dir and return list of (repo_path, content) tuples."""
+def collect_files(source_dir, target_dir):
+    """Collect publishable GT files from source_dir."""
     files = []
     for entry in sorted(os.listdir(source_dir)):
         ext = os.path.splitext(entry)[1].lower()
-        if ext not in IMAGE_EXTENSIONS:
+        if ext not in PUBLISH_EXTENSIONS:
             continue
         full_path = os.path.join(source_dir, entry)
         if not os.path.isfile(full_path):
@@ -68,13 +68,13 @@ def publish(source_dir, target_dir=None):
         print("Error: GITHUB_TOKEN environment variable not set")
         sys.exit(1)
 
-    files_to_upload = collect_images(source_dir, target_dir)
+    files_to_upload = collect_files(source_dir, target_dir)
     if not files_to_upload:
-        print(f"No image files found in {source_dir}")
+        print(f"No publishable GT files found in {source_dir}")
         return
 
     print(
-        f"Found {len(files_to_upload)} image(s) to upload to {REPO_OWNER}/{REPO_NAME}/{target_dir}"
+        f"Found {len(files_to_upload)} file(s) to upload to {REPO_OWNER}/{REPO_NAME}/{target_dir}"
     )
 
     # Verify token
@@ -110,13 +110,13 @@ def publish(source_dir, target_dir=None):
             new_tree_sha = create_tree(
                 REPO_OWNER, REPO_NAME, tree_sha, tree_items, token
             )
-            commit_msg = f"diffusion-ci: update consistency_gt images ({len(files_to_upload)} files) [automated]"
+            commit_msg = f"diffusion-ci: update consistency_gt files ({len(files_to_upload)} files) [automated]"
             commit_sha = create_commit(
                 REPO_OWNER, REPO_NAME, new_tree_sha, branch_sha, commit_msg, token
             )
             update_branch_ref(REPO_OWNER, REPO_NAME, BRANCH, commit_sha, token)
             print(
-                f"Successfully pushed {len(files_to_upload)} images (commit {commit_sha[:10]})"
+                f"Successfully pushed {len(files_to_upload)} GT files (commit {commit_sha[:10]})"
             )
             return
         except Exception as e:

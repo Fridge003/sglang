@@ -25,12 +25,6 @@
             "psnr_threshold": 22.0,
             "mean_abs_diff_threshold": 8.0
         },
-        "zimage_image_t2i_multi_lora": {
-            "clip_threshold": 0.92,
-            "ssim_threshold": 0.92,
-            "psnr_threshold": 22.0,
-            "mean_abs_diff_threshold": 8.0
-        },
         "qwen_image_t2i_cache_dit_enabled": {
             "clip_threshold": 0.99,
             "ssim_threshold": 0.86,

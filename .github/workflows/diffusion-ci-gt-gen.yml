@@ -18,6 +18,14 @@ on:
         required: false
         default: ''
         type: string
+      generator_backend:
+        description: 'GT generator backend: official uses upstream Diffusers/official pipelines; sglang reuses SGLang server tests.'
+        required: false
+        default: 'official'
+        type: choice
+        options:
+          - official
+          - sglang
       kernel_artifact_run_id:
         description: "Optional sgl-kernel wheel source: GitHub Actions run ID of a pr-test.yml run on the SAME commit as 'ref' that uploaded wheel-python3.10-cuda13.0. Use only when this branch's torch/ABI change makes the PyPI sglang-kernel wheel incompatible. Find it under Actions > pr-test; artifacts expire after 90 days."
         required: false
@@ -77,12 +85,21 @@ jobs:
           RUNAI_STREAMER_MEMORY_LIMIT: 0
         run: |
           cd python
-          python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
-            --suite 1-gpu \
-            --partition-id ${{ matrix.part }} \
-            --total-partitions 2 \
-            --out-dir ./${{ env.OUTPUT_NAME }} \
-            ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          if [ "${{ inputs.generator_backend }}" = "official" ]; then
+            python -m sglang.multimodal_gen.test.scripts.gen_official_diffusion_gt \
+              --suite 1-gpu \
+              --partition-id ${{ matrix.part }} \
+              --total-partitions 2 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          else
+            python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
+              --suite 1-gpu \
+              --partition-id ${{ matrix.part }} \
+              --total-partitions 2 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -138,12 +155,21 @@ jobs:
           RUNAI_STREAMER_MEMORY_LIMIT: 0
         run: |
           cd python
-          python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
-            --suite 2-gpu \
-            --partition-id ${{ matrix.part }} \
-            --total-partitions 2 \
-            --out-dir ./${{ env.OUTPUT_NAME }} \
-            ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          if [ "${{ inputs.generator_backend }}" = "official" ]; then
+            python -m sglang.multimodal_gen.test.scripts.gen_official_diffusion_gt \
+              --suite 2-gpu \
+              --partition-id ${{ matrix.part }} \
+              --total-partitions 2 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          else
+            python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
+              --suite 2-gpu \
+              --partition-id ${{ matrix.part }} \
+              --total-partitions 2 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -196,10 +222,17 @@ jobs:
           RUNAI_STREAMER_MEMORY_LIMIT: 0
         run: |
           cd python
-          python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
-            --suite 1-gpu-b200 \
-            --out-dir ./${{ env.OUTPUT_NAME }} \
-            ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          if [ "${{ inputs.generator_backend }}" = "official" ]; then
+            python -m sglang.multimodal_gen.test.scripts.gen_official_diffusion_gt \
+              --suite 1-gpu-b200 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          else
+            python -m sglang.multimodal_gen.test.scripts.gen_diffusion_ci_outputs \
+              --suite 1-gpu-b200 \
+              --out-dir ./${{ env.OUTPUT_NAME }} \
+              ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

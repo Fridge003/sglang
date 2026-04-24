@@ -1,0 +1,644 @@
+#!/usr/bin/env python3
+"""
+Generate diffusion consistency GT from official/Diffusers pipelines.
+
+This intentionally does not call SGLang native generation or SGLang's diffusers
+backend. It reuses SGLang CI case definitions only to recover the exact request
+sampling parameters, then executes the upstream Diffusers pipeline directly.
+"""
+
+from __future__ import annotations
+
+import argparse
+import inspect
+import json
+import os
+import shlex
+import subprocess
+import sys
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from diffusers import DiffusionPipeline
+from PIL import Image
+
+from sglang.multimodal_gen.configs.sample.sampling_params import DataType
+from sglang.multimodal_gen.runtime.entrypoints.utils import (
+    post_process_sample,
+    prepare_request,
+)
+from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.test.server.gpu_cases import (
+    ONE_GPU_CASES,
+    ONE_GPU_MODELOPT_CASES,
+    TWO_GPU_CASES,
+)
+from sglang.multimodal_gen.test.server.test_server_utils import (
+    download_image_from_url,
+    parse_dimensions,
+)
+from sglang.multimodal_gen.test.server.testcase_configs import (
+    DiffusionSamplingParams,
+    DiffusionTestCase,
+)
+from sglang.multimodal_gen.test.test_utils import (
+    _consistency_gt_filenames,
+    is_image_url,
+    output_format_to_ext,
+)
+
+
+SUITE_CASES = {
+    "1-gpu": ONE_GPU_CASES,
+    "2-gpu": TWO_GPU_CASES,
+    "1-gpu-b200": ONE_GPU_MODELOPT_CASES,
+}
+
+SAMPLING_KWARGS = (
+    "prompt",
+    "negative_prompt",
+    "num_inference_steps",
+    "guidance_scale",
+    "guidance_scale_2",
+    "true_cfg_scale",
+    "guidance_rescale",
+    "height",
+    "width",
+    "num_frames",
+    "fps",
+)
+
+
+class UnsupportedCaseError(RuntimeError):
+    pass
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parents[5],
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
+def _jsonable(value: Any) -> Any:
+    if is_dataclass(value):
+        return _jsonable(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.dtype):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    return value
+
+
+def _parse_extra_args(extra_args: list[str]) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    tokens: list[str] = []
+    for item in extra_args:
+        tokens.extend(shlex.split(item))
+
+    index = 0
+    while index < len(tokens):
+        arg = tokens[index]
+        if not arg.startswith("--"):
+            index += 1
+            continue
+
+        if "=" in arg:
+            key, value = arg[2:].split("=", 1)
+        elif index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+            key = arg[2:]
+            index += 1
+            value = tokens[index]
+        else:
+            key = arg[2:]
+            value = True
+
+        parsed[key.replace("-", "_")] = value
+        index += 1
+    return parsed
+
+
+def _server_args_for_case(case: DiffusionTestCase) -> ServerArgs:
+    extra = _parse_extra_args(case.server_args.extras)
+    kwargs: dict[str, Any] = {
+        "model_path": case.server_args.model_path,
+        "num_gpus": case.server_args.num_gpus,
+        "trust_remote_code": True,
+        "enable_cfg_parallel": bool(case.server_args.cfg_parallel),
+    }
+    for field in ("tp_size", "ulysses_degree", "ring_degree"):
+        value = getattr(case.server_args, field)
+        if value is not None:
+            kwargs[field] = value
+        elif field in extra:
+            kwargs[field] = int(extra[field])
+    if "pipeline_class_name" in extra:
+        kwargs["pipeline_class_name"] = extra["pipeline_class_name"]
+
+    server_args = ServerArgs.from_kwargs(**kwargs)
+    server_args.enable_cache_dit = case.server_args.enable_cache_dit
+    server_args.dit_layerwise_offload = case.server_args.dit_layerwise_offload
+    server_args.dit_offload_prefetch_size = case.server_args.dit_offload_prefetch_size
+    server_args.text_encoder_cpu_offload = case.server_args.text_encoder_cpu_offload
+    return server_args
+
+
+def _sampling_user_kwargs(
+    sampling_params: DiffusionSamplingParams, output_size: str
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = dict(sampling_params.extras)
+    for name in (
+        "prompt",
+        "image_path",
+        "num_frames",
+        "fps",
+        "num_outputs_per_prompt",
+    ):
+        value = getattr(sampling_params, name)
+        if value is not None:
+            kwargs[name] = value
+
+    width, height = parse_dimensions(output_size)
+    if width is not None:
+        kwargs["width"] = width
+    if height is not None:
+        kwargs["height"] = height
+    return kwargs
+
+
+def _final_request_for_case(case: DiffusionTestCase):
+    server_args = _server_args_for_case(case)
+    output_size = os.environ.get(
+        "SGLANG_TEST_OUTPUT_SIZE", case.sampling_params.output_size
+    )
+    user_kwargs = _sampling_user_kwargs(case.sampling_params, output_size)
+
+    from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
+
+    sampling_params = SamplingParams.from_user_sampling_params_args(
+        case.server_args.model_path,
+        server_args,
+        **user_kwargs,
+    )
+    return prepare_request(server_args, sampling_params), sampling_params, output_size
+
+
+def _torch_dtype(dtype_arg: str) -> torch.dtype:
+    if dtype_arg == "auto":
+        if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+            return torch.bfloat16
+        if torch.cuda.is_available():
+            return torch.float16
+        return torch.float32
+    return {
+        "bf16": torch.bfloat16,
+        "fp16": torch.float16,
+        "fp32": torch.float32,
+    }[dtype_arg]
+
+
+def _load_pipe(
+    case: DiffusionTestCase,
+    *,
+    dtype: torch.dtype,
+    device_map: str,
+    cpu_offload: bool,
+) -> DiffusionPipeline:
+    load_kwargs: dict[str, Any] = {
+        "torch_dtype": dtype,
+        "trust_remote_code": True,
+    }
+    if device_map != "none":
+        load_kwargs["device_map"] = device_map
+
+    try:
+        pipe = DiffusionPipeline.from_pretrained(case.server_args.model_path, **load_kwargs)
+    except (TypeError, ValueError) as exc:
+        if "device_map" not in load_kwargs:
+            raise
+        print(
+            f"[official-gt] {case.id}: retrying without device_map after load error: {exc}",
+            flush=True,
+        )
+        load_kwargs.pop("device_map", None)
+        device_map = "none"
+        pipe = DiffusionPipeline.from_pretrained(case.server_args.model_path, **load_kwargs)
+    except AttributeError:
+        load_kwargs["custom_pipeline"] = case.server_args.model_path
+        load_kwargs["trust_remote_code"] = True
+        pipe = DiffusionPipeline.from_pretrained(
+            case.server_args.model_path, **load_kwargs
+        )
+
+    if device_map == "none":
+        if torch.cuda.is_available():
+            pipe = pipe.to("cuda")
+        elif torch.backends.mps.is_available():
+            pipe = pipe.to("mps")
+
+    if cpu_offload and hasattr(pipe, "enable_model_cpu_offload"):
+        pipe.enable_model_cpu_offload()
+    return pipe
+
+
+def _call_signature(pipe: DiffusionPipeline) -> inspect.Signature | None:
+    try:
+        return inspect.signature(pipe.__call__)
+    except (TypeError, ValueError):
+        return None
+
+
+def _filter_kwargs(pipe: DiffusionPipeline, kwargs: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    sig = _call_signature(pipe)
+    if sig is None:
+        return kwargs, []
+
+    params = sig.parameters
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs, []
+
+    valid = set(params) - {"self"}
+    kept = {k: v for k, v in kwargs.items() if k in valid}
+    ignored = sorted(k for k in kwargs if k not in valid)
+    return kept, ignored
+
+
+def _load_input_images(image_path: Any) -> list[Image.Image]:
+    if image_path is None:
+        return []
+    paths = image_path if isinstance(image_path, list) else [image_path]
+    images: list[Image.Image] = []
+    for path in paths:
+        local_path = download_image_from_url(path) if is_image_url(path) else Path(path)
+        images.append(Image.open(local_path).convert("RGB"))
+    return images
+
+
+def _generator(device_arg: str, seed: int) -> torch.Generator:
+    if device_arg == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        device = device_arg
+    return torch.Generator(device=device).manual_seed(seed)
+
+
+def _apply_lora_if_needed(pipe: DiffusionPipeline, case: DiffusionTestCase) -> dict[str, Any]:
+    lora_path = case.server_args.lora_path or case.server_args.dynamic_lora_path
+    if not lora_path:
+        return {}
+
+    if not hasattr(pipe, "load_lora_weights"):
+        raise UnsupportedCaseError(
+            f"{case.id}: official pipeline {type(pipe).__name__} has no load_lora_weights"
+        )
+
+    extra = _parse_extra_args(case.server_args.extras)
+    kwargs = {}
+    if "lora_weight_name" in extra:
+        kwargs["weight_name"] = extra["lora_weight_name"]
+    pipe.load_lora_weights(lora_path, **kwargs)
+    return {"lora_path": lora_path, "lora_kwargs": kwargs}
+
+
+def _build_call_kwargs(
+    pipe: DiffusionPipeline,
+    case: DiffusionTestCase,
+    req: Any,
+    sampling_params: Any,
+    *,
+    generator_device: str,
+) -> tuple[dict[str, Any], list[str]]:
+    kwargs: dict[str, Any] = {}
+    for name in SAMPLING_KWARGS:
+        value = getattr(req, name, None)
+        if value is not None:
+            kwargs[name] = value
+
+    seed = getattr(req, "seed", None)
+    if seed is not None:
+        kwargs["generator"] = _generator(generator_device, int(seed))
+
+    if getattr(req, "num_outputs_per_prompt", 1) > 1:
+        kwargs["num_images_per_prompt"] = req.num_outputs_per_prompt
+
+    input_images = _load_input_images(getattr(req, "image_path", None))
+    if input_images:
+        sig = _call_signature(pipe)
+        valid = set(sig.parameters) if sig is not None else set()
+        if "images" in valid:
+            kwargs["images"] = input_images
+        elif "input_image" in valid:
+            kwargs["input_image"] = input_images[0]
+        else:
+            kwargs["image"] = input_images if len(input_images) > 1 else input_images[0]
+
+    diffusers_kwargs = getattr(sampling_params, "diffusers_kwargs", None)
+    if diffusers_kwargs:
+        kwargs.update(diffusers_kwargs)
+
+    for key, value in case.sampling_params.extras.items():
+        if key.startswith("enable_") or key.endswith("_scale") or key.endswith("_exp"):
+            continue
+        kwargs.setdefault(key, value)
+
+    kwargs.setdefault("output_type", "pil")
+    return _filter_kwargs(pipe, kwargs)
+
+
+def _build_dry_run_kwargs(case: DiffusionTestCase, req: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    for name in SAMPLING_KWARGS:
+        value = getattr(req, name, None)
+        if value is not None:
+            kwargs[name] = value
+    if getattr(req, "seed", None) is not None:
+        kwargs["generator"] = "<generator>"
+    if getattr(req, "num_outputs_per_prompt", 1) > 1:
+        kwargs["num_images_per_prompt"] = req.num_outputs_per_prompt
+    if getattr(req, "image_path", None) is not None:
+        kwargs["image"] = req.image_path
+    for key, value in case.sampling_params.extras.items():
+        if key.startswith("enable_") or key.endswith("_scale") or key.endswith("_exp"):
+            continue
+        kwargs.setdefault(key, value)
+    kwargs["output_type"] = "pil"
+    return kwargs
+
+
+def _to_uint8_rgb(value: Any) -> np.ndarray:
+    if isinstance(value, Image.Image):
+        return np.array(value.convert("RGB"))
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        if value.ndim == 3 and value.shape[0] in (1, 3, 4):
+            value = value.permute(1, 2, 0)
+        arr = value.float().numpy()
+    else:
+        arr = np.asarray(value)
+
+    if arr.ndim == 2:
+        arr = np.repeat(arr[..., None], 3, axis=-1)
+    if arr.shape[-1] == 4:
+        arr = arr[..., :3]
+    if arr.dtype != np.uint8:
+        if arr.max(initial=0) <= 1.0:
+            arr = arr * 255.0
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return arr[..., :3]
+
+
+def _flatten_output(output: Any) -> list[np.ndarray]:
+    for attr in ("frames", "videos", "images", "sample"):
+        value = getattr(output, attr, None)
+        if value is not None:
+            output = value
+            break
+
+    if isinstance(output, torch.Tensor):
+        tensor = output.detach().cpu()
+        if tensor.ndim == 5:
+            tensor = tensor[0]
+            if tensor.shape[0] in (1, 3, 4):
+                tensor = tensor.permute(1, 2, 3, 0)
+        elif tensor.ndim == 4 and tensor.shape[0] == 1:
+            tensor = tensor[0]
+        if tensor.ndim == 4:
+            return [_to_uint8_rgb(frame) for frame in tensor]
+        return [_to_uint8_rgb(tensor)]
+
+    if isinstance(output, np.ndarray):
+        if output.ndim == 5:
+            output = output[0]
+        if output.ndim == 4:
+            return [_to_uint8_rgb(frame) for frame in output]
+        return [_to_uint8_rgb(output)]
+
+    if isinstance(output, list):
+        if output and isinstance(output[0], list):
+            output = output[0]
+        return [_to_uint8_rgb(item) for item in output]
+
+    return [_to_uint8_rgb(output)]
+
+
+def _postprocess_frames(
+    frames: list[np.ndarray], case: DiffusionTestCase, req: Any, is_video: bool
+) -> list[np.ndarray]:
+    extras = case.sampling_params.extras
+    data_type = DataType.VIDEO if is_video else DataType.IMAGE
+    sample = np.stack(frames) if is_video or len(frames) > 1 else frames[0]
+    return post_process_sample(
+        sample,
+        data_type=data_type,
+        fps=getattr(req, "fps", 24) or 24,
+        save_output=False,
+        enable_frame_interpolation=bool(extras.get("enable_frame_interpolation")),
+        frame_interpolation_exp=int(extras.get("frame_interpolation_exp", 1)),
+        frame_interpolation_scale=float(extras.get("frame_interpolation_scale", 1.0)),
+        frame_interpolation_model_path=extras.get("frame_interpolation_model_path"),
+        enable_upscaling=bool(extras.get("enable_upscaling")),
+        upscaling_model_path=extras.get("upscaling_model_path"),
+        upscaling_scale=int(extras.get("upscaling_scale", 4)),
+    )
+
+
+def _save_gt_frames(
+    frames: list[np.ndarray],
+    case: DiffusionTestCase,
+    out_dir: Path,
+    *,
+    is_video: bool,
+) -> list[str]:
+    num_gpus = case.server_args.num_gpus
+    saved: list[str] = []
+    if is_video:
+        selected = [frames[0], frames[len(frames) // 2], frames[-1]]
+        filenames = _consistency_gt_filenames(case.id, num_gpus, is_video=True)
+        for frame, filename in zip(selected, filenames):
+            Image.fromarray(frame).save(out_dir / filename)
+            saved.append(filename)
+        return saved
+
+    ext = output_format_to_ext(case.sampling_params.output_format)
+    filenames = _consistency_gt_filenames(
+        case.id, num_gpus, is_video=False, output_format=ext
+    )
+    save_kwargs = {"quality": 95} if ext in ("jpg", "jpeg") else {}
+    Image.fromarray(frames[0]).save(out_dir / filenames[0], **save_kwargs)
+    saved.append(filenames[0])
+    return saved
+
+
+def _select_cases(args: argparse.Namespace) -> list[DiffusionTestCase]:
+    cases = [case for case in SUITE_CASES[args.suite] if case.run_consistency_check]
+    if args.case_ids:
+        wanted = set(args.case_ids)
+        cases = [case for case in cases if case.id in wanted]
+
+    if args.partition_id is not None:
+        cases = [
+            case
+            for index, case in enumerate(cases)
+            if index % args.total_partitions == args.partition_id
+        ]
+    return cases
+
+
+def _run_case(
+    case: DiffusionTestCase,
+    out_dir: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    req, sampling_params, output_size = _final_request_for_case(case)
+    is_video = case.server_args.modality == "video"
+
+    if args.dry_run:
+        return {
+            "case_id": case.id,
+            "model_path": case.server_args.model_path,
+            "pipeline_class": "<not loaded>",
+            "output_size": output_size,
+            "call_kwargs": _jsonable(_build_dry_run_kwargs(case, req)),
+            "ignored_kwargs": [],
+            "lora": {
+                "lora_path": case.server_args.lora_path
+                or case.server_args.dynamic_lora_path
+            },
+            "dry_run": True,
+        }
+
+    pipe = _load_pipe(
+        case,
+        dtype=_torch_dtype(args.dtype),
+        device_map=args.device_map,
+        cpu_offload=args.cpu_offload,
+    )
+    lora_info = _apply_lora_if_needed(pipe, case)
+    call_kwargs, ignored_kwargs = _build_call_kwargs(
+        pipe,
+        case,
+        req,
+        sampling_params,
+        generator_device=args.generator_device,
+    )
+
+    with torch.inference_mode():
+        output = pipe(**call_kwargs)
+    frames = _flatten_output(output)
+    frames = _postprocess_frames(frames, case, req, is_video)
+    saved_files = _save_gt_frames(frames, case, out_dir, is_video=is_video)
+
+    return {
+        "case_id": case.id,
+        "model_path": case.server_args.model_path,
+        "pipeline_class": type(pipe).__name__,
+        "output_size": output_size,
+        "saved_files": saved_files,
+        "num_frames_after_postprocess": len(frames),
+        "call_kwargs": {
+            k: ("<generator>" if k == "generator" else _jsonable(v))
+            for k, v in call_kwargs.items()
+        },
+        "ignored_kwargs": ignored_kwargs,
+        "lora": lora_info,
+        "dry_run": False,
+    }
+
+
+def _manifest_path(out_dir: Path, args: argparse.Namespace) -> Path:
+    suffix = args.suite.replace("-", "_")
+    if args.partition_id is not None:
+        suffix = f"{suffix}_part{args.partition_id}_of_{args.total_partitions}"
+    return out_dir / f"official_gt_manifest_{suffix}.json"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--suite", choices=sorted(SUITE_CASES), required=True)
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--case-ids", nargs="*")
+    parser.add_argument("--partition-id", type=int)
+    parser.add_argument("--total-partitions", type=int)
+    parser.add_argument(
+        "--dtype", choices=("auto", "bf16", "fp16", "fp32"), default="auto"
+    )
+    parser.add_argument(
+        "--device-map",
+        choices=("none", "auto", "balanced"),
+        default="balanced",
+        help="Use balanced for multi-GPU official pipelines; use none to call pipe.to(device).",
+    )
+    parser.add_argument("--generator-device", default="auto")
+    parser.add_argument("--cpu-offload", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--list-cases", action="store_true")
+    parser.add_argument("--continue-on-error", action="store_true")
+    args = parser.parse_args()
+
+    if (args.partition_id is None) != (args.total_partitions is None):
+        parser.error("--partition-id and --total-partitions must be provided together")
+    if args.partition_id is not None and not (0 <= args.partition_id < args.total_partitions):
+        parser.error("--partition-id must be in [0, total-partitions)")
+
+    cases = _select_cases(args)
+    if args.list_cases:
+        for case in cases:
+            print(case.id)
+        return
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: dict[str, Any] = {
+        "generator": "official-diffusers",
+        "git_sha": _git_sha(),
+        "suite": args.suite,
+        "torch_version": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "cases": [],
+        "failures": [],
+    }
+    manifest_path = _manifest_path(out_dir, args)
+
+    for case in cases:
+        print(f"[official-gt] generating {case.id}", flush=True)
+        try:
+            manifest["cases"].append(_run_case(case, out_dir, args))
+        except Exception as exc:
+            failure = {
+                "case_id": case.id,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+            manifest["failures"].append(failure)
+            print(f"[official-gt] FAILED {case.id}: {failure}", flush=True)
+            if not args.continue_on_error:
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                raise
+
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if manifest["failures"]:
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
