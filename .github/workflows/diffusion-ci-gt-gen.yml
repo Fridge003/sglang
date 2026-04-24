@@ -77,16 +77,15 @@ jobs:
               f.write("\n".join(commits) + "\n")
           PY
 
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
-            clone --filter=blob:none --sparse https://github.com/sglang-bot/sglang-ci-data.git ci-data
+          git clone --filter=blob:none --sparse \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/sglang-bot/sglang-ci-data.git" ci-data
           cd ci-data
           git sparse-checkout set diffusion-ci/consistency_gt
           git config user.name "sglang-bot"
           git config user.email "sglangbot@gmail.com"
           mapfile -t commits < /tmp/revert-commits
           git revert --no-edit "${commits[@]}"
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
-            push origin main
+          git push origin main
 
   multimodal-diffusion-gen-1gpu:
     if: github.repository == 'sgl-project/sglang' && inputs.revert_ci_data_commits == ''
