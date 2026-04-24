@@ -47,7 +47,6 @@ logger = init_logger(__name__)
 
 BASE_SHIFT_ANCHOR = 1024
 MAX_SHIFT_ANCHOR = 4096
-LTX23_HQ_RES2S_FINAL_SIGMA = 0.0011
 
 
 def _resolve_ltx2_two_stage_component_paths(
@@ -176,7 +175,6 @@ class LTX2SigmaPreparationStage(PipelineStage):
                     int(batch.num_inference_steps),
                     number_of_tokens=latent_num_frames * latent_height * latent_width,
                 )
-                batch.sigmas.append(LTX23_HQ_RES2S_FINAL_SIGMA)
             else:
                 batch.sigmas = build_official_ltx2_sigmas(
                     int(batch.num_inference_steps)
