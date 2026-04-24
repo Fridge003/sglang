@@ -504,6 +504,9 @@ def _run_case(
 ) -> dict[str, Any]:
     req, sampling_params, output_size = _final_request_for_case(case)
     is_video = case.server_args.modality == "video"
+    device_map = args.device_map
+    if device_map == "case":
+        device_map = "balanced" if case.server_args.num_gpus > 1 else "none"
 
     if args.dry_run:
         return {
@@ -511,6 +514,7 @@ def _run_case(
             "model_path": case.server_args.model_path,
             "pipeline_class": "<not loaded>",
             "output_size": output_size,
+            "device_map": device_map,
             "call_kwargs": _jsonable(_build_dry_run_kwargs(case, req)),
             "ignored_kwargs": [],
             "lora": {
@@ -523,7 +527,7 @@ def _run_case(
     pipe = _load_pipe(
         case,
         dtype=_torch_dtype(args.dtype),
-        device_map=args.device_map,
+        device_map=device_map,
         cpu_offload=args.cpu_offload,
     )
     lora_info = _apply_lora_if_needed(pipe, case)
@@ -546,6 +550,7 @@ def _run_case(
         "model_path": case.server_args.model_path,
         "pipeline_class": type(pipe).__name__,
         "output_size": output_size,
+        "device_map": device_map,
         "saved_files": saved_files,
         "num_frames_after_postprocess": len(frames),
         "call_kwargs": {
@@ -577,9 +582,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--device-map",
-        choices=("none", "auto", "balanced"),
-        default="balanced",
-        help="Use balanced for multi-GPU official pipelines; use none to call pipe.to(device).",
+        choices=("case", "none", "auto", "balanced"),
+        default="case",
+        help="case uses balanced only for multi-GPU cases; none calls pipe.to(device).",
     )
     parser.add_argument("--generator-device", default="auto")
     parser.add_argument("--cpu-offload", action="store_true")

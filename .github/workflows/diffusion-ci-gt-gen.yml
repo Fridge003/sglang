@@ -50,6 +50,7 @@ jobs:
     if: github.repository == 'sgl-project/sglang'
     runs-on: 1-gpu-h100
     strategy:
+      fail-fast: false
       matrix:
         part: [0, 1]
     timeout-minutes: 150
@@ -102,10 +103,12 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OUTPUT_NAME }}-1gpu-part${{ matrix.part }}
           path: python/${{ env.OUTPUT_NAME }}
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Publish GT images to sglang-bot/sglang-ci-data
@@ -120,6 +123,7 @@ jobs:
     if: github.repository == 'sgl-project/sglang'
     runs-on: 2-gpu-h100
     strategy:
+      fail-fast: false
       matrix:
         part: [0, 1]
     timeout-minutes: 150
@@ -172,10 +176,12 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OUTPUT_NAME }}-2gpu-part${{ matrix.part }}
           path: python/${{ env.OUTPUT_NAME }}
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Publish GT images to sglang-bot/sglang-ci-data
@@ -235,10 +241,12 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.OUTPUT_NAME }}-b200
           path: python/${{ env.OUTPUT_NAME }}
+          if-no-files-found: warn
           retention-days: 7
 
       - name: Publish GT images to sglang-bot/sglang-ci-data
