@@ -13,6 +13,7 @@ import argparse
 import gc
 import inspect
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -328,7 +329,33 @@ def _apply_sglang_condition_size(
         return
 
     config = server_args.pipeline_config
-    calculated_size = config.prepare_calculated_size(input_images[-1])
+    if "flux" in server_args.model_path.lower():
+        target_area = 1024 * 1024
+        multiple_of = 16
+
+        def calculate_size(image: Image.Image) -> tuple[int, int] | None:
+            width, height = image.size
+            if width * height > target_area:
+                scale = math.sqrt(target_area / (width * height))
+                width = int(width * scale)
+                height = int(height * scale)
+            width = width // multiple_of * multiple_of
+            height = height // multiple_of * multiple_of
+            if (width, height) != image.size:
+                return width, height
+            return None
+
+        calculated_size = calculate_size(input_images[-1])
+    else:
+        calculate_size = lambda image: config.calculate_condition_image_size(
+            image, image.width, image.height
+        )
+        calculated_size = config.prepare_calculated_size(input_images[-1])
+
+    for i, image in enumerate(input_images):
+        image_size = calculate_size(image)
+        if image_size is not None and image.size != image_size:
+            input_images[i] = image.resize(image_size, Image.Resampling.LANCZOS)
     if calculated_size is None:
         return
 
@@ -337,9 +364,9 @@ def _apply_sglang_condition_size(
     height = kwargs.get("height") if "height" in explicit_fields else calculated_height
 
     vae_arch = config.vae_config.arch_config
-    vae_scale_factor = getattr(
-        vae_arch, "vae_scale_factor", vae_arch.spatial_compression_ratio
-    )
+    vae_scale_factor = getattr(vae_arch, "vae_scale_factor", None)
+    if vae_scale_factor is None:
+        vae_scale_factor = vae_arch.spatial_compression_ratio
     multiple_of = vae_scale_factor * 2
     kwargs["width"] = width // multiple_of * multiple_of
     kwargs["height"] = height // multiple_of * multiple_of
