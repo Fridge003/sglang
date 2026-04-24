@@ -189,9 +189,6 @@ class BaseLayerWithLoRA(nn.Module):
             data: The base weight tensor to merge LoRA into (modified in-place)
             lora_list: List of (lora_A, lora_B, lora_path, lora_strength, rank, alpha) tuples
         """
-        if self._try_merge_ltx_distilled_lora_like_official(data, lora_list):
-            return
-
         # Merge all LoRA adapters in order
         for lora_A, lora_B, _, lora_strength, lora_rank, lora_alpha in lora_list:
             lora_A_sliced = self.slice_lora_a_weights(lora_A.to(data))
@@ -236,66 +233,6 @@ class BaseLayerWithLoRA(nn.Module):
                 end = min(start + chunk_rows, lora_B_2d.shape[0])
                 chunk_delta = lora_B_2d[start:end] @ lora_A_sliced
                 data_2d[start:end].add_(chunk_delta, alpha=scale)
-
-    @staticmethod
-    def _has_ltx_distilled_lora(lora_list: list[LoRAWeightEntry]) -> bool:
-        for _, _, lora_path, _, _, _ in lora_list:
-            lower_path = (lora_path or "").lower()
-            if "distilled-lora" in lower_path and "ltx" in lower_path:
-                return True
-        return False
-
-    @torch.no_grad()
-    def _try_merge_ltx_distilled_lora_like_official(
-        self,
-        data: torch.Tensor,
-        lora_list: list[LoRAWeightEntry],
-    ) -> bool:
-        if not self._has_ltx_distilled_lora(lora_list):
-            return False
-
-        prepared_entries = []
-        for lora_A, lora_B, _, lora_strength, lora_rank, lora_alpha in lora_list:
-            lora_A_sliced = self.slice_lora_a_weights(
-                lora_A.to(device=data.device, non_blocking=True)
-            )
-            lora_B_sliced = self.slice_lora_b_weights(
-                lora_B.to(device=data.device, non_blocking=True)
-            )
-            if not isinstance(lora_B_sliced, torch.Tensor):
-                return False
-
-            scale = lora_strength
-            if (
-                lora_alpha is not None
-                and lora_rank is not None
-                and lora_alpha != lora_rank
-            ):
-                scale *= lora_alpha / lora_rank
-
-            lora_B_2d = (
-                lora_B_sliced.reshape(-1, lora_B_sliced.shape[-1])
-                if lora_B_sliced.dim() > 2
-                else lora_B_sliced
-            )
-            prepared_entries.append((lora_A_sliced, lora_B_2d, scale))
-
-        data_2d = data.reshape(-1, data.shape[-1]) if data.dim() > 2 else data
-        chunk_rows = max(
-            1,
-            LORA_MERGE_CHUNK_BYTES
-            // (data_2d.shape[-1] * max(1, data_2d.element_size())),
-        )
-        for start in range(0, data_2d.shape[0], chunk_rows):
-            end = min(start + chunk_rows, data_2d.shape[0])
-            chunk_delta = None
-            for lora_A_sliced, lora_B_2d, scale in prepared_entries:
-                delta = (lora_B_2d[start:end] * scale) @ lora_A_sliced
-                delta = delta.to(dtype=data_2d.dtype)
-                chunk_delta = delta if chunk_delta is None else chunk_delta + delta
-            if chunk_delta is not None:
-                data_2d[start:end].add_(chunk_delta)
-        return True
 
     def _should_merge_in_fp32(
         self,
