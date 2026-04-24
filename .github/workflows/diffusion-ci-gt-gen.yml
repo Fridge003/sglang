@@ -31,6 +31,11 @@ on:
         required: false
         default: ''
         type: string
+      revert_ci_data_commits:
+        description: 'Emergency only: space-separated sglang-ci-data commit SHAs to revert. Generation jobs are skipped when set.'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: diffusion-ci-gt-gen-${{ github.ref }}
@@ -46,8 +51,45 @@ env:
   OUTPUT_NAME: ${{ inputs.output_name || 'diffusion-ci-outputs' }}
 
 jobs:
+  revert-ci-data:
+    if: github.repository == 'sgl-project/sglang' && inputs.revert_ci_data_commits != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Revert sglang-ci-data commits
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT_FOR_NIGHTLY_CI_DATA }}
+          REVERT_COMMITS: ${{ inputs.revert_ci_data_commits }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          commits = os.environ["REVERT_COMMITS"].split()
+          if not commits:
+              sys.exit("No commits provided")
+          bad = [commit for commit in commits if not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit)]
+          if bad:
+              sys.exit(f"Invalid commit SHAs: {bad}")
+          with open("/tmp/revert-commits", "w", encoding="utf-8") as f:
+              f.write("\n".join(commits) + "\n")
+          PY
+
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            clone --filter=blob:none --sparse https://github.com/sglang-bot/sglang-ci-data.git ci-data
+          cd ci-data
+          git sparse-checkout set diffusion-ci/consistency_gt
+          git config user.name "sglang-bot"
+          git config user.email "sglangbot@gmail.com"
+          mapfile -t commits < /tmp/revert-commits
+          git revert --no-edit "${commits[@]}"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: bearer ${GITHUB_TOKEN}" \
+            push origin main
+
   multimodal-diffusion-gen-1gpu:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'sgl-project/sglang' && inputs.revert_ci_data_commits == ''
     runs-on: 1-gpu-h100
     strategy:
       fail-fast: false
@@ -121,7 +163,7 @@ jobs:
             ${{ inputs.output_name != '' && format('--target-dir diffusion-ci/{0}', inputs.output_name) || '' }}
 
   multimodal-diffusion-gen-2gpu:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'sgl-project/sglang' && inputs.revert_ci_data_commits == ''
     runs-on: 2-gpu-h100
     strategy:
       fail-fast: false
@@ -194,7 +236,7 @@ jobs:
             ${{ inputs.output_name != '' && format('--target-dir diffusion-ci/{0}', inputs.output_name) || '' }}
 
   multimodal-diffusion-gen-b200:
-    if: github.repository == 'sgl-project/sglang'
+    if: github.repository == 'sgl-project/sglang' && inputs.revert_ci_data_commits == ''
     runs-on: 4-gpu-b200
     timeout-minutes: 240
     steps:
