@@ -10,6 +10,7 @@ sampling parameters, then executes the upstream Diffusers pipeline directly.
 from __future__ import annotations
 
 import argparse
+import gc
 import inspect
 import json
 import os
@@ -55,6 +56,13 @@ SUITE_CASES = {
     "1-gpu": ONE_GPU_CASES,
     "2-gpu": TWO_GPU_CASES,
     "1-gpu-b200": ONE_GPU_MODELOPT_CASES,
+}
+
+UNSUPPORTED_OFFICIAL_CASES = {
+    "zimage_image_t2i_multi_lora": (
+        "Diffusers Z-Image LoRA conversion currently expects alpha keys that are "
+        "not present in the CI LoRA checkpoints; keep the existing GT for this case."
+    ),
 }
 
 SAMPLING_KWARGS = (
@@ -243,7 +251,7 @@ def _load_pipe(
             case.server_args.model_path, **load_kwargs
         )
 
-    if device_map == "none":
+    if device_map == "none" and not cpu_offload:
         if torch.cuda.is_available():
             pipe = pipe.to("cuda")
         elif torch.backends.mps.is_available():
@@ -563,6 +571,15 @@ def _run_case(
     }
 
 
+def _cleanup_accelerators() -> None:
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.ipc_collect()
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+
+
 def _manifest_path(out_dir: Path, args: argparse.Namespace) -> Path:
     suffix = args.suite.replace("-", "_")
     if args.partition_id is not None:
@@ -614,11 +631,18 @@ def main() -> None:
         "torch_version": torch.__version__,
         "cuda_available": torch.cuda.is_available(),
         "cases": [],
+        "skipped": [],
         "failures": [],
     }
     manifest_path = _manifest_path(out_dir, args)
 
     for case in cases:
+        if case.id in UNSUPPORTED_OFFICIAL_CASES:
+            skip = {"case_id": case.id, "reason": UNSUPPORTED_OFFICIAL_CASES[case.id]}
+            manifest["skipped"].append(skip)
+            print(f"[official-gt] SKIPPED {case.id}: {skip['reason']}", flush=True)
+            continue
+
         print(f"[official-gt] generating {case.id}", flush=True)
         try:
             manifest["cases"].append(_run_case(case, out_dir, args))
@@ -636,6 +660,8 @@ def main() -> None:
                     encoding="utf-8",
                 )
                 raise
+        finally:
+            _cleanup_accelerators()
 
     manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False),

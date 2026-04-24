@@ -91,6 +91,7 @@ jobs:
               --suite 1-gpu \
               --partition-id ${{ matrix.part }} \
               --total-partitions 2 \
+              --cpu-offload \
               --out-dir ./${{ env.OUTPUT_NAME }} \
               ${{ inputs.case_ids != '' && format('--case-ids {0}', inputs.case_ids) || '' }}
           else
