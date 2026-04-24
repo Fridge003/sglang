@@ -22,7 +22,7 @@ export const LTXDeployment = () => {
       title: 'Pipeline',
       items: [
         { id: 'two-stage', label: 'Two Stage', default: true, validModels: ['ltx2', 'ltx23'] },
-        { id: 'two-stage-hq', label: 'Two Stage HQ', default: false, validModels: ['ltx23'] },
+        { id: 'two-stage-hq', label: 'Two Stage HQ', subtitle: 'High Quality', default: false, validModels: ['ltx23'] },
         { id: 'one-stage', label: 'One Stage', default: false, validModels: ['ltx2', 'ltx23'] },
       ],
     },
@@ -49,7 +49,7 @@ export const LTXDeployment = () => {
           id: 'transition',
           path: 'valiantcat/LTX-2.3-Transition-LORA',
           weightName: 'ltx2.3-transition.safetensors',
-          validPipelines: ['two-stage'],
+          validPipelines: ['two-stage', 'two-stage-hq'],
         },
       ],
     },

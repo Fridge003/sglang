@@ -47,7 +47,15 @@ Choose the pipeline class based on the quality and latency target:
 | --- | --- | --- |
 | One-stage generation | `LTX2Pipeline` | Fastest LTX native path. Supports T2V and TI2V. |
 | Two-stage generation | `LTX2TwoStagePipeline` | Uses a base stage and a refinement stage. Supported by LTX-2 and LTX-2.3. |
-| Two-stage HQ generation | `LTX2TwoStageHQPipeline` | LTX-2.3 HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
+| Two-stage High Quality (HQ) generation | `LTX2TwoStageHQPipeline` | LTX-2.3 HQ path; defaults to 1920x1088 unless you override `--width` and `--height`. |
+
+Feature compatibility:
+
+| Pipeline class | T2V | TI2V (`--image-path`) | LoRA (`--lora-path`) | Notes |
+| --- | --- | --- | --- | --- |
+| `LTX2Pipeline` | Yes | Yes | Yes | One-stage path. Cannot be combined with HQ because HQ is a separate two-stage pipeline class. |
+| `LTX2TwoStagePipeline` | Yes | Yes | Yes | Standard two-stage path for LTX-2 and LTX-2.3. |
+| `LTX2TwoStageHQPipeline` | Yes | Yes | Yes | High Quality two-stage path for LTX-2.3. Use this instead of `LTX2Pipeline`; it is not a one-stage mode flag. |
 
 For two-stage pipelines, `--ltx2-two-stage-device-mode` controls transformer residency:
 
