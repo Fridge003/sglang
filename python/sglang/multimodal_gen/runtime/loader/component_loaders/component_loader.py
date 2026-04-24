@@ -326,10 +326,15 @@ class TokenizerLoader(ComponentLoader):
         ):
             return AutoProcessor.from_pretrained(component_model_path)
 
+        use_fast = not (
+            self.component_architecture is not None
+            and self.component_architecture.endswith("Tokenizer")
+            and not self.component_architecture.endswith("Fast")
+        )
         return AutoTokenizer.from_pretrained(
             component_model_path,
             padding_side="right",
-            use_fast=True,
+            use_fast=use_fast,
         )
 
 
