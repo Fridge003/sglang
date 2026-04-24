@@ -41,7 +41,7 @@ set -x
 : "${NGINX_SQUASH_FILE:?}"
 : "${GITHUB_WORKSPACE:?}"
 
-SLURM_PARTITION="${SLURM_PARTITION:-batch}"
+SLURM_PARTITION="${SLURM_PARTITION:-batch-iron}"
 SLURM_ACCOUNT="${SLURM_ACCOUNT:-sglang}"
 SRT_SLURM_BRANCH="${SRT_SLURM_BRANCH:-sglang-nightly-regression}"
 
@@ -63,7 +63,7 @@ fi
 # Set up per-runner Lustre workspace (cleaned before each run, accessible
 # to both the runner and compute nodes)
 # ---------------------------------------------------------------------------
-LUSTRE_WORKSPACE="/mnt/lustre01/users-public/sglang-ci/workspace/${RUNNER_NAME}"
+LUSTRE_WORKSPACE="/mnt/lustre01/users-public/slurm-shared/workspace/${RUNNER_NAME}"
 rm -rf "$LUSTRE_WORKSPACE"
 mkdir -p "$LUSTRE_WORKSPACE"
 
