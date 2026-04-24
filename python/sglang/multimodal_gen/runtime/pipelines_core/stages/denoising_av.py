@@ -250,6 +250,7 @@ class LTX2RefinementStage(LTX2AVDenoisingStage):
             renoise_generator = None
         if is_native_ti2v:
             prepared_latents, denoise_mask, _ = self._prepare_ltx2_ti2v_clean_state(
+                batch=batch,
                 latents=batch.latents,
                 image_latent=batch.image_latent,
                 num_img_tokens=int(getattr(batch, "ltx2_num_image_tokens", 0)),

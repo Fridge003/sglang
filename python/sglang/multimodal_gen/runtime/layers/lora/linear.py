@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 # Code adapted from SGLang https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/lora/layers.py
-
+import os
 
 import torch
 from torch import nn
@@ -40,7 +40,6 @@ LORA_MERGE_CHUNK_BYTES = 32 * 1024 * 1024
 
 
 class BaseLayerWithLoRA(nn.Module):
-
     def __init__(
         self,
         base_layer: nn.Module,
@@ -222,6 +221,19 @@ class BaseLayerWithLoRA(nn.Module):
                 chunk_delta = lora_B_2d[start:end] @ lora_A_sliced
                 data_2d[start:end].add_(chunk_delta, alpha=scale)
 
+    def _should_merge_in_fp32(
+        self,
+        lora_list: list[
+            tuple[torch.nn.Parameter, torch.nn.Parameter, str | None, float]
+        ],
+    ) -> bool:
+        if os.getenv("SGLANG_DIFFUSION_LORA_MERGE_FP32", "0") != "1":
+            return False
+        for _, _, lora_path, _ in lora_list:
+            if lora_path and "distilled-lora" in lora_path.lower():
+                return False
+        return True
+
     @torch.no_grad()
     def merge_lora_weights(self, strength: float | None = None) -> None:
         if strength is not None:
@@ -241,6 +253,8 @@ class BaseLayerWithLoRA(nn.Module):
         if not lora_list:
             raise ValueError("LoRA weights not set. Please set them first.")
 
+        merge_in_fp32 = self._should_merge_in_fp32(lora_list)
+
         if isinstance(self.base_layer.weight, DTensor):
             mesh = self.base_layer.weight.data.device_mesh
             unsharded_base_layer = ReplicatedLinear(
@@ -257,10 +271,19 @@ class BaseLayerWithLoRA(nn.Module):
             data = self.base_layer.weight.data.to(
                 get_local_torch_device()
             ).full_tensor()
+            target_dtype = data.dtype
+            if (
+                merge_in_fp32
+                and data.is_floating_point()
+                and data.dtype != torch.float32
+            ):
+                data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
 
-            unsharded_base_layer.weight = nn.Parameter(data.to(current_device))
+            unsharded_base_layer.weight = nn.Parameter(
+                data.to(current_device, dtype=target_dtype)
+            )
             if isinstance(getattr(self.base_layer, "bias", None), DTensor):
                 unsharded_base_layer.bias = nn.Parameter(
                     self.base_layer.bias.to(get_local_torch_device(), non_blocking=True)
@@ -282,10 +305,19 @@ class BaseLayerWithLoRA(nn.Module):
         else:
             current_device = self.base_layer.weight.data.device
             data = self.base_layer.weight.data.to(get_local_torch_device())
+            target_dtype = data.dtype
+            if (
+                merge_in_fp32
+                and data.is_floating_point()
+                and data.dtype != torch.float32
+            ):
+                data = data.to(torch.float32)
 
             self._merge_lora_into_data(data, lora_list)
 
-            self.base_layer.weight.data = data.to(current_device, non_blocking=True)
+            self.base_layer.weight.data = data.to(
+                current_device, dtype=target_dtype, non_blocking=True
+            )
 
         self.merged = True
 
@@ -342,7 +374,6 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
 
 
 class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
-
     def __init__(
         self,
         base_layer: ColumnParallelLinear,
@@ -400,7 +431,6 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
-
     def __init__(
         self,
         base_layer: MergedColumnParallelLinear,
@@ -422,7 +452,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
-
     def __init__(
         self,
         base_layer: QKVParallelLinear,
@@ -455,7 +484,6 @@ class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 
 
 class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
-
     def __init__(
         self,
         base_layer: RowParallelLinear,
@@ -479,8 +507,13 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
                 input_, num_partitions=self.base_layer.tp_size
             )
             input_parallel = splitted_input[tp_rank].contiguous()
+        bias_ = (
+            None
+            if (self.base_layer.tp_rank > 0 or self.base_layer.skip_bias_add)
+            else self.base_layer.bias
+        )
         output_parallel = self.base_layer.quant_method.apply(
-            self.base_layer, input_parallel
+            self.base_layer, input_parallel, bias=bias_
         )
         if not self.merged and not self.disable_lora:
             lora_dtype = lora_A.dtype
@@ -506,16 +539,8 @@ class RowParallelLinearWithLoRA(BaseLayerWithLoRA):
         else:
             output_ = output_parallel
 
-        if not self.base_layer.skip_bias_add:
-            output = (
-                output_ + self.base_layer.bias
-                if self.base_layer.bias is not None
-                else output_
-            )
-            output_bias = None
-        else:
-            output = output_
-            output_bias = self.base_layer.bias
+        output = output_
+        output_bias = self.base_layer.bias if self.base_layer.skip_bias_add else None
         return output, output_bias
 
     def slice_lora_a_weights(self, A: torch.Tensor) -> torch.Tensor:
