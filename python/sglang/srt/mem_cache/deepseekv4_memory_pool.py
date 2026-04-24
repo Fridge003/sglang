@@ -403,6 +403,24 @@ class DeepSeekV4TokenToKVPool(KVCache):
         self.state_dtype = state_dtype
         self.compression_ratios = compression_ratios
 
+        # Determine this PP stage's absolute layer range inside
+        # ``compression_ratios``. Under PP, ``compression_ratios`` is the
+        # full-model list (len == total_L) and ``start_layer``/``end_layer``
+        # are absolute layer ids. For draft workers ``compression_ratios`` is
+        # already stage-local and shorter than ``end_layer``; in that case we
+        # fall back to treating the whole list as one stage.
+        if (
+            start_layer is not None
+            and end_layer is not None
+            and len(compression_ratios) >= end_layer
+        ):
+            self._stage_start = start_layer
+            self._stage_end = end_layer
+        else:
+            self._stage_start = 0
+            self._stage_end = len(compression_ratios)
+        stage_ratios = compression_ratios[self._stage_start : self._stage_end]
+
         assert page_size % swa_page_size == 0
 
         self.swa_size = swa_size
@@ -414,8 +432,8 @@ class DeepSeekV4TokenToKVPool(KVCache):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.indexer_head_dim = indexer_head_dim
 
-        c4_layer_num = sum(1 for r in compression_ratios if r == 4)
-        c128_layer_num = sum(1 for r in compression_ratios if r == 128)
+        c4_layer_num = sum(1 for r in stage_ratios if r == 4)
+        c128_layer_num = sum(1 for r in stage_ratios if r == 128)
         c4_page_size = page_size // 4
         c128_page_size = page_size // 128
         self.swa_kv_pool = DeepSeekV4SingleKVPool(
@@ -556,41 +574,17 @@ class DeepSeekV4TokenToKVPool(KVCache):
 
         return self.full_to_swa_index_mapping[kv_indices].to(torch.int32)
 
-    def _mla_pp_compression_ranges(self) -> Tuple[int, int, int, int]:
-        """Return (c4_off_s, c4_off_e, c128_off_s, c128_off_e): absolute
-        indices of this PP stage's layer range inside the compression-ratio
-        sub-lists (c4_kv_pool.kv_buffer, c128_kv_pool.kv_buffer, etc.).
-
-        The c4/c128 pools are built from the full-model compression_ratios
-        list, so each PP stage needs to locate its contiguous sub-range
-        inside them.
-        """
-        ratios = self.compression_ratios
-        start = self.start_layer if self.start_layer is not None else 0
-        end = self.end_layer if self.end_layer is not None else len(ratios)
-
-        if len(ratios) < end:
-            start = 0
-            end = len(ratios)
-        c4_off_s = sum(1 for r in ratios[:start] if r == 4)
-        c4_off_e = sum(1 for r in ratios[:end] if r == 4)
-        c128_off_s = sum(1 for r in ratios[:start] if r == 128)
-        c128_off_e = sum(1 for r in ratios[:end] if r == 128)
-        return c4_off_s, c4_off_e, c128_off_s, c128_off_e
-
     def get_contiguous_buf_infos(self) -> Tuple[List[int], List[int], List[int]]:
         data_ptrs: List[int] = []
         data_lens: List[int] = []
         item_lens: List[int] = []
 
-        c4_s, c4_e, c128_s, c128_e = self._mla_pp_compression_ranges()
-        sections = [
-            (self.c4_kv_pool.kv_buffer, c4_s, c4_e),
-            (self.c4_indexer_kv_pool.index_k_with_scale_buffer, c4_s, c4_e),
-            (self.c128_kv_pool.kv_buffer, c128_s, c128_e),
-        ]
-        for bufs, s, e in sections:
-            for buf in bufs[s:e]:
+        for bufs in [
+            self.c4_kv_pool.kv_buffer,
+            self.c4_indexer_kv_pool.index_k_with_scale_buffer,
+            self.c128_kv_pool.kv_buffer,
+        ]:
+            for buf in bufs:
                 assert buf.ndim == 2, f"expected 2D buffer, got {buf.ndim}D"
                 data_ptrs.append(buf.data_ptr())
                 data_lens.append(buf.nbytes)
@@ -609,20 +603,11 @@ class DeepSeekV4TokenToKVPool(KVCache):
             data_lens.append(buf.nbytes)
             item_lens.append(buf[0].nbytes)
 
-        start = self.start_layer if self.start_layer is not None else 0
-        end = (
-            self.end_layer
-            if self.end_layer is not None
-            else len(self.compression_ratios)
-        )
-        if len(self.compression_ratios) < end:
-            start = 0
-            end = len(self.compression_ratios)
         for pools in [
             self.compress_state_pools,
             self.indexer_compress_state_pools,
         ]:
-            for pool in pools[start:end]:
+            for pool in pools:
                 if pool is None:
                     continue
                 t = pool.kv_score_buffer.kv_score
@@ -636,30 +621,34 @@ class DeepSeekV4TokenToKVPool(KVCache):
     def _init_paged_compress_states(self, enable_memory_saver: bool):
         c4_state_pool_size = self.c4_state_pool_size
         c128_state_pool_size = self.c128_state_pool_size
-        self.compress_state_pools: List[CompressStatePool] = []
-        self.indexer_compress_state_pools: List[CompressStatePool] = []
+        total_L = len(self.compression_ratios)
+        self.compress_state_pools: List[Optional[CompressStatePool]] = [None] * total_L
+        self.indexer_compress_state_pools: List[Optional[CompressStatePool]] = [
+            None
+        ] * total_L
 
-        for ratio in self.compression_ratios:
+        for idx in range(self._stage_start, self._stage_end):
+            ratio = self.compression_ratios[idx]
+            if ratio == 0:
+                continue
             overlap = ratio == 4
-            compress_state_pool = indexer_compress_state_pool = None
             size = c4_state_pool_size if ratio == 4 else c128_state_pool_size
-            ring_size = self.get_ring_size(ratio) if ratio != 0 else 0
+            ring_size = self.get_ring_size(ratio)
 
-            if ratio != 0:
-                compress_state_pool = CompressStatePool(
-                    size=size,
-                    swa_page_size=self.swa_page_size,
-                    ring_size=ring_size,
-                    overlap=overlap,
-                    head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
-                    dtype=self.state_dtype,
-                    device=self.device,
-                    enable_memory_saver=enable_memory_saver,
-                    ratio=ratio,
-                )
+            self.compress_state_pools[idx] = CompressStatePool(
+                size=size,
+                swa_page_size=self.swa_page_size,
+                ring_size=ring_size,
+                overlap=overlap,
+                head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
+                dtype=self.state_dtype,
+                device=self.device,
+                enable_memory_saver=enable_memory_saver,
+                ratio=ratio,
+            )
 
             if ratio == 4:
-                indexer_compress_state_pool = CompressStatePool(
+                self.indexer_compress_state_pools[idx] = CompressStatePool(
                     size=size,
                     swa_page_size=self.swa_page_size,
                     ring_size=ring_size,
@@ -671,38 +660,31 @@ class DeepSeekV4TokenToKVPool(KVCache):
                     ratio=ratio,
                 )
 
-            self.compress_state_pools.append(compress_state_pool)
-            self.indexer_compress_state_pools.append(indexer_compress_state_pool)
-
     def _init_compressed_layer_mapping(self):
-        c1_cnt, c4_cnt, c128_cnt = 0, 0, 0
-        self.layer_mapping: List[DeepSeekV4LayerItem] = []
+        c1_cnt = c4_cnt = c128_cnt = 0
+        total_L = len(self.compression_ratios)
+        self.layer_mapping: List[Optional[DeepSeekV4LayerItem]] = [None] * total_L
 
-        for ratio in self.compression_ratios:
+        for idx in range(self._stage_start, self._stage_end):
+            ratio = self.compression_ratios[idx]
             if ratio == 0:
-                self.layer_mapping.append(
-                    DeepSeekV4LayerItem(
-                        compress_ratio=0,
-                        compress_layer_id=c1_cnt,
-                    )
+                self.layer_mapping[idx] = DeepSeekV4LayerItem(
+                    compress_ratio=0,
+                    compress_layer_id=c1_cnt,
                 )
                 c1_cnt += 1
             elif ratio == 4:
-                self.layer_mapping.append(
-                    DeepSeekV4LayerItem(
-                        compress_ratio=4,
-                        compress_layer_id=c4_cnt,
-                        compress_kv_pool=self.c4_kv_pool,
-                    )
+                self.layer_mapping[idx] = DeepSeekV4LayerItem(
+                    compress_ratio=4,
+                    compress_layer_id=c4_cnt,
+                    compress_kv_pool=self.c4_kv_pool,
                 )
                 c4_cnt += 1
             elif ratio == 128:
-                self.layer_mapping.append(
-                    DeepSeekV4LayerItem(
-                        compress_ratio=128,
-                        compress_layer_id=c128_cnt,
-                        compress_kv_pool=self.c128_kv_pool,
-                    )
+                self.layer_mapping[idx] = DeepSeekV4LayerItem(
+                    compress_ratio=128,
+                    compress_layer_id=c128_cnt,
+                    compress_kv_pool=self.c128_kv_pool,
                 )
                 c128_cnt += 1
             else:
