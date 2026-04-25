@@ -263,3 +263,19 @@
 - 10s SpongeBob CLI 复核: `/tmp/ltx23_hq_official_lora_fuse_pr23366_10s_cli_default/native_hq_official_lora_fuse_pr23366_10s_default.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=14.371213949670121`，和 `184d532e9` 完全持平；pixel generate time `87.43s`。
 - 结论: LoRA fusion 顺序不是当前主误差来源。该改动增加额外 LTX path 分支但没有可观测收益，已按“keep native、少分支”原则 revert 为 `8967406a1`。
 - 当前 10s 对齐百分比仍为 `14.37 / 35 = 41.1%`。
+
+## 05:18 native-only 历史高点复跑结论
+
+- git: `2ad0bdb26`。
+- 源码差异: official HQ 用 `torch.Generator(device=self.device)`；native 新增 HQ-only `generator_device=None` 默认配置，但 CLI 仍由 sampling params 继承 cuda generator 语义，因此输出未变化。
+- current 10s SpongeBob CLI: `/tmp/ltx23_hq_device_generator_pr23366_10s_cli_default/native_hq_device_generator_pr23366_10s_default.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=14.371213949670121`，pixel generate time `157.77s`。
+- 复跑所谓历史高点 `b479fc09f`: `/tmp/ltx23_b479_recheck_pr23366_10s_cli_default/native_b479_recheck_pr23366_10s_default.mp4`，同一 official reference 下 `global_psnr=14.50700982030883`，pixel generate time `99.83s`。
+- 结论: 旧 collab log 中 `20.71 dB` 在当前 clean official reference、同一 prompt/settings、同一比较脚本下不可复现；后续不再围绕 injection 或旧高点追溯，只做 native source alignment + plain `sglang generate` 端到端复核。
+- 当前 10s 对齐百分比: `14.37 / 35 = 41.1%`；b479 复跑也只有 `14.51 / 35 = 41.4%`。
+
+## 05:32 10s 参数对齐和 text length 修正
+
+- git: `2ad0bdb26`。
+- 发现参数不一致: 当前 official reference 脚本 `/tmp/run_official_10s_v2.py` 固定 `NUM_INFERENCE_STEPS=30`，而此前 native CLI 未显式传步数，HQ sampling default 走 15。用同一 current commit 加 `--num-inference-steps 30` 复跑，`global_psnr=16.931129448461213`，相对 15-step `14.3712` 提升 `+2.56 dB`；输出 `/tmp/ltx23_current_30steps_pr23366_10s_cli/native_current_30steps_pr23366_10s.mp4`，pixel time `165.53s`。
+- 发现真实语义 bug: official `/tmp/LTX-2-official` loader 使用 `LTXVGemmaTokenizer(tokenizer_root, 1024)`；SpongeBob prompt token 数为 `467`，native HQ 的 `text_len=256` 会截断正向 prompt。已准备把 HQ `Gemma3ArchConfig(text_len=1024)` 恢复为 official 语义。
+- 当前 30-step 对齐百分比: `16.93 / 35 = 48.4%`。下一步复跑 1024 text length 后再更新指标。

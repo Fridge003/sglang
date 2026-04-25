@@ -703,7 +703,7 @@ class LTX23HQPipelineConfig(LTX2PipelineConfig):
     generator_device: str | None = None
     text_encoder_configs: tuple[EncoderConfig, ...] = field(
         default_factory=lambda: (
-            Gemma3Config(arch_config=Gemma3ArchConfig(text_len=256)),
+            Gemma3Config(arch_config=Gemma3ArchConfig(text_len=1024)),
         )
     )
 
