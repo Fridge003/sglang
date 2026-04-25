@@ -361,11 +361,13 @@ class LTX2DenoisingStage(DenoisingStage):
             alpha_ratio = torch.ones_like(sigma_next)
             sigma_down = sigma_next
             sigma_up = torch.zeros_like(sigma_next)
-        return (
-            torch.nan_to_num(alpha_ratio),
-            torch.nan_to_num(sigma_down),
-            torch.nan_to_num(sigma_up),
+        sigma_up = torch.nan_to_num(sigma_up, 0.0)
+        sigma_down_nan_mask = torch.isnan(sigma_down)
+        sigma_down[sigma_down_nan_mask] = sigma_next[sigma_down_nan_mask].to(
+            sigma_down.dtype
         )
+        alpha_ratio = torch.nan_to_num(alpha_ratio, 1.0)
+        return alpha_ratio, sigma_down, sigma_up
 
     @classmethod
     def _ltx2_res2s_sde_step(
