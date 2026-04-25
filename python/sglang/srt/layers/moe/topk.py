@@ -918,9 +918,8 @@ def biased_grouped_topk_gpu(
             _is_cuda
             and num_expert_group == 1
             and topk_group == 1
-            and num_fused_shared_experts == 0
             and num_experts <= 512
-            and topk <= 8
+            and topk_routed <= 8
         ):
             from sglang.jit_kernel.grouped_topk import grouped_topk as jit_grouped_topk
 
@@ -929,15 +928,28 @@ def biased_grouped_topk_gpu(
             )
             if not apply_routed_scaling_factor_on_output:
                 scaling = 1.0
-            return jit_grouped_topk(
+            topk_weights, topk_ids = jit_grouped_topk(
                 gating_output.to(dtype=torch.float32),
                 correction_bias.to(dtype=torch.float32),
                 num_expert_group,
                 topk_group,
-                topk,
+                topk_routed,
                 renormalize,
                 scaling,
             )
+            if num_fused_shared_experts > 0:
+                topk_ids = F.pad(
+                    topk_ids,
+                    (0, num_fused_shared_experts),
+                    value=num_experts,
+                )
+                topk_weights = F.pad(topk_weights, (0, num_fused_shared_experts))
+                if routed_scaling_factor is not None:
+                    topk_weights[:, topk_routed:] = (
+                        topk_weights[:, :topk_routed].sum(dim=-1, keepdim=True)
+                        / routed_scaling_factor
+                    )
+            return topk_weights, topk_ids
         else:
             return biased_grouped_topk_impl(
                 hidden_states,
