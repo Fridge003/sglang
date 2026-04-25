@@ -42,13 +42,19 @@ def qwen_image_preprocess_text(prompt):
     return txt
 
 
-def qwen_image_postprocess_text(outputs, _text_inputs, drop_idx=34):
+def qwen_image_postprocess_text(
+    outputs, _text_inputs, drop_idx=34, return_attention_mask=False
+):
     # squeeze the batch dim
     hidden_states = outputs.hidden_states[-1]
     split_hidden_states = _extract_masked_hidden(
         hidden_states, _text_inputs.attention_mask
     )
     split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+    attn_mask_list = [
+        torch.ones(e.size(0), dtype=torch.long, device=e.device)
+        for e in split_hidden_states
+    ]
     max_seq_len = max([e.size(0) for e in split_hidden_states])
     prompt_embeds = torch.stack(
         [
@@ -56,6 +62,16 @@ def qwen_image_postprocess_text(outputs, _text_inputs, drop_idx=34):
             for u in split_hidden_states
         ]
     )
+    if return_attention_mask:
+        encoder_attention_mask = torch.stack(
+            [
+                torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
+                for u in attn_mask_list
+            ]
+        )
+        if encoder_attention_mask.all():
+            return prompt_embeds, None
+        return prompt_embeds, encoder_attention_mask
     return prompt_embeds
 
 
@@ -587,6 +603,16 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
     resolution: int = 640
     vae_precision: str = "bf16"
 
+    def postprocess_cfg_noise(
+        self,
+        batch,
+        noise_pred: torch.Tensor,
+        noise_pred_cond: torch.Tensor,
+    ) -> torch.Tensor:
+        if not batch.cfg_normalize:
+            return noise_pred
+        return super().postprocess_cfg_noise(batch, noise_pred, noise_pred_cond)
+
     def _prepare_edit_cond_kwargs(
         self, batch, prompt_embeds, rotary_emb, device, dtype
     ):
@@ -598,7 +624,7 @@ class QwenImageLayeredPipelineConfig(QwenImageEditPipelineConfig):
         vae_scale_factor = self.get_vae_scale_factor()
 
         img_shapes = batch.img_shapes
-        txt_seq_lens = batch.txt_seq_lens
+        txt_seq_lens = [prompt_embeds[0].shape[1]]
 
         freqs_cis = QwenImageEditPlusPipelineConfig.get_freqs_cis(
             img_shapes, txt_seq_lens, rotary_emb, device, dtype

@@ -18,16 +18,24 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
+import types
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+import imageio
 import numpy as np
 import torch
 from diffusers import DiffusionPipeline
+from huggingface_hub import snapshot_download
 from PIL import Image
 
 from sglang.multimodal_gen.configs.sample.sampling_params import DataType
+from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+    DEFAULT_FPS,
+    DEFAULT_VIDEO_SECONDS,
+)
 from sglang.multimodal_gen.runtime.entrypoints.utils import (
     post_process_sample,
     prepare_request,
@@ -48,6 +56,7 @@ from sglang.multimodal_gen.test.server.testcase_configs import (
 )
 from sglang.multimodal_gen.test.test_utils import (
     _consistency_gt_filenames,
+    extract_key_frames_from_video,
     is_image_url,
     output_format_to_ext,
 )
@@ -78,6 +87,13 @@ UNSUPPORTED_OFFICIAL_CASES = {
     ),
 }
 
+WAN_OFFICIAL_CASES = {
+    "wan2_1_t2v_1.3b": {
+        "repo_id": "Wan-AI/Wan2.1-T2V-1.3B",
+        "config_key": "t2v-1.3B",
+    },
+}
+
 SAMPLING_KWARGS = (
     "prompt",
     "negative_prompt",
@@ -90,6 +106,8 @@ SAMPLING_KWARGS = (
     "width",
     "num_frames",
     "fps",
+    "cfg_normalize",
+    "use_en_prompt",
 )
 
 
@@ -106,6 +124,10 @@ def _git_sha() -> str:
         ).strip()
     except Exception:
         return "unknown"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[5]
 
 
 def _jsonable(value: Any) -> Any:
@@ -199,6 +221,7 @@ def _sampling_user_kwargs(
         kwargs["width"] = width
     if height is not None:
         kwargs["height"] = height
+    kwargs.setdefault("seed", 42)
     return kwargs
 
 
@@ -208,6 +231,11 @@ def _final_request_for_case(case: DiffusionTestCase):
         "SGLANG_TEST_OUTPUT_SIZE", case.sampling_params.output_size
     )
     user_kwargs = _sampling_user_kwargs(case.sampling_params, output_size)
+    if case.server_args.modality == "video":
+        seconds = case.sampling_params.seconds or DEFAULT_VIDEO_SECONDS
+        fps = user_kwargs.get("fps") or DEFAULT_FPS
+        user_kwargs.setdefault("fps", fps)
+        user_kwargs.setdefault("num_frames", int(fps) * int(seconds))
 
     from sglang.multimodal_gen.configs.sample.sampling_params import SamplingParams
 
@@ -240,6 +268,9 @@ def _load_pipe(
     device_map: str,
     cpu_offload: bool,
 ) -> DiffusionPipeline:
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_cudnn_sdp(True)
+
     load_kwargs: dict[str, Any] = {
         "torch_dtype": dtype,
         "trust_remote_code": True,
@@ -473,6 +504,13 @@ def _build_dry_run_kwargs(case: DiffusionTestCase, req: Any) -> dict[str, Any]:
         if key.startswith("enable_") or key.endswith("_scale") or key.endswith("_exp"):
             continue
         kwargs.setdefault(key, value)
+    if (
+        case.server_args.model_path.lower().startswith("qwen/")
+        and "guidance_scale" in kwargs
+        and "true_cfg_scale" not in kwargs
+    ):
+        kwargs["true_cfg_scale"] = kwargs["guidance_scale"]
+        kwargs["guidance_scale"] = None
     kwargs["output_type"] = "pil"
     return kwargs
 
@@ -493,7 +531,9 @@ def _to_uint8_rgb(value: Any) -> np.ndarray:
     if arr.shape[-1] == 4:
         arr = arr[..., :3]
     if arr.dtype != np.uint8:
-        if arr.max(initial=0) <= 1.0:
+        if arr.min(initial=0) < 0 and arr.max(initial=0) <= 1.0:
+            arr = (arr + 1.0) / 2.0 * 255.0
+        elif arr.max(initial=0) <= 1.0:
             arr = arr * 255.0
         arr = np.clip(arr, 0, 255).astype(np.uint8)
     return arr[..., :3]
@@ -514,6 +554,8 @@ def _flatten_output(output: Any) -> list[np.ndarray]:
                 tensor = tensor.permute(1, 2, 3, 0)
         elif tensor.ndim == 4 and tensor.shape[0] == 1:
             tensor = tensor[0]
+        elif tensor.ndim == 4 and tensor.shape[0] in (3, 4):
+            tensor = tensor.permute(1, 2, 3, 0)
         if tensor.ndim == 4:
             return [_to_uint8_rgb(frame) for frame in tensor]
         return [_to_uint8_rgb(tensor)]
@@ -554,17 +596,40 @@ def _postprocess_frames(
     )
 
 
+def _extract_ci_encoded_video_key_frames(
+    frames: list[np.ndarray], req: Any
+) -> list[np.ndarray]:
+    output_compression = getattr(req, "output_compression", None)
+    quality = output_compression / 10 if output_compression is not None else 5
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        imageio.mimsave(
+            tmp_path,
+            frames,
+            fps=getattr(req, "fps", 24) or 24,
+            format=DataType.VIDEO.get_default_extension(),
+            codec="libx264",
+            quality=quality,
+        )
+        return extract_key_frames_from_video(Path(tmp_path).read_bytes())
+    finally:
+        os.unlink(tmp_path)
+
+
 def _save_gt_frames(
     frames: list[np.ndarray],
     case: DiffusionTestCase,
     out_dir: Path,
     *,
     is_video: bool,
+    req: Any,
 ) -> list[str]:
     num_gpus = case.server_args.num_gpus
     saved: list[str] = []
     if is_video:
-        selected = [frames[0], frames[len(frames) // 2], frames[-1]]
+        selected = _extract_ci_encoded_video_key_frames(frames, req)
         filenames = _consistency_gt_filenames(case.id, num_gpus, is_video=True)
         for frame, filename in zip(selected, filenames):
             Image.fromarray(frame).save(out_dir / filename)
@@ -575,7 +640,7 @@ def _save_gt_frames(
     filenames = _consistency_gt_filenames(
         case.id, num_gpus, is_video=False, output_format=ext
     )
-    save_kwargs = {"quality": 95} if ext in ("jpg", "jpeg") else {}
+    save_kwargs = {"quality": 75} if ext in ("jpg", "jpeg") else {}
     Image.fromarray(frames[0]).save(out_dir / filenames[0], **save_kwargs)
     saved.append(filenames[0])
     return saved
@@ -602,6 +667,23 @@ def _run_case(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     req, sampling_params, server_args, output_size = _final_request_for_case(case)
+    if case.id in WAN_OFFICIAL_CASES:
+        if args.dry_run:
+            case_info = WAN_OFFICIAL_CASES[case.id]
+            return {
+                "case_id": case.id,
+                "model_path": case.server_args.model_path,
+                "official_repo_id": case_info["repo_id"],
+                "pipeline_class": "WanT2V",
+                "output_size": output_size,
+                "device_map": "wan-official",
+                "call_kwargs": _jsonable(_build_wan_official_dry_run_kwargs(req, server_args)),
+                "ignored_kwargs": [],
+                "lora": {},
+                "dry_run": True,
+            }
+        return _run_wan_official_case(case, req, server_args, output_size, out_dir, args)
+
     is_video = case.server_args.modality == "video"
     device_map = args.device_map
     if device_map == "case":
@@ -643,7 +725,7 @@ def _run_case(
         output = pipe(**call_kwargs)
     frames = _flatten_output(output)
     frames = _postprocess_frames(frames, case, req, is_video)
-    saved_files = _save_gt_frames(frames, case, out_dir, is_video=is_video)
+    saved_files = _save_gt_frames(frames, case, out_dir, is_video=is_video, req=req)
 
     return {
         "case_id": case.id,
@@ -659,6 +741,209 @@ def _run_case(
         },
         "ignored_kwargs": ignored_kwargs,
         "lora": lora_info,
+        "dry_run": False,
+    }
+
+
+def _resolve_wan_official_repo_dir(args: argparse.Namespace) -> Path:
+    repo_dir = (
+        args.wan_official_repo_dir
+        or os.environ.get("WAN_OFFICIAL_REPO_DIR")
+        or str(_repo_root() / "3rdparty" / "Wan2.1")
+    )
+    path = Path(repo_dir).expanduser().resolve()
+    if not (path / "wan" / "text2video.py").exists():
+        raise UnsupportedCaseError(
+            "Wan official repo is required for Wan official GT. "
+            f"Expected {path}/wan/text2video.py; pass --wan-official-repo-dir."
+        )
+    return path
+
+
+def _download_wan_official_checkpoint(case_info: dict[str, str]) -> str:
+    return snapshot_download(
+        case_info["repo_id"],
+        allow_patterns=[
+            "*.json",
+            "*.safetensors",
+            "*.pth",
+            "google/umt5-xxl/*",
+        ],
+    )
+
+
+def _install_wan_official_compat_modules() -> None:
+    try:
+        import flash_attn
+    except ModuleNotFoundError:
+        flash_attn = None
+
+    if flash_attn is not None and not hasattr(flash_attn, "flash_attn_varlen_func"):
+
+        def _torch_flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            max_seqlen_q,
+            max_seqlen_k,
+            dropout_p=0.0,
+            softmax_scale=None,
+            causal=False,
+            window_size=(-1, -1),
+            deterministic=False,
+        ):
+            if window_size != (-1, -1):
+                raise NotImplementedError("Wan official GT fallback only supports full attention")
+
+            outputs = []
+            batch_size = cu_seqlens_q.numel() - 1
+            for i in range(batch_size):
+                q_start = int(cu_seqlens_q[i].item())
+                q_end = int(cu_seqlens_q[i + 1].item())
+                k_start = int(cu_seqlens_k[i].item())
+                k_end = int(cu_seqlens_k[i + 1].item())
+
+                qi = q[q_start:q_end].transpose(0, 1).unsqueeze(0)
+                ki = k[k_start:k_end].transpose(0, 1).unsqueeze(0)
+                vi = v[k_start:k_end].transpose(0, 1).unsqueeze(0)
+                if qi.shape[1] != ki.shape[1]:
+                    repeat = qi.shape[1] // ki.shape[1]
+                    ki = ki.repeat_interleave(repeat, dim=1)
+                    vi = vi.repeat_interleave(repeat, dim=1)
+
+                out = torch.nn.functional.scaled_dot_product_attention(
+                    qi,
+                    ki,
+                    vi,
+                    dropout_p=dropout_p,
+                    is_causal=causal,
+                    scale=softmax_scale,
+                )
+                outputs.append(out.squeeze(0).transpose(0, 1))
+            return torch.cat(outputs, dim=0)
+
+        flash_attn.flash_attn_varlen_func = _torch_flash_attn_varlen_func
+
+    if "easydict" not in sys.modules:
+        module = types.ModuleType("easydict")
+
+        class EasyDict(dict):
+            def __getattr__(self, name):
+                try:
+                    return self[name]
+                except KeyError as exc:
+                    raise AttributeError(name) from exc
+
+            def __setattr__(self, name, value):
+                self[name] = value
+
+            def __delattr__(self, name):
+                try:
+                    del self[name]
+                except KeyError as exc:
+                    raise AttributeError(name) from exc
+
+        module.EasyDict = EasyDict
+        sys.modules["easydict"] = module
+    if "ftfy" not in sys.modules:
+        module = types.ModuleType("ftfy")
+        module.fix_text = lambda text: text
+        sys.modules["ftfy"] = module
+
+
+def _build_wan_official_dry_run_kwargs(req: Any, server_args: ServerArgs) -> dict[str, Any]:
+    return {
+        "prompt": req.prompt,
+        "size": [req.width, req.height],
+        "frame_num": req.num_frames,
+        "shift": server_args.pipeline_config.flow_shift,
+        "sample_solver": "unipc",
+        "sampling_steps": req.num_inference_steps,
+        "guide_scale": req.guidance_scale,
+        "n_prompt": req.negative_prompt,
+        "seed": req.seed,
+        "offload_model": True,
+    }
+
+
+def _run_wan_official_case(
+    case: DiffusionTestCase,
+    req: Any,
+    server_args: ServerArgs,
+    output_size: str,
+    out_dir: Path,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    case_info = WAN_OFFICIAL_CASES[case.id]
+    repo_dir = _resolve_wan_official_repo_dir(args)
+    _install_wan_official_compat_modules()
+    sys.path.insert(0, str(repo_dir))
+    try:
+        from wan.configs import WAN_CONFIGS
+        from wan.text2video import WanT2V
+    finally:
+        sys.path.pop(0)
+
+    checkpoint_dir = _download_wan_official_checkpoint(case_info)
+    cfg = WAN_CONFIGS[case_info["config_key"]]
+    seed = int(getattr(req, "seed", 42))
+    width = int(req.width)
+    height = int(req.height)
+    num_frames = int(req.num_frames)
+    num_inference_steps = int(req.num_inference_steps)
+    guidance_scale = float(req.guidance_scale)
+    negative_prompt = req.negative_prompt or cfg.sample_neg_prompt
+    shift = float(server_args.pipeline_config.flow_shift)
+
+    pipe = WanT2V(
+        config=cfg,
+        checkpoint_dir=checkpoint_dir,
+        device_id=0,
+        rank=0,
+        t5_cpu=False,
+    )
+    output = pipe.generate(
+        req.prompt,
+        size=(width, height),
+        frame_num=num_frames,
+        shift=shift,
+        sample_solver="unipc",
+        sampling_steps=num_inference_steps,
+        guide_scale=guidance_scale,
+        n_prompt=negative_prompt,
+        seed=seed,
+        offload_model=True,
+    )
+    frames = _flatten_output(output)
+    frames = _postprocess_frames(frames, case, req, is_video=True)
+    saved_files = _save_gt_frames(frames, case, out_dir, is_video=True, req=req)
+    return {
+        "case_id": case.id,
+        "model_path": case.server_args.model_path,
+        "official_repo_id": case_info["repo_id"],
+        "official_repo_dir": str(repo_dir),
+        "checkpoint_dir": checkpoint_dir,
+        "pipeline_class": "WanT2V",
+        "output_size": output_size,
+        "device_map": "wan-official",
+        "saved_files": saved_files,
+        "num_frames_after_postprocess": len(frames),
+        "call_kwargs": {
+            "prompt": req.prompt,
+            "size": [width, height],
+            "frame_num": num_frames,
+            "shift": shift,
+            "sample_solver": "unipc",
+            "sampling_steps": num_inference_steps,
+            "guide_scale": guidance_scale,
+            "n_prompt": negative_prompt,
+            "seed": seed,
+            "offload_model": True,
+        },
+        "ignored_kwargs": [],
+        "lora": {},
         "dry_run": False,
     }
 
@@ -697,6 +982,10 @@ def main() -> None:
     )
     parser.add_argument("--generator-device", default="auto")
     parser.add_argument("--cpu-offload", action="store_true")
+    parser.add_argument(
+        "--wan-official-repo-dir",
+        help="Path to the official Wan2.1 repository checkout for Wan official GT.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--list-cases", action="store_true")
     parser.add_argument("--continue-on-error", action="store_true")
