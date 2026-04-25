@@ -20,6 +20,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs, get_global_server_args
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    StageComponentDemand,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
 
@@ -103,6 +106,10 @@ class PipelineStage(ABC):
         Offload the model for the stage.
         """
         pass
+
+    def component_demand(self) -> StageComponentDemand:
+        """Declare component residency requirements for this stage."""
+        return StageComponentDemand()
 
     # Default role affinity: ENCODER. Override in subclasses for DENOISING/DECODER.
     @property

@@ -30,8 +30,10 @@ class SyncExecutor(PipelineExecutor):
         """
         Execute all pipeline stages sequentially.
         """
-        for stage in stages:
+        for stage_index, stage in enumerate(stages):
+            self.before_stage(stage_index, stage, stages, batch)
             batch = stage(batch, server_args)
+            self.after_stage(stage_index, stage, stages, batch)
             profiler = SGLDiffusionProfiler.get_instance()
             if profiler:
                 profiler.step_stage()

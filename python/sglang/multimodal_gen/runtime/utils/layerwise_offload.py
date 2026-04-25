@@ -11,6 +11,13 @@ from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
+def _resolve_module_attr(module: torch.nn.Module, attr_path: str) -> torch.nn.Module:
+    target: torch.nn.Module = module
+    for attr in attr_path.split("."):
+        target = getattr(target, attr)
+    return target
+
+
 # Adapted from skywork AI Infra diffusion optimize
 class LayerwiseOffloadManager:
     """A lightweight layerwise CPU offload manager.
@@ -462,7 +469,7 @@ class LayerwiseOffloadManager:
         if not self.enabled:
             return
 
-        layers = getattr(self.model, self.layers_attr_str)
+        layers = _resolve_module_attr(self.model, self.layers_attr_str)
 
         def make_pre_hook(i):
             def hook(module, input):

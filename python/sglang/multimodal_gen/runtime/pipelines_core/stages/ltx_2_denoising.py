@@ -21,6 +21,9 @@ from sglang.multimodal_gen.runtime.server_args import (
     ServerArgs,
     is_ltx2_two_stage_pipeline_name,
 )
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    StageComponentDemand,
+)
 
 
 @dataclass(slots=True)
@@ -98,6 +101,16 @@ class LTX2DenoisingStage(DenoisingStage):
         super().__init__(
             transformer=transformer, scheduler=scheduler, vae=vae, **kwargs
         )
+
+    def component_demand(self) -> StageComponentDemand:
+        pipeline = self.pipeline() if self.pipeline else None
+        if pipeline is not None and hasattr(pipeline, "_device_manager"):
+            return StageComponentDemand(
+                required=("transformer",),
+                preferred_after_request=("ltx2_two_stage",),
+                peak_memory_class="high",
+            )
+        return super().component_demand()
 
     @staticmethod
     def _get_video_latent_num_frames_for_model(

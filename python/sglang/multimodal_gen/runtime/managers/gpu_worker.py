@@ -45,6 +45,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.schedule_batch import OutputBa
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import PortArgs, ServerArgs
 from sglang.multimodal_gen.runtime.utils.common import set_cuda_arch, set_musa_arch
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    ComponentResidencyManager,
+)
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import (
     OffloadableDiTMixin,
     iter_materialized_weights,
@@ -154,6 +157,13 @@ class GPUWorker:
                         logger.info(
                             f"Module {type(dit).__name__} does not support layerwise offload. Skipping."
                         )
+
+        component_residency_manager = ComponentResidencyManager(
+            self.pipeline, self.server_args
+        )
+        component_residency_manager.initialize()
+        self.pipeline.component_residency_manager = component_residency_manager
+        self.pipeline.executor.component_residency_manager = component_residency_manager
 
         logger.info(
             f"Worker {self.rank}: Initialized device, model, and distributed environment."

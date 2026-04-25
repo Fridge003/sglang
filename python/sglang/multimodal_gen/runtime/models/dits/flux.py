@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.models.attention import AttentionModuleMixin
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import (
@@ -28,6 +29,9 @@ from diffusers.models.normalization import (
 from torch.nn import LayerNorm as LayerNorm
 
 from sglang.multimodal_gen.configs.models.dits.flux import FluxConfig
+from sglang.multimodal_gen.runtime.distributed.parallel_state import (
+    get_sequence_parallel_world_size,
+)
 from sglang.multimodal_gen.runtime.layers.attention import USPAttention
 from sglang.multimodal_gen.runtime.layers.layernorm import (
     RMSNorm,
@@ -207,6 +211,36 @@ def _get_qkv_projections(
     return query, key, value, encoder_query, encoder_key, encoder_value
 
 
+def _diffusers_rms_norm(norm: RMSNorm, hidden_states: torch.Tensor) -> torch.Tensor:
+    """Match diffusers.models.normalization.RMSNorm for FLUX QK norm."""
+    variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+    hidden_states = hidden_states * torch.rsqrt(variance + norm.variance_epsilon)
+
+    weight = norm.weight
+    if weight is not None:
+        if weight.dtype in (torch.float16, torch.bfloat16):
+            hidden_states = hidden_states.to(weight.dtype)
+        hidden_states = hidden_states * weight
+    return hidden_states
+
+
+def _apply_flux_rotary_emb_diffusers(
+    x: torch.Tensor, freqs_cis: tuple[torch.Tensor, torch.Tensor]
+) -> torch.Tensor:
+    """Apply FLUX RoPE with Diffusers' real/interleaved tensor layout."""
+    cos, sin = freqs_cis
+    if cos.shape[-1] * 2 == x.shape[-1]:
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+
+    cos = cos[None, :, None, :].to(device=x.device)
+    sin = sin[None, :, None, :].to(device=x.device)
+
+    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)
+    x_rotated = torch.stack((-x_imag, x_real), dim=-1).flatten(3)
+    return (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
+
+
 class FluxAttention(torch.nn.Module, AttentionModuleMixin):
     def __init__(
         self,
@@ -355,6 +389,18 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
         freqs_cis=None,
         num_replicated_prefix: int = 0,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if (
+            freqs_cis is not None
+            and not self.use_fused_qkv
+            and not self.use_fused_added_qkv
+            and get_sequence_parallel_world_size() == 1
+        ):
+            return self._forward_diffusers_compatible(
+                x=x,
+                encoder_hidden_states=encoder_hidden_states,
+                freqs_cis=freqs_cis,
+            )
+
         query, key, value, encoder_query, encoder_key, encoder_value = (
             _get_qkv_projections(self, x, encoder_hidden_states)
         )
@@ -444,6 +490,74 @@ class FluxAttention(torch.nn.Module, AttentionModuleMixin):
                 if len(self.to_out) == 2:
                     x = self.to_out[1](x)
             return x
+
+    def _forward_diffusers_compatible(
+        self,
+        x: torch.Tensor,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        freqs_cis=None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        query, key, value, encoder_query, encoder_key, encoder_value = (
+            _get_qkv_projections(self, x, encoder_hidden_states)
+        )
+
+        query = query.unflatten(-1, (self.heads, -1))
+        key = key.unflatten(-1, (self.heads, -1))
+        value = value.unflatten(-1, (self.heads, -1))
+
+        query = _diffusers_rms_norm(self.norm_q, query)
+        key = _diffusers_rms_norm(self.norm_k, key)
+
+        if self.added_kv_proj_dim is not None:
+            encoder_query = encoder_query.unflatten(-1, (self.heads, -1))
+            encoder_key = encoder_key.unflatten(-1, (self.heads, -1))
+            encoder_value = encoder_value.unflatten(-1, (self.heads, -1))
+
+            encoder_query = _diffusers_rms_norm(self.norm_added_q, encoder_query)
+            encoder_key = _diffusers_rms_norm(self.norm_added_k, encoder_key)
+
+            query = torch.cat([encoder_query, query], dim=1)
+            key = torch.cat([encoder_key, key], dim=1)
+            value = torch.cat([encoder_value, value], dim=1)
+
+        query = _apply_flux_rotary_emb_diffusers(query, freqs_cis)
+        key = _apply_flux_rotary_emb_diffusers(key, freqs_cis)
+
+        x = F.scaled_dot_product_attention(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            value.transpose(1, 2),
+            attn_mask=None,
+            dropout_p=0.0,
+            is_causal=False,
+            scale=self.attn.softmax_scale,
+        ).transpose(1, 2)
+        x = x.flatten(2, 3)
+        x = x.to(query.dtype)
+
+        if encoder_hidden_states is not None:
+            encoder_hidden_states, x = x.split_with_sizes(
+                [
+                    encoder_hidden_states.shape[1],
+                    x.shape[1] - encoder_hidden_states.shape[1],
+                ],
+                dim=1,
+            )
+            if not self.pre_only:
+                x, _ = self.to_out[0](x.contiguous())
+                if len(self.to_out) == 2:
+                    x = self.to_out[1](x)
+            encoder_hidden_states, _ = self.to_add_out(
+                encoder_hidden_states.contiguous()
+            )
+
+            return x, encoder_hidden_states
+
+        if not self.pre_only:
+            x, _ = self.to_out[0](x.contiguous())
+            if len(self.to_out) == 2:
+                x = self.to_out[1](x)
+        return x
 
 
 class FluxSingleTransformerBlock(nn.Module):

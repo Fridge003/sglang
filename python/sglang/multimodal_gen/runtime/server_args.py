@@ -74,6 +74,12 @@ logger = init_logger(__name__)
 WAN_LAYERWISE_OFFLOAD_AUTO_DISABLE_MEM_GB = 130
 LTX2_TWO_STAGE_DEVICE_MODES = ("original", "snapshot", "resident")
 LTX2_TWO_STAGE_PIPELINE_NAMES = ("LTX2TwoStagePipeline",)
+COMPONENT_RESIDENCY_POLICIES = (
+    "legacy",
+    "adaptive",
+    "resident-biased",
+    "memory-biased",
+)
 # H200-class GPUs (>=130 GiB total) can usually keep both LTX2 DiTs resident.
 LTX2_RESIDENT_AUTO_ENABLE_MEM_GB = 130
 
@@ -194,6 +200,8 @@ class ServerArgs(DisaggArgsMixin):
     use_fsdp_inference: bool = False
     pin_cpu_memory: bool = True
     ltx2_two_stage_device_mode: str | None = None
+    component_residency_policy: str = "adaptive"
+    component_residency_margin_gb: float = 2.0
 
     # ComfyUI integration
     comfyui_mode: bool = False
@@ -995,6 +1003,25 @@ class ServerArgs(DisaggArgsMixin):
             ),
         )
         parser.add_argument(
+            "--component-residency-policy",
+            type=str,
+            choices=COMPONENT_RESIDENCY_POLICIES,
+            default=ServerArgs.component_residency_policy,
+            help=(
+                "Unified component residency policy. "
+                "'legacy' preserves pre-manager behavior, "
+                "'adaptive' uses stage-aware async prefetch with a memory margin, "
+                "'resident-biased' keeps more component windows resident, "
+                "'memory-biased' only keeps the lowest-risk layerwise windows."
+            ),
+        )
+        parser.add_argument(
+            "--component-residency-margin-gb",
+            type=float,
+            default=ServerArgs.component_residency_margin_gb,
+            help="Free GPU memory margin reserved by the component residency manager.",
+        )
+        parser.add_argument(
             "--disable-autocast",
             action=StoreBoolean,
             help="Disable autocast for denoising loop and vae decoding in pipeline sampling",
@@ -1326,6 +1353,14 @@ class ServerArgs(DisaggArgsMixin):
         self.pipeline_config.check_pipeline_config()
 
     def _validate_offload(self):
+        if self.component_residency_policy not in COMPONENT_RESIDENCY_POLICIES:
+            raise ValueError(
+                f"Invalid component_residency_policy={self.component_residency_policy!r}. "
+                f"Expected one of {COMPONENT_RESIDENCY_POLICIES}."
+            )
+        if self.component_residency_margin_gb < 0:
+            raise ValueError("component_residency_margin_gb must be non-negative")
+
         # validate dit_offload_prefetch_size
         if self.dit_offload_prefetch_size > 1 and (
             isinstance(self.dit_offload_prefetch_size, float)

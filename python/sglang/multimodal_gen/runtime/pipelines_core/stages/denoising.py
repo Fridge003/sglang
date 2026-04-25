@@ -87,6 +87,10 @@ from sglang.multimodal_gen.runtime.post_training.rollout_denoising_mixin import 
     RolloutDenoisingMixin,
 )
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    ComponentResidencyPolicy,
+    StageComponentDemand,
+)
 from sglang.multimodal_gen.runtime.utils.layerwise_offload import OffloadableDiTMixin
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.runtime.utils.perf_logger import StageProfiler
@@ -193,6 +197,16 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self._cache_dit_enabled = False
         self._cached_num_steps = None
         self._is_warmed_up = False
+
+    def component_demand(self) -> StageComponentDemand:
+        components = ["transformer"]
+        if self.transformer_2 is not None:
+            components.append("transformer_2")
+        return StageComponentDemand(
+            required=tuple(components),
+            preferred_after_request=tuple(components),
+            peak_memory_class="high",
+        )
 
     def _maybe_enable_torch_compile(self, module: object) -> None:
         """
@@ -617,6 +631,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             {
                 "encoder_hidden_states_2": batch.clip_embedding_pos,
                 "encoder_attention_mask": batch.prompt_attention_mask,
+                "encoder_hidden_states_mask": batch.prompt_attention_mask,
             }
             | server_args.pipeline_config.prepare_pos_cond_kwargs(
                 batch,
@@ -637,6 +652,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
                 {
                     "encoder_hidden_states_2": batch.clip_embedding_neg,
                     "encoder_attention_mask": batch.negative_attention_mask,
+                    "encoder_hidden_states_mask": batch.negative_attention_mask,
                 }
                 | server_args.pipeline_config.prepare_neg_cond_kwargs(
                     batch,
@@ -923,10 +939,17 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         # reset offload managers with prefetching first layer for next forward
         for dit in dits:
             if isinstance(dit, OffloadableDiTMixin):
-                # release all DiT weights to avoid peak VRAM usage, which may increasing the latency for next req
-                # TODO: should be make this an option?
-                for manager in dit.layerwise_offload_managers:
-                    manager.release_all()
+                if (
+                    server_args.component_residency_policy
+                    == ComponentResidencyPolicy.RESIDENT_BIASED.value
+                ):
+                    dit.prepare_for_next_req()
+                else:
+                    # Release all DiT windows before decode; the component
+                    # residency manager can prefetch the first window again
+                    # after peak VRAM drops at request end.
+                    for manager in dit.layerwise_offload_managers:
+                        manager.release_all()
 
     def _preprocess_sp_latents(self, batch: Req, server_args: ServerArgs):
         """Shard latents for Sequence Parallelism if applicable."""

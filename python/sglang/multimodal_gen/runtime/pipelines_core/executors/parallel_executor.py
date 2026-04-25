@@ -68,13 +68,15 @@ class ParallelExecutor(PipelineExecutor):
         cfg_group = get_cfg_group()
 
         # TODO: decide when to gather on main when CFG_PARALLEL -> MAIN_RANK_ONLY
-        for stage in stages:
+        for stage_index, stage in enumerate(stages):
             paradigm = stage.parallelism_type
 
             if paradigm == StageParallelismType.MAIN_RANK_ONLY:
                 if rank == 0:
                     # Only main rank executes, others just wait
+                    self.before_stage(stage_index, stage, stages, batch)
                     batch = stage(batch, server_args)
+                    self.after_stage(stage_index, stage, stages, batch)
                 torch.distributed.barrier()
 
             elif paradigm == StageParallelismType.CFG_PARALLEL:
@@ -84,12 +86,16 @@ class ParallelExecutor(PipelineExecutor):
                 )
                 if rank != 0:
                     batch = broadcasted_list[0]
+                self.before_stage(stage_index, stage, stages, batch)
                 batch = stage(batch, server_args)
+                self.after_stage(stage_index, stage, stages, batch)
 
                 torch.distributed.barrier()
 
             elif paradigm == StageParallelismType.REPLICATED:
+                self.before_stage(stage_index, stage, stages, batch)
                 batch = stage(batch, server_args)
+                self.after_stage(stage_index, stage, stages, batch)
         return batch
 
     def execute(

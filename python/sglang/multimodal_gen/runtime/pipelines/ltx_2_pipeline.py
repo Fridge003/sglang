@@ -739,6 +739,12 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
 
     def release_premerged_transformers_to_cpu_snapshots(self) -> None:
         """Release inactive premerged DiTs according to the selected device mode."""
+        residency_manager = getattr(self, "component_residency_manager", None)
+        if (
+            residency_manager is not None
+            and residency_manager.release_external_component("ltx2_two_stage")
+        ):
+            return
         self._device_manager.release_premerged_transformers()
 
     def release_ltx2_phase_state(self, phase: str | None) -> None:
@@ -746,9 +752,21 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
             self.release_premerged_transformers_to_cpu_snapshots()
 
     def ensure_ltx2_phase_ready(self, phase: str | None) -> None:
+        residency_manager = getattr(self, "component_residency_manager", None)
+        if (
+            residency_manager is not None
+            and residency_manager.ensure_external_phase_ready("ltx2_two_stage", phase)
+        ):
+            return
         self._device_manager.ensure_phase_ready(phase)
 
     def prefetch_ltx2_stage2_after_stage1(self) -> None:
+        residency_manager = getattr(self, "component_residency_manager", None)
+        if (
+            residency_manager is not None
+            and residency_manager.prefetch_external_phase("ltx2_two_stage", "stage2")
+        ):
+            return
         self._device_manager.prefetch_stage2_after_stage1()
 
     def should_skip_ltx2_lora_switch_stage(self) -> bool:
@@ -797,9 +815,13 @@ class LTX2TwoStagePipeline(_BaseLTX2Pipeline):
         if phase == self._active_lora_phase:
             return
 
-        if self._device_manager.switch_phase(
-            phase
-        ) and self._can_short_circuit_lora_switch(phase):
+        residency_manager = getattr(self, "component_residency_manager", None)
+        switched = False
+        if residency_manager is not None:
+            switched = residency_manager.switch_external_phase("ltx2_two_stage", phase)
+        if not switched:
+            switched = self._device_manager.switch_phase(phase)
+        if switched and self._can_short_circuit_lora_switch(phase):
             self._active_lora_phase = phase
             return
 

@@ -37,6 +37,9 @@ from sglang.multimodal_gen.runtime.pipelines_core.stages.validators import (
 )
 from sglang.multimodal_gen.runtime.platforms import current_platform
 from sglang.multimodal_gen.runtime.server_args import ServerArgs
+from sglang.multimodal_gen.runtime.utils.component_residency import (
+    StageComponentDemand,
+)
 from sglang.multimodal_gen.runtime.utils.logging_utils import init_logger
 from sglang.multimodal_gen.utils import PRECISION_TO_TYPE
 
@@ -67,6 +70,18 @@ class ImageEncodingStage(PipelineStage):
         self.image_processor = image_processor
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
+
+    def component_demand(self) -> StageComponentDemand:
+        components = []
+        if self.image_encoder is not None:
+            components.append("image_encoder")
+        if self.text_encoder is not None:
+            components.append("text_encoder")
+        return StageComponentDemand(
+            required=tuple(components),
+            preferred_after_request=tuple(components),
+            peak_memory_class="encoder",
+        )
 
     def load_model(self):
         if self.server_args.image_encoder_cpu_offload:
@@ -239,6 +254,13 @@ class LTX2ImageEncodingStage(PipelineStage):
         self.vae = vae
         self._condition_image_encoder = None
         self._condition_image_encoder_dir = None
+
+    def component_demand(self) -> StageComponentDemand:
+        return StageComponentDemand(
+            required=("vae",),
+            preferred_after_request=(),
+            peak_memory_class="encode",
+        )
 
     # -- device management (mirrors ImageVAEEncodingStage) ---------------
 
@@ -546,6 +568,13 @@ class ImageVAEEncodingStage(PipelineStage):
     def __init__(self, vae: ParallelTiledVAE, **kwargs) -> None:
         super().__init__()
         self.vae: ParallelTiledVAE = vae
+
+    def component_demand(self) -> StageComponentDemand:
+        return StageComponentDemand(
+            required=("vae",),
+            preferred_after_request=(),
+            peak_memory_class="encode",
+        )
 
     def load_model(self):
         self.vae = self.vae.to(get_local_torch_device())

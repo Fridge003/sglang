@@ -63,6 +63,7 @@ class ComposedPipelineBase(ABC):
     server_args: ServerArgs | None = None
     modules: dict[str, Any] = {}
     executor: PipelineExecutor | None = None
+    component_residency_manager: Any = None
 
     # the name of the pipeline it associated with, in diffusers
     pipeline_name: str

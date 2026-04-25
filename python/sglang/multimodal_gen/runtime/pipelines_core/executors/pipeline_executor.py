@@ -19,6 +19,9 @@ from sglang.multimodal_gen.runtime.utils.profiler import SGLDiffusionProfiler
 if TYPE_CHECKING:
     # Only for type checkers; avoids runtime circular import
     from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
+    from sglang.multimodal_gen.runtime.utils.component_residency import (
+        ComponentResidencyManager,
+    )
 
 logger = init_logger(__name__)
 
@@ -45,6 +48,7 @@ class PipelineExecutor(ABC):
 
     def __init__(self, server_args):
         self.server_args = server_args
+        self.component_residency_manager: "ComponentResidencyManager | None" = None
 
     def execute_with_profiling(
         self,
@@ -53,10 +57,38 @@ class PipelineExecutor(ABC):
         server_args: ServerArgs,
     ) -> OutputBatch:
 
+        request_batch = batch
         with self.profile_execution(batch, dump_rank=0):
             batch = self.execute(stages, batch, server_args)
 
+        if self.component_residency_manager is not None:
+            self.component_residency_manager.after_request(request_batch)
+
         return batch
+
+    def before_stage(
+        self,
+        stage_index: int,
+        stage: "PipelineStage",
+        stages: List["PipelineStage"],
+        batch: Req,
+    ) -> None:
+        if self.component_residency_manager is not None:
+            self.component_residency_manager.before_stage(
+                stage_index, stage, stages, batch
+            )
+
+    def after_stage(
+        self,
+        stage_index: int,
+        stage: "PipelineStage",
+        stages: List["PipelineStage"],
+        batch: Req,
+    ) -> None:
+        if self.component_residency_manager is not None:
+            self.component_residency_manager.after_stage(
+                stage_index, stage, stages, batch
+            )
 
     @abstractmethod
     def execute(
