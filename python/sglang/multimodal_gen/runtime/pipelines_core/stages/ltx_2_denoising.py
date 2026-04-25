@@ -1107,6 +1107,17 @@ class LTX2DenoisingStage(DenoisingStage):
         finally:
             setattr(model, attr, previous)
 
+    @staticmethod
+    @contextmanager
+    def _temporary_ltx23_hq_video_rope_coord_dtype(model, enabled: bool):
+        attr = "quantize_video_rope_coords_to_hidden_dtype"
+        previous = bool(getattr(model, attr, False))
+        setattr(model, attr, enabled or previous)
+        try:
+            yield
+        finally:
+            setattr(model, attr, previous)
+
     @contextmanager
     def _ltx2_model_forward_context(
         self,
@@ -1116,10 +1127,13 @@ class LTX2DenoisingStage(DenoisingStage):
         with self._temporary_ltx23_hq_timestep_semantics(
             step.current_model, ctx.use_ltx23_hq_timestep_semantics
         ):
-            with set_forward_context(
-                current_timestep=step.step_index, attn_metadata=step.attn_metadata
+            with self._temporary_ltx23_hq_video_rope_coord_dtype(
+                step.current_model, ctx.use_ltx23_hq_timestep_semantics
             ):
-                yield
+                with set_forward_context(
+                    current_timestep=step.step_index, attn_metadata=step.attn_metadata
+                ):
+                    yield
 
     def _prepare_denoising_loop(
         self,
