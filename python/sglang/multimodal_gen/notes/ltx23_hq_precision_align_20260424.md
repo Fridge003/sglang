@@ -279,3 +279,12 @@
 - 发现参数不一致: 当前 official reference 脚本 `/tmp/run_official_10s_v2.py` 固定 `NUM_INFERENCE_STEPS=30`，而此前 native CLI 未显式传步数，HQ sampling default 走 15。用同一 current commit 加 `--num-inference-steps 30` 复跑，`global_psnr=16.931129448461213`，相对 15-step `14.3712` 提升 `+2.56 dB`；输出 `/tmp/ltx23_current_30steps_pr23366_10s_cli/native_current_30steps_pr23366_10s.mp4`，pixel time `165.53s`。
 - 发现真实语义 bug: official `/tmp/LTX-2-official` loader 使用 `LTXVGemmaTokenizer(tokenizer_root, 1024)`；SpongeBob prompt token 数为 `467`，native HQ 的 `text_len=256` 会截断正向 prompt。已准备把 HQ `Gemma3ArchConfig(text_len=1024)` 恢复为 official 语义。
 - 当前 30-step 对齐百分比: `16.93 / 35 = 48.4%`。下一步复跑 1024 text length 后再更新指标。
+
+## 09:34 真实 PYTHONPATH 复跑和 connector RoPE 负例
+
+- git: `4fcfa964e`。
+- 发现远端 `sglang generate` 如果不显式设置 `PYTHONPATH=$PWD/python:$PYTHONPATH`，会 import `/sgl-workspace/sglang` 的旧安装包，而不是 `/tmp/ltx23-hq-precision-align-run`。后续远端 CLI 复核必须带该环境变量。
+- 用真实当前分支复跑 `737318096`（HQ text_len=1024、30 steps）: `/tmp/ltx23_text1024_30steps_localpy_pr23366_10s_cli/native_text1024_30steps_localpy_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，pixel time `160.03s`，与 stale import 结果相同。结论: 1024 text length 是正确语义，但不是该 case 的主 PSNR 瓶颈。
+- 检查 materialized connector config: `rope_type=split`、`rope_double_precision=true`，和 LTX-2.3 checkpoint/donor config 一致；不是 interleaved/float32 配置错误。
+- 尝试 `397b7ea40` 将 connector RoPE/apply 改为 hidden dtype 计算以贴近表面 official 源码，plain CLI 降到 `global_psnr=15.4571684842985`，方向错误；已 revert 为 `4fcfa964e`，不保留该负向改动。
+- 当前 10s 对齐百分比仍为 `16.93 / 35 = 48.4%`。下一步继续查当前配置实际命中的 DiT/prompt cross-attn/native guided path 差异。
