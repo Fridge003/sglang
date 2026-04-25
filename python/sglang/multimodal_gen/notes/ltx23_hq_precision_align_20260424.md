@@ -288,3 +288,11 @@
 - 检查 materialized connector config: `rope_type=split`、`rope_double_precision=true`，和 LTX-2.3 checkpoint/donor config 一致；不是 interleaved/float32 配置错误。
 - 尝试 `397b7ea40` 将 connector RoPE/apply 改为 hidden dtype 计算以贴近表面 official 源码，plain CLI 降到 `global_psnr=15.4571684842985`，方向错误；已 revert 为 `4fcfa964e`，不保留该负向改动。
 - 当前 10s 对齐百分比仍为 `16.93 / 35 = 48.4%`。下一步继续查当前配置实际命中的 DiT/prompt cross-attn/native guided path 差异。
+
+## 09:58 native torch_sdpa 后端复核
+
+- git: `a032a7f22`。
+- 用户要求不要 injection；本轮只用 plain `sglang generate`，在 10s SpongeBob case 上把 native `--attention-backend` 改为 `torch_sdpa`。
+- 结果: `/tmp/ltx23_hq_sdpa_30steps_pr23366_10s_cli/native_hq_sdpa_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.198498824294433`，pixel time `107.82s`。
+- 对比默认 backend 的 `16.931129448461213`，`torch_sdpa` 低 `0.73 dB`；attention backend/kernel dispatch 可能贡献漂移，但不是“切 SDPA 即收敛”的主修复路径。
+- 当前 `torch_sdpa` 10s 对齐百分比: `16.20 / 35 = 46.3%`；默认 backend 仍是 `48.4%`。
