@@ -296,3 +296,11 @@
 - 结果: `/tmp/ltx23_hq_sdpa_30steps_pr23366_10s_cli/native_hq_sdpa_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.198498824294433`，pixel time `107.82s`。
 - 对比默认 backend 的 `16.931129448461213`，`torch_sdpa` 低 `0.73 dB`；attention backend/kernel dispatch 可能贡献漂移，但不是“切 SDPA 即收敛”的主修复路径。
 - 当前 `torch_sdpa` 10s 对齐百分比: `16.20 / 35 = 46.3%`；默认 backend 仍是 `48.4%`。
+
+## 10:37 HQ res2s SDE NaN fallback 复核
+
+- git: `8294790ff`。
+- 源码差异: official `Res2sDiffusionStep.get_sde_coeff` 对 NaN 的 fallback 是 `sigma_up -> 0`、`sigma_down -> sigma_next`、`alpha_ratio -> 1`；native 原来统一 `nan_to_num(..., nan=0)`。已按 official 语义对齐，改动局限在 LTX res2s helper。
+- plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_sde_nan_8294790_30steps_pr23366_10s_cli/native_hq_sde_nan_8294790_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `145.56s`。
+- 结论: 这是 source-level semantic alignment，但当前 SpongeBob 10s case 完全持平；SDE NaN fallback 不是主误差。下一步继续查 HQ stage1 guided pass 与 official `GuidedDenoiser + BatchSplitAdapter` 的 native 语义差异。
+- 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
