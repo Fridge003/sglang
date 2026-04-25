@@ -144,7 +144,12 @@ jobs:
             "https://x-access-token:${GH_PAT_FOR_NIGHTLY_CI_DATA}@github.com/sglang-bot/sglang-ci-data.git" ci-data
           cd ci-data
           git sparse-checkout set "${BUNDLE_PATH}"
-          git checkout -b "${TARGET_BRANCH}" origin/main
+          git fetch origin "${TARGET_BRANCH}" || true
+          if git rev-parse --verify "origin/${TARGET_BRANCH}" >/dev/null 2>&1; then
+            git checkout -B "${TARGET_BRANCH}" "origin/${TARGET_BRANCH}"
+          else
+            git checkout -b "${TARGET_BRANCH}" origin/main
+          fi
 
           git remote add source "https://github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git"
           git fetch --depth=1 source "${SOURCE_BRANCH}"
