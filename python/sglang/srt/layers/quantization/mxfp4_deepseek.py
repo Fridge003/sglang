@@ -251,46 +251,51 @@ class DeepSeekMxfp4MoEMethod:
         g1_w, g1_s, g2_w, g2_s = [], [], [], []
         if _USE_OFFICIAL_SHUFFLE:
             cache: dict = {}
+            # Within a layer, every expert shares the same shape, so the
+            # permute indices are identical across experts. Compute them
+            # once and move to device once, then reuse in the per-expert
+            # gather loop.
+            w13_u8_0 = w13[0].view(torch.uint8)
+            w13_s_u8_0 = w13_scale[0].view(torch.uint8)
+            w2_u8_0 = w2[0].view(torch.uint8)
+            w2_s_u8_0 = w2_scale[0].view(torch.uint8)
+            device = w13.device
+            perm_w13 = _maybe_get_cached_w3_w1_permute_indices(
+                cache,
+                w13_u8_0,
+                epilogue_tile_m,
+            ).to(device)
+            perm_w13_sf = _maybe_get_cached_w3_w1_permute_indices(
+                cache,
+                w13_s_u8_0,
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            ).to(device)
+            perm_w2 = get_w2_permute_indices_with_cache(
+                cache,
+                w2_u8_0,
+                epilogue_tile_m,
+            ).to(device)
+            perm_w2_sf = get_w2_permute_indices_with_cache(
+                cache,
+                w2_s_u8_0,
+                epilogue_tile_m,
+                num_elts_per_sf=16,
+            ).to(device)
+
             for i in range(num_experts):
                 w13_u8 = w13[i].view(torch.uint8)
                 w13_s_u8 = w13_scale[i].view(torch.uint8)
                 w2_u8 = w2[i].view(torch.uint8)
                 w2_s_u8 = w2_scale[i].view(torch.uint8)
 
-                perm = _maybe_get_cached_w3_w1_permute_indices(
-                    cache,
-                    w13_u8,
-                    epilogue_tile_m,
-                )
-                g1_w.append(w13_u8[perm.to(w13_u8.device)].contiguous())
-                perm_sf = _maybe_get_cached_w3_w1_permute_indices(
-                    cache,
-                    w13_s_u8,
-                    epilogue_tile_m,
-                    num_elts_per_sf=16,
-                )
+                g1_w.append(w13_u8[perm_w13].contiguous())
                 g1_s.append(
-                    block_scale_interleave(
-                        w13_s_u8[perm_sf.to(w13_s_u8.device)].contiguous()
-                    )
+                    block_scale_interleave(w13_s_u8[perm_w13_sf].contiguous())
                 )
-
-                perm = get_w2_permute_indices_with_cache(
-                    cache,
-                    w2_u8,
-                    epilogue_tile_m,
-                )
-                g2_w.append(w2_u8[perm.to(w2_u8.device)].contiguous())
-                perm_sf = get_w2_permute_indices_with_cache(
-                    cache,
-                    w2_s_u8,
-                    epilogue_tile_m,
-                    num_elts_per_sf=16,
-                )
+                g2_w.append(w2_u8[perm_w2].contiguous())
                 g2_s.append(
-                    block_scale_interleave(
-                        w2_s_u8[perm_sf.to(w2_s_u8.device)].contiguous()
-                    )
+                    block_scale_interleave(w2_s_u8[perm_w2_sf].contiguous())
                 )
         else:
             for i in range(num_experts):
@@ -320,7 +325,6 @@ class DeepSeekMxfp4MoEMethod:
 
         if envs.SGLANG_OPT_MXFP4_STATIC_SCALE_ONES.get():
             self._register_static_scale_ones(layer)
-        torch.cuda.empty_cache()
 
     def _register_static_scale_ones(self, layer: Module) -> None:
         device = layer.w13_weight.device
