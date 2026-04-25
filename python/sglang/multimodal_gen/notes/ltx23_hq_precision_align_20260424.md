@@ -304,3 +304,11 @@
 - plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_sde_nan_8294790_30steps_pr23366_10s_cli/native_hq_sde_nan_8294790_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `145.56s`。
 - 结论: 这是 source-level semantic alignment，但当前 SpongeBob 10s case 完全持平；SDE NaN fallback 不是主误差。下一步继续查 HQ stage1 guided pass 与 official `GuidedDenoiser + BatchSplitAdapter` 的 native 语义差异。
 - 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
+
+## 10:50 HQ video RoPE coords dtype 复核
+
+- git: `65ec2e2c3`。
+- 源码差异: official `VideoLatentTools.create_initial_state` 会把 video positions cast 到 latent dtype（HQ 为 bf16）后进入 RoPE；native 默认保持 video coords fp32。已仅在 `LTX2TwoStageHQPipeline` forward context 中临时启用 `quantize_video_rope_coords_to_hidden_dtype`，不影响其它 LTX pipeline。
+- plain CLI 复核（无 hook/无 injection）: `/tmp/ltx23_hq_rope_coord_dtype_65ec2e2_30steps_pr23366_10s_cli/native_hq_rope_coord_dtype_65ec2e2_30steps_pr23366_10s.mp4` vs `/tmp/ltx23_official_10s_v2/video.mp4`，`global_psnr=16.931129448461213`，`mean_psnr=17.086487352484422`，pixel time `120.60s`。
+- 结论: 这是 source-level semantic alignment，但当前 case 完全持平；video RoPE coords dtype 不是主误差。下一步继续查 transformer 内部 kernel/layout 差异，尤其 native parallel linear/attention wrapper 与 official `torch.nn.Linear`/official attention path 的差异。
+- 当前 10s 对齐百分比: `16.93 / 35 = 48.4%`。
