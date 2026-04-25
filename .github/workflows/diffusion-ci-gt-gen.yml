@@ -140,8 +140,10 @@ jobs:
           git config --global user.name "sglang-bot"
           git config --global user.email "sglangbot@gmail.com"
 
-          git clone "https://x-access-token:${GH_PAT_FOR_NIGHTLY_CI_DATA}@github.com/sglang-bot/sglang-ci-data.git" ci-data
+          git clone --filter=blob:none --sparse \
+            "https://x-access-token:${GH_PAT_FOR_NIGHTLY_CI_DATA}@github.com/sglang-bot/sglang-ci-data.git" ci-data
           cd ci-data
+          git sparse-checkout set "${BUNDLE_PATH}"
           git checkout -b "${TARGET_BRANCH}" origin/main
 
           git remote add source "https://github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git"
