@@ -157,6 +157,121 @@ def is_flashinfer_allreduce_unavailable() -> bool:
     return _flashinfer_allreduce_unavailable
 
 
+def _preflight_check_workspace_memory(
+    world_size: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    cpu_group: Optional["torch.distributed.ProcessGroup"] = None,
+) -> bool:
+    """Collectively decide whether to enter create_allreduce_fusion_workspace.
+
+    If one rank OOMs in flashinfer's per-rank fabric allocation and escapes
+    via the caller's try/except while another rank enters the internal
+    cross-rank collective, the surviving rank blocks until the NCCL
+    watchdog aborts the process ~10 minutes later. This preflight has
+    every rank probe a matching cuMemCreate locally and vote on a CPU
+    group so all ranks either proceed or skip atomically.
+
+    torch.cuda.mem_get_info() is not a reliable signal: the fabric
+    pool can be smaller than the driver's generic free counter, so we
+    probe with the same handle type flashinfer uses.
+    """
+    # Setup: import + prop construction + granularity query. Any failure
+    # here means the preflight can't run on this platform; fall through to
+    # the existing try/except around create_allreduce_fusion_workspace,
+    # which still handles OOM at a per-rank granularity (the same behavior
+    # we had before this preflight existed).
+    try:
+        import torch.distributed as dist
+        from cuda import cuda as _cu
+
+        dtype_bytes = torch.empty((), dtype=dtype).element_size()
+        # lamport buffer (3x the base) is the largest flashinfer allocation.
+        probe_size = 3 * world_size * max_token_num * hidden_dim * dtype_bytes
+
+        prop = _cu.CUmemAllocationProp()
+        prop.requestedHandleTypes = (
+            _cu.CUmemAllocationHandleType.CU_MEM_HANDLE_TYPE_FABRIC
+        )
+        prop.type = _cu.CUmemAllocationType.CU_MEM_ALLOCATION_TYPE_PINNED
+        prop.location = _cu.CUmemLocation()
+        prop.location.type = _cu.CUmemLocationType.CU_MEM_LOCATION_TYPE_DEVICE
+        prop.location.id = torch.cuda.current_device()
+        prop.allocFlags.gpuDirectRDMACapable = 1
+
+        err, gran = _cu.cuMemGetAllocationGranularity(
+            prop,
+            _cu.CUmemAllocationGranularity_flags.CU_MEM_ALLOC_GRANULARITY_RECOMMENDED,
+        )
+        if err != _cu.CUresult.CUDA_SUCCESS:
+            # Fail closed: if the driver can't even tell us the granularity
+            # for a fabric handle, flashinfer's real allocation won't work
+            # either -- skip fusion rather than risk the 10-minute hang.
+            logger.warning(
+                "FlashInfer workspace preflight: cuMemGetAllocationGranularity "
+                "failed (%s). Skipping allreduce fusion.",
+                err,
+            )
+            return False
+        aligned_probe = ((probe_size + gran - 1) // gran) * gran
+    except Exception as e:
+        logger.warning(
+            "FlashInfer workspace preflight bypassed (setup error: %s); "
+            "proceeding without the collective guard.",
+            e,
+        )
+        return True
+
+    # Probe: the cuMemRelease must run regardless of what happens next.
+    local_ok = 0
+    handle = None
+    try:
+        err, handle = _cu.cuMemCreate(aligned_probe, prop, 0)
+        local_ok = 1 if err == _cu.CUresult.CUDA_SUCCESS else 0
+    finally:
+        if local_ok and handle is not None:
+            _cu.cuMemRelease(handle)
+
+    # Vote: failures here (e.g. gloo transport error) cannot fall through
+    # to True -- if some ranks enter the flashinfer call and others don't,
+    # we reintroduce the original hang. Skip fusion on any vote failure.
+    try:
+        group = cpu_group
+        if group is None:
+            tp_group = get_tp_group()
+            if tp_group.world_size <= 1:
+                return local_ok == 1
+            group = tp_group.cpu_group
+
+        flag = torch.tensor([local_ok], dtype=torch.int32)
+        dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=group)
+    except Exception as e:
+        logger.warning(
+            "FlashInfer workspace preflight vote failed (%s). "
+            "Skipping allreduce fusion.",
+            e,
+        )
+        return False
+
+    logger.debug(
+        "FlashInfer workspace preflight [rank %s]: probe=%.2f GB, "
+        "local_probe=%s, vote=%s",
+        dist.get_rank(group=group),
+        aligned_probe / 1e9,
+        "OK" if local_ok else "FAIL",
+        "PROCEED" if flag.item() == 1 else "SKIP",
+    )
+    if flag.item() == 0:
+        logger.warning(
+            "FlashInfer workspace preflight: fabric probe failed on at "
+            "least one rank. Skipping allreduce fusion to avoid "
+            "cross-rank desync inside the flashinfer collective."
+        )
+        return False
+    return True
+
+
 class FlashInferWorkspaceManager:
     def __init__(self):
         self.workspace = None
@@ -187,6 +302,20 @@ class FlashInferWorkspaceManager:
             return
 
         self.cleanup()
+
+        global _flashinfer_allreduce_unavailable
+        if not _preflight_check_workspace_memory(
+            world_size=world_size,
+            max_token_num=max_token_num,
+            hidden_dim=hidden_dim,
+            dtype=dtype,
+            cpu_group=cpu_group,
+        ):
+            _flashinfer_allreduce_unavailable = True
+            self.workspace = None
+            self.initialized = False
+            return
+
         try:
             kwargs = dict(
                 backend="trtllm",
@@ -210,7 +339,6 @@ class FlashInferWorkspaceManager:
                     **kwargs
                 )
         except Exception as e:
-            global _flashinfer_allreduce_unavailable
             _flashinfer_allreduce_unavailable = True
             logger.warning(
                 f"Failed to initialize FlashInfer workspace: {e}. "
