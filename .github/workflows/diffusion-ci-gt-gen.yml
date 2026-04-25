@@ -153,6 +153,7 @@ jobs:
 
           git remote add source "https://github.com/${SOURCE_OWNER}/${SOURCE_REPO}.git"
           git fetch --depth=1 source "${SOURCE_BRANCH}"
+          git rm -r --ignore-unmatch "${BUNDLE_PATH}"
           git checkout FETCH_HEAD -- "${BUNDLE_PATH}"
 
           changed_files="$(git diff --name-only --cached)"
