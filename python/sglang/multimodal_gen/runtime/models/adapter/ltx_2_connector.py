@@ -19,7 +19,7 @@ def apply_interleaved_rotary_emb(
     cos, sin = freqs
     x_real, x_imag = x.unflatten(2, (-1, 2)).unbind(-1)  # [B, S, C // 2]
     x_rotated = torch.stack([-x_imag, x_real], dim=-1).flatten(2)
-    out = x * cos + x_rotated * sin
+    out = (x.float() * cos + x_rotated.float() * sin).to(x.dtype)
     return out
 
 
@@ -28,6 +28,7 @@ def apply_split_rotary_emb(
 ) -> torch.Tensor:
     cos, sin = freqs
 
+    x_dtype = x.dtype
     needs_reshape = False
     if x.ndim != 4 and cos.ndim == 4:
         # cos is (#b, h, t, r) -> reshape x to (b, h, t, dim_per_head)
@@ -46,7 +47,7 @@ def apply_split_rotary_emb(
     r = last // 2
 
     # (..., 2, r)
-    split_x = x.reshape(*x.shape[:-1], 2, r)
+    split_x = x.reshape(*x.shape[:-1], 2, r).float()
     first_x = split_x[..., :1, :]  # (..., 1, r)
     second_x = split_x[..., 1:, :]  # (..., 1, r)
 
@@ -65,6 +66,7 @@ def apply_split_rotary_emb(
     if needs_reshape:
         out = out.transpose(1, 2).reshape(b, t, -1)
 
+    out = out.to(dtype=x_dtype)
     return out
 
 
@@ -485,12 +487,7 @@ class LTX2ConnectorTransformer1d(nn.Module):
             attention_mask = torch.zeros_like(attention_mask)
 
         # 2. Calculate 1D RoPE positional embeddings
-        rotary_emb = self.rope(
-            batch_size,
-            seq_len,
-            device=hidden_states.device,
-            dtype=hidden_states.dtype,
-        )
+        rotary_emb = self.rope(batch_size, seq_len, device=hidden_states.device)
 
         # 3. Run 1D transformer blocks
         for block in self.transformer_blocks:
