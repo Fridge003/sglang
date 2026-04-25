@@ -90,10 +90,20 @@ class StandardDispatcher(BaseDispatcher):
         self.enable_flashinfer_mxfp4_moe = (
             get_moe_runner_backend().is_flashinfer_mxfp4()
         )
+        self.enable_flashinfer_w4a16_moe = (
+            get_moe_runner_backend().is_flashinfer_w4a16()
+        )
         self.skip_local_expert_mapping = (
             self.enable_flashinfer_mxfp4_moe
             and envs.SGLANG_OPT_MXFP4_SKIP_DISPATCHER_MAPPING.get()
         )
+        # Read env once at init; per-layer dispatcher instance is long-lived.
+        # w4a16 uses the same flashinfer-style "kernel expects global ids +
+        # ep_rank/ep_size for local filtering" contract as mxfp4, so the
+        # dispatcher must be a passthrough for both backends when the flag is on.
+        self.skip_local_expert_mapping = (
+            self.enable_flashinfer_mxfp4_moe or self.enable_flashinfer_w4a16_moe
+        ) and envs.SGLANG_OPT_MXFP4_SKIP_DISPATCHER_MAPPING.get()
         self.num_experts = moe_runner_config.num_experts
         self.num_local_shared_experts = moe_runner_config.num_fused_shared_experts
         self.num_local_routed_experts = (

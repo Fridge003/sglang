@@ -179,6 +179,7 @@ MOE_RUNNER_BACKEND_CHOICES = [
     "flashinfer_trtllm",
     "flashinfer_cutlass",
     "flashinfer_mxfp4",
+    "flashinfer_w4a16",
     "flashinfer_cutedsl",
     "cutlass",
 ]
