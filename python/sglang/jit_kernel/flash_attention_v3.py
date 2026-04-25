@@ -1,3 +1,4 @@
+import inspect
 import logging
 import os
 from typing import Optional, Union
@@ -13,6 +14,14 @@ logger = logging.getLogger(__name__)
 SGL_FA3_KERNEL_REPO = "kernels-community/sgl-flash-attn3"
 SGL_FA3_KERNEL_REVISION = "v1"
 DEFAULT_FA3_KERNEL_LOCKFILE = "kernels.lock"
+
+
+def _fa3_kernel_supports_out_arg(kernel_name: str) -> bool:
+    kernel = _load_fa3_kernels()[kernel_name]
+    try:
+        return "out" in inspect.signature(kernel).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 @cache_once
@@ -129,7 +138,9 @@ def flash_attn_with_kvcache(
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
 
-    return _load_fa3_kernels()["flash_attn_with_kvcache"](
+    kernel = _load_fa3_kernels()["flash_attn_with_kvcache"]
+    kwargs = {"out": out} if _fa3_kernel_supports_out_arg("flash_attn_with_kvcache") else {}
+    return kernel(
         q,
         k_cache,
         v_cache,
@@ -161,7 +172,7 @@ def flash_attn_with_kvcache(
         sm_margin,
         return_softmax_lse,
         sinks,
-        out=out,
+        **kwargs,
     )
 
 
@@ -199,7 +210,9 @@ def flash_attn_varlen_func(
             "flash_attn at sgl-kernel is only supported on sm90 and above"
         )
 
-    return _load_fa3_kernels()["flash_attn_varlen_func"](
+    kernel = _load_fa3_kernels()["flash_attn_varlen_func"]
+    kwargs = {"out": out} if _fa3_kernel_supports_out_arg("flash_attn_varlen_func") else {}
+    return kernel(
         q,
         k,
         v,
@@ -224,5 +237,5 @@ def flash_attn_varlen_func(
         sm_margin,
         return_softmax_lse,
         sinks,
-        out=out,
+        **kwargs,
     )
