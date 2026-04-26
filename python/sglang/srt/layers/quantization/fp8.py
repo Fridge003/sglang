@@ -28,6 +28,7 @@ from sglang.srt.layers.moe.moe_runner.flashinfer_trtllm import (
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.moe.utils import (
     RoutingMethodType,
+    get_moe_a2a_backend,
     get_moe_padding_size,
     get_moe_runner_backend,
     get_moe_weight_sizes,
@@ -1514,13 +1515,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if moe_runner_backend.is_auto():
             if self.is_deepgemm_moe_runner_backend_enabled():
                 moe_runner_backend = MoeRunnerBackend.DEEP_GEMM
+            elif _is_hip and (_use_aiter or _use_hip_int4):
+                # mori bypasses self.runner via MoriEPMoE.run_moe_core.
+                if not get_moe_a2a_backend().is_mori():
+                    moe_runner_backend = MoeRunnerBackend.AITER
             else:
                 moe_runner_backend = MoeRunnerBackend.TRITON
-
-        # On HIP with SGLANG_USE_AITER / SGLANG_INT4_WEIGHT, the aiter fused
-        # kernel was the unconditional fast-path before this refactor.
-        if _is_hip and (_use_aiter or _use_hip_int4):
-            moe_runner_backend = MoeRunnerBackend.AITER
 
         if (
             moe_runner_backend.is_deep_gemm()
