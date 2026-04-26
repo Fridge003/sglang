@@ -112,20 +112,9 @@ class TextEncodingStage(PipelineStage):
         batches: list[Req],
         server_args: ServerArgs,
     ) -> list[Req]:
-        results: list[Req | None] = [None] * len(batches)
-
-        for _, group in self._group_requests_by_dedup_key(
-            batches, lambda batch: self.get_dedup_key(batch, server_args)
-        ):
-            first_index, first_batch = group[0]
-            first_result = self(first_batch, server_args)
-            results[first_index] = first_result
-
-            for index, batch in group[1:]:
-                self._copy_text_outputs(first_result, batch)
-                results[index] = batch
-
-        return [result for result in results if result is not None]
+        return self.run_deduplicated_group(
+            batches, server_args, self._copy_text_outputs
+        )
 
     def get_dedup_key(self, batch: Req, server_args: ServerArgs):
         return (

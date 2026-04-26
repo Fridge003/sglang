@@ -265,6 +265,48 @@ class PipelineStage(ABC):
         """
         return id(batch)
 
+    def run_deduplicated_group(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+        copy_outputs,
+    ) -> list[Req]:
+        """Run equivalent requests once and copy stage outputs to duplicates.
+
+        This helper covers the common full-stage dedup pattern used by many
+        stages: group requests by ``get_dedup_key``, execute the first request in
+        each group through the normal ``self(batch, server_args)`` path, then let
+        ``copy_outputs(src, dst)`` transfer only this stage's outputs to the
+        remaining requests. Stages with partial subprocess reuse should override
+        ``run_grouped_requests`` directly instead of forcing their logic through
+        this full-stage helper.
+        """
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                copy_outputs(first_result, batch)
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    @classmethod
+    def copy_stage_value(cls, value):
+        """Copy a reusable stage output while preserving tensor ownership."""
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        if isinstance(value, list):
+            return [cls.copy_stage_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls.copy_stage_value(item) for item in value)
+        return value
+
     @staticmethod
     def _freeze_for_dedup_key(value: Any) -> Any:
         """Convert common nested values into a hashable dedup-key fragment.

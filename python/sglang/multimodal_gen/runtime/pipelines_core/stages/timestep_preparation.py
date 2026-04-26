@@ -150,34 +150,16 @@ class TimestepPreparationStage(PipelineStage):
         batches: list[Req],
         server_args: ServerArgs,
     ) -> list[Req]:
-        results: list[Req | None] = [None] * len(batches)
+        return self.run_deduplicated_group(
+            batches, server_args, self._copy_timestep_outputs
+        )
 
-        for _, group in self._group_requests_by_dedup_key(
-            batches, lambda batch: self.get_dedup_key(batch, server_args)
-        ):
-            first_index, first_batch = group[0]
-            first_result = self(first_batch, server_args)
-            results[first_index] = first_result
-
-            for index, batch in group[1:]:
-                batch.timesteps = self._copy_stage_value(first_result.timesteps)
-                batch.sigmas = self._copy_stage_value(first_result.sigmas)
-                batch.scheduler = deepcopy(first_result.scheduler)
-                if "mu" in first_result.extra:
-                    batch.extra["mu"] = self._copy_stage_value(first_result.extra["mu"])
-                results[index] = batch
-
-        return [result for result in results if result is not None]
-
-    @classmethod
-    def _copy_stage_value(cls, value):
-        if isinstance(value, torch.Tensor):
-            return value.clone()
-        if isinstance(value, list):
-            return [cls._copy_stage_value(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(cls._copy_stage_value(item) for item in value)
-        return value
+    def _copy_timestep_outputs(self, src: Req, dst: Req) -> None:
+        dst.timesteps = self.copy_stage_value(src.timesteps)
+        dst.sigmas = self.copy_stage_value(src.sigmas)
+        dst.scheduler = deepcopy(src.scheduler)
+        if "mu" in src.extra:
+            dst.extra["mu"] = self.copy_stage_value(src.extra["mu"])
 
     def get_dedup_key(self, batch: Req, server_args: ServerArgs):
         return (
