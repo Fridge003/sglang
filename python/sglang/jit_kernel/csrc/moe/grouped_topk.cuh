@@ -157,20 +157,14 @@ __global__ void grouped_topk_single_group_kernel(
     __syncwarp();
   }
 
-  // Phase 3: renormalize and write output
+  // Phase 3: renormalize and write output. `__shfl_xor_sync` requires every
+  // lane named in the mask (0xffffffff) to execute it, so we pad inactive
+  // lanes with 0 and run warp_sum_f32 on all 32 lanes uniformly.
+  float weight = (lane_id < topk) ? selected_weights[lane_id] : 0.0f;
+  float divisor = renormalize ? warp_sum_f32(weight) + 1e-20f : 1.0f;
   if (lane_id < topk) {
-    float weight = selected_weights[lane_id];
-    float final_weight = weight * scaling_factor;
-
-    if (renormalize) {
-      // Warp-level sum of selected weights (only lanes < topk contribute)
-      float partial = (lane_id < topk) ? weight : 0.0f;
-      float total = warp_sum_f32(partial);
-      final_weight = weight * scaling_factor / (total + 1e-20f);
-    }
-
     out_ids[lane_id] = selected_ids[lane_id];
-    out_vals[lane_id] = final_weight;
+    out_vals[lane_id] = weight * scaling_factor / divisor;
   }
 }
 
