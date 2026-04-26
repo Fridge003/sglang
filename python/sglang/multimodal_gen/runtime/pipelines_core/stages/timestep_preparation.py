@@ -8,6 +8,7 @@ This module contains implementations of timestep preparation stages for diffusio
 """
 
 import inspect
+from copy import deepcopy
 from typing import Any, Callable, Tuple
 
 import torch
@@ -143,6 +144,51 @@ class TimestepPreparationStage(PipelineStage):
         if not batch.is_warmup:
             self.log_debug("timesteps: %s", timesteps)
         return batch
+
+    def run_grouped_requests(
+        self,
+        batches: list[Req],
+        server_args: ServerArgs,
+    ) -> list[Req]:
+        results: list[Req | None] = [None] * len(batches)
+
+        for _, group in self._group_requests_by_dedup_key(
+            batches, lambda batch: self.get_dedup_key(batch, server_args)
+        ):
+            first_index, first_batch = group[0]
+            first_result = self(first_batch, server_args)
+            results[first_index] = first_result
+
+            for index, batch in group[1:]:
+                batch.timesteps = self._copy_stage_value(first_result.timesteps)
+                batch.sigmas = self._copy_stage_value(first_result.sigmas)
+                batch.scheduler = deepcopy(first_result.scheduler)
+                if "mu" in first_result.extra:
+                    batch.extra["mu"] = self._copy_stage_value(first_result.extra["mu"])
+                results[index] = batch
+
+        return [result for result in results if result is not None]
+
+    @classmethod
+    def _copy_stage_value(cls, value):
+        if isinstance(value, torch.Tensor):
+            return value.clone()
+        if isinstance(value, list):
+            return [cls._copy_stage_value(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(cls._copy_stage_value(item) for item in value)
+        return value
+
+    def get_dedup_key(self, batch: Req, server_args: ServerArgs):
+        return (
+            batch.num_inference_steps,
+            self._freeze_for_dedup_key(batch.timesteps),
+            self._freeze_for_dedup_key(batch.sigmas),
+            batch.n_tokens,
+            batch.height,
+            batch.width,
+            batch.num_frames,
+        )
 
     def verify_input(self, batch: Req, server_args: ServerArgs) -> VerificationResult:
         """Verify timestep preparation stage inputs."""
