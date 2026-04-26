@@ -59,7 +59,10 @@ from sglang.srt.utils.common import (
     is_sm120_supported,
     next_power_of_2,
 )
-from sglang.srt.utils.custom_op import register_custom_op
+from sglang.srt.utils.custom_op import (
+    register_custom_op,
+    register_custom_op_from_extern,
+)
 from sglang.srt.utils.patch_torch import register_fake_if_exists
 
 if TYPE_CHECKING:
@@ -80,8 +83,7 @@ try:
     def _round_up(x: int, y: int) -> int:
         return ((x + y - 1) // y) * y
 
-    @torch.library.custom_op("sglang::flashinfer_fp4_quantize", mutates_args=())
-    def _flashinfer_fp4_quantize_op(
+    def _flashinfer_fp4_quantize_impl(
         input: torch.Tensor,
         global_scale: Optional[torch.Tensor] = None,
         sf_vec_size: int = 16,
@@ -101,7 +103,6 @@ try:
             backend=_flashinfer_fp4_quantize_backend,
         )
 
-    @_flashinfer_fp4_quantize_op.register_fake
     def _flashinfer_fp4_quantize_fake(
         input: torch.Tensor,
         global_scale: Optional[torch.Tensor] = None,
@@ -135,7 +136,11 @@ try:
             sf = input.new_empty((sf_rows, sf_cols), dtype=torch.uint8)
         return x_q, sf
 
-    fp4_quantize = _flashinfer_fp4_quantize_op
+    fp4_quantize = register_custom_op_from_extern(
+        _flashinfer_fp4_quantize_impl,
+        op_name="flashinfer_fp4_quantize",
+        fake_impl=_flashinfer_fp4_quantize_fake,
+    )
 except ImportError:
     fp4_quantize = None
 
