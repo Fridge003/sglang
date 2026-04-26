@@ -339,7 +339,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             topk_output = self.topk(hidden_states, router_logits)
         final_hidden_states = self.experts(hidden_states, topk_output)
 
-        if self.ep_size > 1 and not should_allreduce_fusion:
+        if (
+            self.ep_size > 1
+            and not should_allreduce_fusion
+            and not use_reduce_scatter
+        ):
             final_hidden_states = moe_expert_parallel_all_reduce(final_hidden_states)
 
         if (
