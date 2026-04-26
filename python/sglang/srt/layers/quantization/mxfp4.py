@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
@@ -742,21 +743,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         moe_runner_backend = get_moe_runner_backend()
         if moe_runner_backend.is_auto():
             # Must match apply() priority: _use_aiter before use_triton_kernels.
-            if _use_aiter and get_moe_a2a_backend().is_mori():
-                # mori bypasses self.runner via MoriEPMoE.run_moe_core.
-                pass
-            elif _use_aiter:
+            if _use_aiter and get_moe_a2a_backend().is_none():
                 moe_runner_backend = MoeRunnerBackend.AITER
             elif self.use_triton_kernels:
                 moe_runner_backend = MoeRunnerBackend.TRITON_KERNELS
             else:
                 moe_runner_backend = MoeRunnerBackend.TRITON
 
-        if (
-            moe_runner_backend.is_aiter()
-            or moe_runner_backend.is_triton_kernels()
-            or moe_runner_backend.is_triton()
-        ):
+        if moe_runner_backend.is_aiter():
+            # MXFP4 hard-codes Swiglu in the AITER kernel path.
+            self.runner = MoeRunner(
+                moe_runner_backend, replace(moe_runner_config, activation="swiglu")
+            )
+        elif moe_runner_backend.is_triton_kernels() or moe_runner_backend.is_triton():
             self.runner = MoeRunner(moe_runner_backend, moe_runner_config)
         else:
             # TODO(cwan): refactor other backends
@@ -871,7 +870,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 doweight_stage1=self.moe_runner_config.apply_router_weight_on_input,
                 hidden_pad=self.hidden_pad,
                 intermediate_pad=self.intermediate_pad,
-                activation_override="swiglu",
             )
             return self.runner.run(
                 dispatch_output._replace(hidden_states=x_padded), quant_info
@@ -1011,8 +1009,7 @@ class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
     ):
         self.moe_runner_config = moe_runner_config
         moe_runner_backend = get_moe_runner_backend()
-        if moe_runner_backend.is_auto() and not get_moe_a2a_backend().is_mori():
-            # mori bypasses self.runner via MoriEPMoE.run_moe_core.
+        if moe_runner_backend.is_auto() and get_moe_a2a_backend().is_none():
             moe_runner_backend = MoeRunnerBackend.AITER
 
         if moe_runner_backend.is_aiter():

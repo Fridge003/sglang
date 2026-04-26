@@ -17,6 +17,7 @@ from sglang.srt.layers.moe import (
     MoeRunner,
     MoeRunnerBackend,
     MoeRunnerConfig,
+    get_moe_a2a_backend,
     get_moe_runner_backend,
 )
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
@@ -230,9 +231,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
             set_weight_attrs(w2_weight_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Skip aiter weight shuffle when using non-auto MoE backend (e.g., triton, triton_kernels)
-        # because aiter CK kernels don't support all GEMM dimensions
-        _should_use_aiter_moe = _use_aiter and get_moe_runner_backend().is_auto()
+        _should_use_aiter_moe = _use_aiter and (
+            get_moe_runner_backend().is_auto() or get_moe_runner_backend().is_aiter()
+        )
         if _should_use_aiter_moe:
             copy_or_rebind_param(
                 layer, "w13_weight", shuffle_weight(layer.w13_weight.data, (16, 16))
@@ -380,7 +381,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
 
         # Separate runner so CK-shape errors fall back to self.runner on every call.
         self._aiter_runner: Optional[MoeRunner] = None
-        if _use_aiter and get_moe_runner_backend().is_auto():
+        if (
+            _use_aiter
+            and (
+                get_moe_runner_backend().is_auto()
+                or get_moe_runner_backend().is_aiter()
+            )
+            and get_moe_a2a_backend().is_none()
+        ):
             self._aiter_runner = MoeRunner(MoeRunnerBackend.AITER, moe_runner_config)
 
     @property
@@ -465,7 +473,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, MultiPlatformOp):
                         w13_weight=layer.w13_weight,
                         w2_weight=layer.w2_weight,
                         expert_mask=layer.dispatcher.expert_mask_gpu,
-                        apply_router_weight_on_input_pre_scale=True,
                     )
                     return self._aiter_runner.run(dispatch_output, quant_info)
                 except RuntimeError as e:
