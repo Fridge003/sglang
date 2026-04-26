@@ -107,6 +107,7 @@ logger = init_logger(__name__)
 class DenoisingContext:
     """Loop-scoped state shared across the denoising skeleton and its hooks."""
 
+    scheduler: Any
     extra_step_kwargs: dict[str, Any]
     target_dtype: torch.dtype
     autocast_enabled: bool
@@ -477,6 +478,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self,
         server_args,
         batch,
+        scheduler,
     ):
         """
         (Wan2.2) Calculate timestep to switch from high noise expert to low noise expert
@@ -491,7 +493,10 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             boundary_ratio = batch.boundary_ratio
 
         if boundary_ratio is not None:
-            boundary_timestep = boundary_ratio * self.scheduler.num_train_timesteps
+            num_train_timesteps = getattr(scheduler, "num_train_timesteps", None)
+            if num_train_timesteps is None:
+                num_train_timesteps = scheduler.config.num_train_timesteps
+            boundary_timestep = boundary_ratio * num_train_timesteps
         else:
             boundary_timestep = None
 
@@ -506,12 +511,14 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         """
         assert self.transformer is not None
         pipeline = self.pipeline() if self.pipeline else None
+        scheduler = batch.scheduler
+        assert scheduler is not None
 
-        boundary_timestep = self._handle_boundary_ratio(server_args, batch)
+        boundary_timestep = self._handle_boundary_ratio(server_args, batch, scheduler)
         # Get timesteps and calculate warmup steps
         timesteps = batch.timesteps
         num_inference_steps = batch.num_inference_steps
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        num_warmup_steps = len(timesteps) - num_inference_steps * scheduler.order
 
         if self.transformer_2 is not None:
             assert boundary_timestep is not None, "boundary_timestep must be provided"
@@ -541,7 +548,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
 
         # Prepare extra step kwargs for scheduler
         extra_step_kwargs = self.prepare_extra_func_kwargs(
-            self.scheduler.step,
+            scheduler.step,
             {"generator": batch.generator, "eta": batch.eta, "batch": batch},
         )
 
@@ -662,6 +669,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             neg_cond_kwargs = {}
 
         return DenoisingContext(
+            scheduler=scheduler,
             extra_step_kwargs=extra_step_kwargs,
             target_dtype=target_dtype,
             autocast_enabled=autocast_enabled,
@@ -684,7 +692,27 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         self, ctx: DenoisingContext, batch: Req, server_args: ServerArgs
     ) -> None:
         """Prepare scheduler state before entering the shared denoising loop."""
-        self.scheduler.set_begin_index(0)
+        self._reset_scheduler_loop_state(ctx.scheduler)
+        ctx.scheduler.set_begin_index(0)
+
+    def _reset_scheduler_loop_state(self, scheduler) -> None:
+        if hasattr(scheduler, "_step_index"):
+            scheduler._step_index = None
+        if hasattr(scheduler, "_begin_index"):
+            scheduler._begin_index = None
+        if hasattr(scheduler, "lower_order_nums"):
+            scheduler.lower_order_nums = 0
+        if hasattr(scheduler, "last_sample"):
+            scheduler.last_sample = None
+        if hasattr(scheduler, "this_order"):
+            scheduler.this_order = 0
+
+        solver_order = getattr(getattr(scheduler, "config", None), "solver_order", 0)
+        if solver_order:
+            if hasattr(scheduler, "model_outputs"):
+                scheduler.model_outputs = [None] * solver_order
+            if hasattr(scheduler, "timestep_list"):
+                scheduler.timestep_list = [None] * solver_order
 
     def _prepare_step_state(
         self,
@@ -787,7 +815,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
         )
 
         # 3. Apply scheduler-side input scaling before the model forward.
-        latent_model_input = self.scheduler.scale_model_input(
+        latent_model_input = ctx.scheduler.scale_model_input(
             latent_model_input, step.t_device
         )
 
@@ -812,7 +840,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
             batch.noise_pred = noise_pred
 
         # 5. Advance the scheduler state with the predicted noise.
-        ctx.latents = self.scheduler.step(
+        ctx.latents = ctx.scheduler.step(
             model_output=noise_pred,
             timestep=step.t_device,
             sample=ctx.latents,
@@ -1237,7 +1265,7 @@ class DenoisingStage(PipelineStage, RolloutDenoisingMixin):
 
                         if step_index == num_timesteps - 1 or (
                             (step_index + 1) > ctx.num_warmup_steps
-                            and (step_index + 1) % self.scheduler.order == 0
+                            and (step_index + 1) % ctx.scheduler.order == 0
                             and progress_bar is not None
                         ):
                             progress_bar.update()
