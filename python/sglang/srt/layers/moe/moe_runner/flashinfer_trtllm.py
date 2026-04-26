@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     )
 
 if is_flashinfer_available():
-    from flashinfer import fp4_quantize
+    from sglang.srt.layers.quantization.modelopt_quant import fp4_quantize
 elif is_cuda_alike():
     from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as fp4_quantize
 else:

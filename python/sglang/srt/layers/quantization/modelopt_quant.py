@@ -55,6 +55,7 @@ from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.layers.utils import copy_or_rebind_param
 from sglang.srt.utils.common import (
     is_cuda,
+    is_sm100_supported,
     is_sm120_supported,
     next_power_of_2,
 )
@@ -72,13 +73,69 @@ if TYPE_CHECKING:
 
 fp4_quantize = None
 try:
-    if is_sm120_supported():
-        try:
-            from flashinfer import fp4_quantize
-        except ImportError:
-            from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as fp4_quantize
-    else:
-        from sglang.jit_kernel.nvfp4 import scaled_fp4_quant as fp4_quantize
+    from flashinfer import fp4_quantize as _flashinfer_fp4_quantize
+
+    _flashinfer_fp4_quantize_backend = "cute-dsl" if is_sm100_supported() else "cuda"
+
+    def _round_up(x: int, y: int) -> int:
+        return ((x + y - 1) // y) * y
+
+    @torch.library.custom_op("sglang::flashinfer_fp4_quantize", mutates_args=())
+    def _flashinfer_fp4_quantize_op(
+        input: torch.Tensor,
+        global_scale: Optional[torch.Tensor] = None,
+        sf_vec_size: int = 16,
+        sf_use_ue8m0: bool = False,
+        is_sf_swizzled_layout: bool = True,
+        is_sf_8x4_layout: bool = False,
+        enable_pdl: Optional[bool] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return _flashinfer_fp4_quantize(
+            input,
+            global_scale,
+            sf_vec_size,
+            sf_use_ue8m0,
+            is_sf_swizzled_layout,
+            is_sf_8x4_layout,
+            enable_pdl,
+            backend=_flashinfer_fp4_quantize_backend,
+        )
+
+    @_flashinfer_fp4_quantize_op.register_fake
+    def _flashinfer_fp4_quantize_fake(
+        input: torch.Tensor,
+        global_scale: Optional[torch.Tensor] = None,
+        sf_vec_size: int = 16,
+        sf_use_ue8m0: bool = False,
+        is_sf_swizzled_layout: bool = True,
+        is_sf_8x4_layout: bool = False,
+        enable_pdl: Optional[bool] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        is_column_major = input.stride(-2) == 1
+        if is_column_major:
+            m = input.shape[-1]
+            K = input.shape[-2]
+        else:
+            m = input.numel() // input.shape[-1]
+            K = input.shape[-1]
+        if is_column_major:
+            x_q = input.new_empty((*input.shape[:-2], K // 2, m), dtype=torch.uint8)
+        else:
+            x_q = input.new_empty((*input.shape[:-1], K // 2), dtype=torch.uint8)
+        if is_sf_swizzled_layout:
+            row_size = 8 if is_sf_8x4_layout else 128
+            sf_rows = _round_up(m, row_size)
+            sf_cols = _round_up(K // sf_vec_size, 4)
+        else:
+            sf_rows = m
+            sf_cols = K // sf_vec_size
+        if is_column_major:
+            sf = input.new_empty((sf_cols, sf_rows), dtype=torch.uint8)
+        else:
+            sf = input.new_empty((sf_rows, sf_cols), dtype=torch.uint8)
+        return x_q, sf
+
+    fp4_quantize = _flashinfer_fp4_quantize_op
 except ImportError:
     fp4_quantize = None
 
