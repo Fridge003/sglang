@@ -1,11 +1,8 @@
-
 from typing import Optional, Tuple
 
 import torch
 import triton
 import triton.language as tl
-
-
 
 
 @triton.jit
@@ -176,8 +173,6 @@ def _init_compressed_attn_metadata_triton(
     )
 
 
-
-
 def init_compressed_metadata(
     seq_lens: torch.Tensor,
     positions: torch.Tensor,
@@ -203,8 +198,6 @@ def init_compressed_metadata(
         page_size,
         compute_page_indices,
     )
-
-
 
 
 def init_c4_metadata(

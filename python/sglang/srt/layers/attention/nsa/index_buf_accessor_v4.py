@@ -31,8 +31,6 @@ class NopeFp8RopeBf16Pack:
         )
 
 
-
-
 class SetKAndS:
     @classmethod
     def execute(cls, pool, buf, loc, nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack):

@@ -45,8 +45,6 @@ def expand_seq_lens(
     )
 
 
-
-
 def make_swa_ring_buffer_indices(
     forward_batch: ForwardBatch,
     device: torch.device,

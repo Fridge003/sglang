@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -38,8 +37,9 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import CombineInput, DispatchOutput
 
-
-from sglang.srt.debug_utils.deepseek_v4_debug_utils import deepseek_v4_moe_code_path_checker
+from sglang.srt.debug_utils.deepseek_v4_debug_utils import (
+    deepseek_v4_moe_code_path_checker,
+)
 from sglang.srt.environ import envs
 from sglang.srt.utils.common import get_bool_env_var
 

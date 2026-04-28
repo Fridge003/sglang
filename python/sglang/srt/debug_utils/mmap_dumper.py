@@ -7,7 +7,6 @@ from typing import Any, Optional
 
 import torch
 
-
 _META_CAPACITY = 64 * 1024
 
 
@@ -95,7 +94,11 @@ class MmapDumper:
         }
 
     def _flush_meta(self) -> None:
-        meta = {"pid": self._pid, "scalars": self._scalars, "tensors": self._tensor_meta}
+        meta = {
+            "pid": self._pid,
+            "scalars": self._scalars,
+            "tensors": self._tensor_meta,
+        }
         payload = json.dumps(meta).encode("utf-8")
         n = len(payload)
         assert n + 4 <= _META_CAPACITY, f"mmap dumper meta too big: {n}"
@@ -179,7 +182,13 @@ def _tester() -> None:
     assert d.is_active()
     d.dump({"a": 1, "b": True, "c": "hello", "d": None, "e": [1, 2, 3]})
     out = read_dump(tmp_dir, os.getpid())
-    assert out["scalars"] == {"a": 1, "b": True, "c": "hello", "d": None, "e": [1, 2, 3]}, out
+    assert out["scalars"] == {
+        "a": 1,
+        "b": True,
+        "c": "hello",
+        "d": None,
+        "e": [1, 2, 3],
+    }, out
     assert out["tensors"] == {}
     print("[tester] T1 scalars OK")
 
@@ -243,7 +252,9 @@ def _tester() -> None:
     print("[tester] all OK")
 
 
-def _bench_one_rank(rank: int, dump_dir: str, shape: tuple, n_iters: int, queue) -> None:
+def _bench_one_rank(
+    rank: int, dump_dir: str, shape: tuple, n_iters: int, queue
+) -> None:
     """Run inside a child process: alloc GPU tensor, dump N times, report timings."""
     import time
 
@@ -269,7 +280,6 @@ def _bench_one_rank(rank: int, dump_dir: str, shape: tuple, n_iters: int, queue)
 
 
 def _bench_speed(dump_dir_root: str = "/dev/shm/mmap_dumper_bench") -> None:
-    import multiprocessing as mp
     import shutil
 
     import torch
@@ -300,7 +310,12 @@ def _bench_speed_inner(dump_dir_root: str, n_ranks: int) -> None:
 
     # Default: only run SMALL (the new fast path).
     # Set SGLANG_DUMP_BENCH_BIG=1 to also run BIG (old slow path) for comparison.
-    big = os.environ.get("SGLANG_DUMP_BENCH_BIG", "0") not in ("", "0", "false", "False")
+    big = os.environ.get("SGLANG_DUMP_BENCH_BIG", "0") not in (
+        "",
+        "0",
+        "false",
+        "False",
+    )
     scenarios = [
         ("SMALL (4608, 10000) ~ 184 MB", (4608, 10000), 5),
     ]
@@ -312,7 +327,9 @@ def _bench_speed_inner(dump_dir_root: str, n_ranks: int) -> None:
         nbytes = shape[0] * shape[1] * 4
         print(f"\n=== {label} ===")
         if dump_dir_root.startswith("/host/data") and nbytes * n_ranks > 130 * 2**30:
-            print(f"  skip: would write {nbytes * n_ranks / 2**30:.1f} GB to /host/data (~93% full)")
+            print(
+                f"  skip: would write {nbytes * n_ranks / 2**30:.1f} GB to /host/data (~93% full)"
+            )
             continue
 
         # Concurrent: 8 ranks at once
@@ -320,7 +337,13 @@ def _bench_speed_inner(dump_dir_root: str, n_ranks: int) -> None:
         procs = [
             ctx.Process(
                 target=_bench_one_rank,
-                args=(r, os.path.join(dump_dir_root, "concurrent"), shape, n_iters, queue),
+                args=(
+                    r,
+                    os.path.join(dump_dir_root, "concurrent"),
+                    shape,
+                    n_iters,
+                    queue,
+                ),
             )
             for r in range(n_ranks)
         ]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import nullcontext
-from typing import List, Literal, NamedTuple, Optional, Tuple, Union
+from typing import List, Literal, NamedTuple, Optional, Tuple
 
 import torch
 
@@ -703,7 +703,6 @@ class DeepSeekV4TokenToKVPool(KVCache):
     def get_swa_key_buffer(self, layer_id: int) -> torch.Tensor:
         return self.swa_kv_pool.get_key_buffer(layer_id)
 
-
     def set_swa_key_buffer(
         self,
         layer_id: int,
@@ -818,4 +817,3 @@ class DeepSeekV4TokenToKVPool(KVCache):
         compress_ratio, compress_layer_id, _ = self.layer_mapping[layer_id]
         assert compress_ratio == 4, f"only c4 has indexer, got {compress_ratio = }"
         return self.c4_indexer_kv_pool.set_index_fused(compress_layer_id, loc, cache_k)
-

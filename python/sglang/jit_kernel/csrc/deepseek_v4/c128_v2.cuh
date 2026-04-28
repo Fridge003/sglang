@@ -354,12 +354,15 @@ C128_KERNEL void flash_c128_prefill(const __grid_constant__ Compress128PrefillPa
   if (ragged_id == 0xFFFFFFFF) [[unlikely]]
     return;
 
-  if (ragged_id >= _num_q_tokens) [[unlikely]] return;
-  if (global_bid >= _batch_size) [[unlikely]] return;
+  if (ragged_id >= _num_q_tokens) [[unlikely]]
+    return;
+  if (global_bid >= _batch_size) [[unlikely]]
+    return;
 
   const int32_t index = indices_ptr[global_bid];
 
-  if (index < 0 || static_cast<uint32_t>(index) >= _num_indices) [[unlikely]] return;
+  if (index < 0 || static_cast<uint32_t>(index) >= _num_indices) [[unlikely]]
+    return;
 
   // kv score
   const auto kv_score_buffer = static_cast<InFloat*>(_kv_score_buffer);

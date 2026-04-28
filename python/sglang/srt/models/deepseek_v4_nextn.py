@@ -1,4 +1,3 @@
-
 import logging
 from typing import Iterable, Optional, Tuple
 

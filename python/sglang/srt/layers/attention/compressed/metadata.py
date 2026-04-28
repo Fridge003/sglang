@@ -259,8 +259,6 @@ class PagedCoreMetadata(CoreMetadata):
         )
 
 
-
-
 @dataclass
 class RaggedCoreMetadata(CoreMetadata):
     swa_ragged_indices: torch.Tensor

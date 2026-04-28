@@ -1638,7 +1638,9 @@ class DeepseekV4ForCausalLM(nn.Module):
                 if envs.SGLANG_DSV4_FP4_EXPERTS.get():
                     weights = _dequant_fp8_wo_a(weights)
                 else:
-                    weights = ((n, t) for n, t in weights if not n.endswith(".wo_a.scale"))
+                    weights = (
+                        (n, t) for n, t in weights if not n.endswith(".wo_a.scale")
+                    )
                 # ------------------------------------------------------------------------
 
         stacked_params_mapping = [

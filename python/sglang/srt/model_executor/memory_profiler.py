@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import logging
@@ -72,7 +71,9 @@ class DSv4MemoryCalculator:
         # raw (kv, score) (2*head_dim). Combined with ring_size=1 this still
         # nets a large reduction (~3/256x) but the per-slot bytes go up.
         c128_online = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
-        c128_state_bytes = (3 if c128_online else 2 * 1) * attn_head_dim * state_dtype_size
+        c128_state_bytes = (
+            (3 if c128_online else 2 * 1) * attn_head_dim * state_dtype_size
+        )
         c4_indexer_state_bytes = 2 * 2 * self.indexer_head_dim * state_dtype_size
 
         c4_state_ratio = self.c4_ring_size / self.swa_page_size
