@@ -142,7 +142,7 @@ class TestDSv4FlashMTPBasic(DSv4FlashMTPServerBase):
         )
         metrics = run_gsm8k_eval(args)
         print(f"{metrics=}")
-        self.assertGreater(metrics["accuracy"], 0.6)
+        self.assertGreater(metrics["accuracy"], 0.95)
 
     def test_max_token_one(self):
         """Degenerate spec step (still cuda-graph captured)."""
