@@ -71,7 +71,19 @@ export const DeepSeekV4Deployment = () => {
     },
   };
 
-  const resolveItems = (option) => option.items;
+  // Recipes that are not supported on the H200 (FP4) Marlin path.
+  const H200_FP4_UNSUPPORTED_RECIPES = new Set(["cp", "pd-disagg"]);
+
+  const resolveItems = (option, vals) => {
+    if (option.name === "recipe" && vals && vals.hardware === "h200-fp4") {
+      return option.items.map((it) =>
+        H200_FP4_UNSUPPORTED_RECIPES.has(it.id)
+          ? { ...it, disabled: true, disabledReason: "Not supported on H200 (FP4)" }
+          : it
+      );
+    }
+    return option.items;
+  };
 
   const getInitialState = () => {
     const initialState = {};
@@ -105,7 +117,19 @@ export const DeepSeekV4Deployment = () => {
   }, []);
 
   const handleRadioChange = (optionName, value) => {
-    setValues((prev) => ({ ...prev, [optionName]: value }));
+    setValues((prev) => {
+      const next = { ...prev, [optionName]: value };
+      // Switching to H200 (FP4) while cp / pd-disagg is selected: fall back
+      // to low-latency since those recipes are not supported on this path.
+      if (
+        optionName === "hardware" &&
+        value === "h200-fp4" &&
+        H200_FP4_UNSUPPORTED_RECIPES.has(next.recipe)
+      ) {
+        next.recipe = "low-latency";
+      }
+      return next;
+    });
   };
 
   // ============================================================================
@@ -222,11 +246,6 @@ export const DeepSeekV4Deployment = () => {
     "h200|big|cp",
     "gb200|small|pd-disagg",
     "gb200|big|pd-disagg",
-    // H200 (FP4) Marlin path: cp / pd-disagg are not yet validated.
-    "h200-fp4|small|cp",
-    "h200-fp4|big|cp",
-    "h200-fp4|small|pd-disagg",
-    "h200-fp4|big|pd-disagg",
   ]);
   const TBD_PLACEHOLDER = "# to be provided";
   const BEING_VERIFIED_NOTE =
@@ -778,7 +797,7 @@ python3 -m sglang_router.launch_router \\
   return (
     <div style={containerStyle} className="not-prose">
       {Object.entries(options).map(([key, option]) => {
-        const items = resolveItems(option);
+        const items = resolveItems(option, values);
         return (
           <div key={key} style={cardStyle}>
             <div style={titleStyle}>{option.title}</div>
