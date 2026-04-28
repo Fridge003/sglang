@@ -512,6 +512,7 @@ class SWARadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator.free(kv_indices[page_aligned_len:])
 
         # Remove req slot release the cache lock
+        # TODO(DSV4): double check this change @ispobock
         self.dec_lock_ref(
             req.last_node,
             req.swa_uuid_for_lock,
