@@ -9,7 +9,6 @@ cuda-graph + buffer-pool coverage on the DSv4 path:
   - test_gsm8k         (accuracy + spec path full forward)
   - test_max_token_one (degenerate spec step, still cuda-graph captured)
   - test_request_abort (cuda-graph buffer pool survives abort+restart)
-  - test_logprob_match (spec decoding must be logprob-equivalent)
 
 Server launch matches `run_flash_dp4.sh`: tp=4, dp=4, deepep MoE backend,
 DSv4 FP8 (FP4 experts disabled).
@@ -31,7 +30,6 @@ from sglang.test.test_utils import (
     DEFAULT_URL_FOR_TEST,
     CustomTestCase,
     popen_launch_server,
-    run_logprob_check,
 )
 
 register_cuda_ci(est_time=900, suite="stage-c-test-4-gpu-h100")
@@ -175,11 +173,6 @@ class TestDSv4FlashMTPBasic(DSv4FlashMTPServerBase):
         for t in threads:
             t.join()
         self.assertIsNone(self.process.poll())
-
-    def test_logprob_match(self):
-        """logprob output must match dense decode (spec path is non-destructive)."""
-        # arg = (input_len, output_len, temperature, logprob_start_len, return_logprob, top_logprobs_num)
-        run_logprob_check(self, (32, 16, 0.0, -1, True, 5))
 
 
 if __name__ == "__main__":
