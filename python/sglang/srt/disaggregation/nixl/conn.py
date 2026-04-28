@@ -371,51 +371,54 @@ class NixlKVManager(CommonKVManager):
         self.decode_kv_args_table[agent_name] = decode_kv_args
         self.agent.add_remote_agent(decode_kv_args.agent_metadata)
 
-    def send_kvcache(
+    def _send_kvcache_generic(
         self,
         peer_name: str,
-        prefill_kv_indices: npt.NDArray[np.int32],
-        dst_kv_ptrs: list[int],
-        dst_kv_indices: npt.NDArray[np.int32],
+        src_data_ptrs: list[int],
+        dst_data_ptrs: list[int],
+        item_lens: list[int],
+        prefill_data_indices: npt.NDArray[np.int32],
+        dst_data_indices: npt.NDArray[np.int32],
         dst_gpu_id: int,
         notif: str,
     ):
+        """Generic KV cache transfer supporting both MHA and MLA architectures."""
         # group by indices
         prefill_kv_blocks, dst_kv_blocks = group_concurrent_contiguous(
-            prefill_kv_indices, dst_kv_indices
+            prefill_data_indices, dst_data_indices
         )
 
         logger.debug(f"sending kvcache to {peer_name} with notif {notif}")
         # Make descs
         if self.is_mla_backend:
             src_kv_ptrs, dst_kv_ptrs, layers_current_pp_stage = (
-                self.get_mla_kv_ptrs_with_pp(self.kv_args.kv_data_ptrs, dst_kv_ptrs)
+                self.get_mla_kv_ptrs_with_pp(src_data_ptrs, dst_data_ptrs)
             )
             layers_params = [
                 (
                     src_kv_ptrs[layer_id],
                     dst_kv_ptrs[layer_id],
-                    self.kv_args.kv_item_lens[layer_id],
+                    item_lens[layer_id],
                 )
                 for layer_id in range(layers_current_pp_stage)
             ]
         else:
             src_k_ptrs, src_v_ptrs, dst_k_ptrs, dst_v_ptrs, layers_current_pp_stage = (
-                self.get_mha_kv_ptrs_with_pp(self.kv_args.kv_data_ptrs, dst_kv_ptrs)
+                self.get_mha_kv_ptrs_with_pp(src_data_ptrs, dst_data_ptrs)
             )
 
             layers_params = [
                 (
                     src_k_ptrs[layer_id],
                     dst_k_ptrs[layer_id],
-                    self.kv_args.kv_item_lens[layer_id],
+                    item_lens[layer_id],
                 )
                 for layer_id in range(layers_current_pp_stage)
             ] + [
                 (
                     src_v_ptrs[layer_id],
                     dst_v_ptrs[layer_id],
-                    self.kv_args.kv_item_lens[layer_id],
+                    item_lens[layer_id],
                 )
                 for layer_id in range(layers_current_pp_stage)
             ]
@@ -458,7 +461,7 @@ class NixlKVManager(CommonKVManager):
         dst_reqs = make_req_array(dst_addrs, dst_lens, dst_gpu_id)
 
         logger.debug(
-            f"len(src_addrs): before group: {len(prefill_kv_indices)}, after group: {len(src_addrs)}"
+            f"len(src_addrs): before group: {len(prefill_data_indices)}, after group: {len(src_addrs)}"
         )
         src_descs = self.agent.get_xfer_descs(src_reqs, "VRAM")
         dst_descs = self.agent.get_xfer_descs(dst_reqs, "VRAM")
@@ -476,6 +479,26 @@ class NixlKVManager(CommonKVManager):
         if state == "ERR":
             raise Exception("KVSender failed to post transfer")
         return xfer_handle
+
+    def send_kvcache(
+        self,
+        peer_name: str,
+        prefill_kv_indices: npt.NDArray[np.int32],
+        dst_kv_ptrs: list[int],
+        dst_kv_indices: npt.NDArray[np.int32],
+        dst_gpu_id: int,
+        notif: str,
+    ):
+        return self._send_kvcache_generic(
+            peer_name=peer_name,
+            src_data_ptrs=self.kv_args.kv_data_ptrs,
+            dst_data_ptrs=dst_kv_ptrs,
+            item_lens=self.kv_args.kv_item_lens,
+            prefill_data_indices=prefill_kv_indices,
+            dst_data_indices=dst_kv_indices,
+            dst_gpu_id=dst_gpu_id,
+            notif=notif,
+        )
 
     def send_kvcache_slice(
         self,
@@ -669,6 +692,10 @@ class NixlKVManager(CommonKVManager):
         src_state_item_lens = self.kv_args.state_item_lens
         assert len(src_state_ptrs) == len(dst_state_ptrs)
         assert len(src_state_item_lens) == len(dst_state_item_lens)
+        assert len(prefill_state_indices) == len(dst_state_indices), (
+            f"State index length mismatch: prefill={len(prefill_state_indices)}, "
+            f"dst={len(dst_state_indices)}"
+        )
         # The page-by-index transfer below assumes prefill and decode have
         # matching state-pool layouts (same item_len per tensor). Mismatched
         # layouts arise only with mamba TP-slice across non-equal attn_tp_size,
