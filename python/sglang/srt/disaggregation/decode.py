@@ -306,11 +306,9 @@ class DecodePreallocQueue:
             self.metadata_buffers.get_buf_infos()
         )
 
-        if isinstance(self.token_to_kv_pool, DeepSeekV4TokenToKVPool):
-            assert self.prefill_pp_size == 1, (
-                "V4 PD disaggregation requires PP=1 "
-                "(get_mla_kv_ptrs_with_pp cannot slice V4's buffer-type-organized flat list)"
-            )
+        # V4 PD requires PP=1 on prefill (see prefill.py); decode init does
+        # not see prefill's PP, and the prefill-side assert already enforces
+        # it, so no decode-side check is needed here.
 
         if hasattr(self.token_to_kv_pool, "get_state_buf_infos"):
             state_data_ptrs, state_data_lens, state_item_lens = (

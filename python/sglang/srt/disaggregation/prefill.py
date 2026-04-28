@@ -173,9 +173,12 @@ class PrefillBootstrapQueue:
                 "V4 PD disaggregation requires PP=1 "
                 "(get_mla_kv_ptrs_with_pp cannot slice V4's buffer-type-organized flat list)"
             )
-            assert (
-                self.decode_tp_size == self.scheduler.tp_size
-            ), "V4 PD disaggregation requires same TP size on prefill and decode"
+            # V4 also requires matching attn_tp_size on prefill/decode (the
+            # SWA state pool item_len is sliced by attn_tp and there is no
+            # V4 SWA TP-slice transfer path yet). Prefill cannot know decode
+            # TP at init time, so the check is deferred to the transfer
+            # backend: nixl `send_state` and mooncake `maybe_send_extra`
+            # raise on item_len / attn_tp_size mismatch.
 
         if hasattr(self.token_to_kv_pool, "get_state_buf_infos"):
             state_data_ptrs, state_data_lens, state_item_lens = (

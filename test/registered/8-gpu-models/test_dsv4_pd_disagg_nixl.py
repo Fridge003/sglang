@@ -1,7 +1,10 @@
-"""DSv4 Flash PD-disagg with NIXL backend, asymmetric: prefill is pure
-TP with no spec module, decode runs EAGLE MTP. Prefill ships a zero-
-init hidden buffer; decode mocks first-step conditioning, verify keeps
-the output correct."""
+"""DSv4 Flash PD-disagg with NIXL backend. Both sides run dp-attention
++ deepep + EAGLE MTP so attn_tp_size and the V4 state pool layout are
+fully symmetric: same SWA item_len under matching attn_tp, and same
+NSA c4/c128 indexer ring buffer size under matching spec status. nixl
+`send_state` is page-by-index and has no V4 TP-slice / spec-asymmetric
+path, so any layout mismatch would trip the item_len assert in
+`nixl/conn.py`."""
 
 import unittest
 from types import SimpleNamespace
@@ -56,15 +59,26 @@ class TestDSv4FlashPDDisaggNIXL(PDDisaggregationServerBase):
             "0",
             "--tp",
             "4",
+            "--dp",
+            "4",
+            "--enable-dp-attention",
+            "--moe-a2a-backend",
+            "deepep",
+            "--deepep-config",
+            DEEPEP_CONFIG,
             "--cuda-graph-max-bs",
             "128",
             "--max-running-requests",
             "256",
             "--mem-fraction-static",
             "0.7",
-            "--disaggregation-decode-tp",
-            "4",
-            "--disaggregation-decode-dp",
+            "--speculative-algorithm",
+            "EAGLE",
+            "--speculative-num-steps",
+            "3",
+            "--speculative-eagle-topk",
+            "1",
+            "--speculative-num-draft-tokens",
             "4",
             *cls.transfer_backend,
             *cls.rdma_devices,

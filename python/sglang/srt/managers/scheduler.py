@@ -912,18 +912,18 @@ class Scheduler(
             self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
                 buffer_size
             )
-            # Full-size buffer on both sides so the wire layout aligns
-            # under asymmetric P/D where one side may not run spec.
-            # TODO(DSV4): main keeps a 16-byte padding when local has no
-            # spec; we always allocate spec_hidden_size. Verify the extra
-            # bytes have no side effect (transfer engine, RDMA cost). If
-            # there is one, skip registering hidden_states in
-            # MetadataBuffers.get_buf_infos when local has no spec so the
-            # field is not transferred at all.
             self.disagg_metadata_buffers = MetadataBuffers(
                 buffer_size,
-                hidden_size=model_config.spec_hidden_size,
-                hidden_states_dtype=model_config.dtype,
+                hidden_size=(
+                    model_config.spec_hidden_size
+                    if self.spec_algorithm.is_eagle()
+                    else 16  # minimal padding size for RDMA
+                ),
+                hidden_states_dtype=(
+                    model_config.dtype
+                    if self.spec_algorithm.is_eagle()
+                    else torch.float32
+                ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
             )
 
@@ -965,16 +965,20 @@ class Scheduler(
             self.req_to_metadata_buffer_idx_allocator = ReqToMetadataIdxAllocator(
                 buffer_size
             )
-            # See decode branch above. Asymmetric P/D: prefill without a
-            # spec module ships zeros, decode mocks first-step conditioning.
-            # TODO(DSV4): same as decode -- verify always-on full-size
-            # buffer has no side effect vs main's conditional padding;
-            # otherwise skip the hidden_states field in get_buf_infos so
-            # it is not transferred at all when local has no spec.
             self.disagg_metadata_buffers = MetadataBuffers(
                 buffer_size,
-                hidden_size=model_config.spec_hidden_size,
-                hidden_states_dtype=model_config.dtype,
+                hidden_size=(
+                    model_config.spec_hidden_size
+                    if self.spec_algorithm.is_eagle()
+                    or self.spec_algorithm.is_standalone()
+                    else 16  # minimal padding size for RDMA
+                ),
+                hidden_states_dtype=(
+                    model_config.dtype
+                    if self.spec_algorithm.is_eagle()
+                    or self.spec_algorithm.is_standalone()
+                    else torch.float32
+                ),
                 custom_mem_pool=self.token_to_kv_pool_allocator.get_kvcache().maybe_get_custom_mem_pool(),
             )
 
