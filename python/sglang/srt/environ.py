@@ -472,6 +472,7 @@ class Envs:
     # Accepts "", "max", "high" (empty string means unset). Other values filtered to None.
     SGLANG_REASONING_EFFORT = EnvStr("")
 
+    SGLANG_DSV4_ISOLATE = EnvInt(False)
     SGLANG_DSV4_MODE = EnvStr("2604")
     SGLANG_DSV4_2604_SUBMODE = EnvStr("2604B")
     SGLANG_DSV4_FP4_EXPERTS = EnvBool(True)  # Set False when using FP4-to-FP8 converted checkpoint with 2604 config
