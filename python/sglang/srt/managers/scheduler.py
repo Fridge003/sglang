@@ -898,6 +898,9 @@ class Scheduler(
             )
             # Full-size buffer on both sides so the wire layout aligns
             # under asymmetric P/D where one side may not run spec.
+            # TODO(DSV4): main keeps a 16-byte padding when local has no
+            # spec; we always allocate spec_hidden_size. Verify the extra
+            # bytes have no side effect (transfer engine, RDMA cost).
             self.disagg_metadata_buffers = MetadataBuffers(
                 buffer_size,
                 hidden_size=model_config.spec_hidden_size,
@@ -946,6 +949,8 @@ class Scheduler(
             )
             # See decode branch above. Asymmetric P/D: prefill without a
             # spec module ships zeros, decode mocks first-step conditioning.
+            # TODO(DSV4): same as decode -- verify always-on full-size
+            # buffer has no side effect vs main's conditional padding.
             self.disagg_metadata_buffers = MetadataBuffers(
                 buffer_size,
                 hidden_size=model_config.spec_hidden_size,
