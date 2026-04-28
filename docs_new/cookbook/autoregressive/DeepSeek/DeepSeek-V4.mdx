@@ -157,6 +157,13 @@ H200 image (`lmsysorg/sglang:deepseek-v4-hopper`) and FP8 checkpoints
 (`sgl-project/DeepSeek-V4-Flash-FP8`, `sgl-project/DeepSeek-V4-Pro-FP8`) are
 publicly available.
 
+**H200 (FP4):** select **H200 (FP4)** in the generator to run the original
+FP4-mixed Instruct repos (`deepseek-ai/DeepSeek-V4-Flash`,
+`deepseek-ai/DeepSeek-V4-Pro`) on Hopper through the Marlin MoE runner
+(`--moe-runner-backend marlin`). Flash fits on TP=4 and Pro fits on TP=8
+single-node. MTP is enabled for `low-latency` and disabled for
+`balanced` / `max-throughput`.
+
 PD-Disagg recipes on H200 may require `docker run --privileged --ulimit memlock=-1`
 (or `--device /dev/infiniband:/dev/infiniband --cap-add IPC_LOCK`) so mooncake
 can discover the IB HCAs; without IB exposure mooncake silently falls back to

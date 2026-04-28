@@ -31,6 +31,7 @@ export const DeepSeekV4Deployment = () => {
         { id: "gb200", label: "GB200 (FP4)", default: false },
         { id: "gb300", label: "GB300 (FP4)", default: false },
         { id: "h200",  label: "H200 (FP8)",  default: false },
+        { id: "h200-fp4", label: "H200 (FP4)", default: false },
       ],
     },
     modelSize: {
@@ -147,6 +148,11 @@ export const DeepSeekV4Deployment = () => {
     // repackagings for both variants.
     "h200|small":  { slug: "sgl-project/DeepSeek-V4-Flash-FP8",        tp: 4,  multinode: false },
     "h200|big":    { slug: "sgl-project/DeepSeek-V4-Pro-FP8",          tp: 16, multinode: true, nnodes: 2 },
+    // H200 (FP4) runs the original FP4-mixed Instruct repos through the Marlin
+    // MoE runner: experts are dequantized from FP4 to FP16 at runtime, so a
+    // single-node TP=4 / TP=8 deployment fits Flash / Pro on Hopper.
+    "h200-fp4|small": { slug: "deepseek-ai/DeepSeek-V4-Flash", tp: 4, multinode: false },
+    "h200-fp4|big":   { slug: "deepseek-ai/DeepSeek-V4-Pro",   tp: 8, multinode: false },
   };
   // Per (hardware, modelSize) PD role TP (from allinone _PD_SPEC).
   const PD_TP_SPEC = {
@@ -202,6 +208,12 @@ export const DeepSeekV4Deployment = () => {
     "gb200|big|low-latency",
     "gb200|big|balanced",
     "gb200|big|max-throughput",
+    "h200-fp4|small|low-latency",
+    "h200-fp4|small|balanced",
+    "h200-fp4|small|max-throughput",
+    "h200-fp4|big|low-latency",
+    "h200-fp4|big|balanced",
+    "h200-fp4|big|max-throughput",
   ]);
   // Recipes whose command is intentionally not yet provided (e.g. blocked by an
   // upstream limitation). Showing a minimal placeholder is friendlier to users
@@ -210,6 +222,11 @@ export const DeepSeekV4Deployment = () => {
     "h200|big|cp",
     "gb200|small|pd-disagg",
     "gb200|big|pd-disagg",
+    // H200 (FP4) Marlin path: cp / pd-disagg are not yet validated.
+    "h200-fp4|small|cp",
+    "h200-fp4|big|cp",
+    "h200-fp4|small|pd-disagg",
+    "h200-fp4|big|pd-disagg",
   ]);
   const TBD_PLACEHOLDER = "# to be provided";
   const BEING_VERIFIED_NOTE =
@@ -253,6 +270,42 @@ export const DeepSeekV4Deployment = () => {
 
     if (recipe === "pd-disagg") {
       return buildPDDisaggCommand(hardware, modelSize);
+    }
+
+    // H200 (FP4) Marlin path: dedicated branch — Hopper runs the FP4-mixed
+    // Instruct repos through the Marlin MoE runner, so it doesn't share envs
+    // or flags with either the FP8 H200 path or the Blackwell paths.
+    //   Flash: TP=4, single node       Pro: TP=8, single node
+    //   low-latency:           MTP enabled (steps=3 / topk=1 / draft=4)
+    //   balanced / max-throughput: MTP disabled
+    if (hardware === "h200-fp4") {
+      const verifyKey = `${hardware}|${modelSize}|${recipe}`;
+      if (TBD_RECIPES.has(verifyKey)) return TBD_PLACEHOLDER;
+
+      const fp4Flags = [
+        "  --trust-remote-code",
+        `  --model-path ${slug}`,
+        `  --tp ${tp}`,
+        "  --moe-runner-backend marlin",
+      ];
+      if (recipe === "low-latency") {
+        fp4Flags.push("  --speculative-algo EAGLE");
+        fp4Flags.push("  --speculative-num-steps 3");
+        fp4Flags.push("  --speculative-eagle-topk 1");
+        fp4Flags.push("  --speculative-num-draft-tokens 4");
+      }
+      fp4Flags.push("  --chunked-prefill-size 4096");
+      fp4Flags.push("  --disable-flashinfer-autotune");
+      if (isBig) fp4Flags.push("  --mem-fraction-static 0.88");
+      if (toolcall === "enabled") fp4Flags.push("  --tool-call-parser deepseekv4");
+      if (reasoningParser === "enabled") fp4Flags.push("  --reasoning-parser deepseek-v4");
+      fp4Flags.push("  --host 0.0.0.0");
+      fp4Flags.push("  --port 30000");
+
+      const fp4Cmd = `sglang serve \\\n${fp4Flags.join(" \\\n")}`;
+      return VERIFIED_RECIPES.has(verifyKey)
+        ? fp4Cmd
+        : `${BEING_VERIFIED_NOTE}\n${commentOutCommand(fp4Cmd)}`;
     }
 
     // ---- env ----
