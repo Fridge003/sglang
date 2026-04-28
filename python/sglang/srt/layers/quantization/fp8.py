@@ -15,8 +15,6 @@ from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
 from sglang.srt.environ import envs, is_large_dummy_model
-from sglang.srt.layers.amx_utils import _amx_process_weight_after_loading
-from sglang.srt.environ import envs
 from sglang.srt.layers.amx_utils import (
     CPUQuantMethod,
     _amx_process_weight_after_loading,
@@ -819,7 +817,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # WEIGHT_SCALES
         if self.is_fp4_expert:
-            if envs.SGLANG_DEBUG_SANITY_CHECK_CONFIG.get() and not is_large_dummy_model():
+            if (
+                envs.SGLANG_DEBUG_SANITY_CHECK_CONFIG.get()
+                and not is_large_dummy_model()
+            ):
                 assert hidden_size == 4096
                 assert intermediate_size_per_partition == 2048
             fp4_block_k = 32
@@ -1569,6 +1570,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 local_expert_offset=moe_ep_rank * num_local_experts,
                 local_num_experts=num_local_experts,
+                intermediate_size=layer.w2_weight.shape[2],
                 routing_method_type=int(
                     getattr(layer, "routing_method_type", RoutingMethodType.DeepSeekV3)
                 ),
