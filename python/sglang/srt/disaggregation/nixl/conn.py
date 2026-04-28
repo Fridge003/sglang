@@ -810,6 +810,16 @@ class NixlKVManager(CommonKVManager):
                 # so the receiver waits for it. Skipped (and notif omitted)
                 # when either side has no state, which keeps non-state
                 # models on the same code path.
+                #
+                # TODO(nealvaidya): The upstream `maybe_send_extra` /
+                # `_send_mamba_state` dispatcher (PR #18939) is replaced by
+                # the generic `send_state` below for the DSv4 SWA/NSA/Mamba
+                # state-buffer path. Mamba TP-slice (non-equal attn_tp_size
+                # between prefill and decode) is not supported here -- the
+                # `send_state` length / item_len asserts will catch the
+                # mismatch. If you extend nixl PD disagg with new state
+                # types, please reconcile this generic path with the
+                # state_type dispatcher.
                 peer = self.decode_kv_args_table[req.agent_name]
                 if (
                     self.kv_args.state_data_ptrs
