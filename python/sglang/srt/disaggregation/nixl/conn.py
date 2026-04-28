@@ -657,6 +657,14 @@ class NixlKVManager(CommonKVManager):
         invoke this on the last chunk of a request and only when both sides
         have registered state pointers.
         """
+        # TODO(DSV4): This generic state-transport path was introduced for
+        # DSv4 SWA/NSA/Mamba state buffers and now subsumes the previous
+        # mamba-only `_send_mamba_state`. Mamba TP-slice (non-equal
+        # attn_tp_size between prefill and decode) is currently unsupported
+        # — see the assert below and mooncake's
+        # `_send_mamba_state_with_tp_slice` for the missing path. Mamba /
+        # PD disagg maintainers: please run e2e PD tests before changing
+        # this method or its callers.
         src_state_ptrs = self.kv_args.state_data_ptrs
         src_state_item_lens = self.kv_args.state_item_lens
         assert len(src_state_ptrs) == len(dst_state_ptrs)
