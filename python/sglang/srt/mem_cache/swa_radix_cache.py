@@ -31,8 +31,11 @@ from numpy import float64
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.base_prefix_cache import (
     BasePrefixCache,
+    DecLockRefParams,
+    DecLockRefResult,
     EvictParams,
     EvictResult,
+    IncLockRefResult,
     InsertParams,
     InsertResult,
     MatchPrefixParams,
@@ -486,10 +489,9 @@ class SWARadixCache(BasePrefixCache):
         self.token_to_kv_pool_allocator.free(kv_indices[page_aligned_len:])
 
         # Remove req slot release the cache lock
-        # TODO(DSV4): double check this change @ispobock
         self.dec_lock_ref(
             req.last_node,
-            req.swa_uuid_for_lock,
+            DecLockRefParams(swa_uuid_for_lock=req.swa_uuid_for_lock),
             skip_swa=req.swa_prefix_lock_released,
         )
         req.swa_prefix_lock_released = False
@@ -545,11 +547,12 @@ class SWARadixCache(BasePrefixCache):
 
         self.dec_lock_ref(
             req.last_node,
-            req.swa_uuid_for_lock,
+            DecLockRefParams(swa_uuid_for_lock=req.swa_uuid_for_lock),
             skip_swa=req.swa_prefix_lock_released,
         )
         req.swa_prefix_lock_released = False
-        swa_uuid_for_lock = self.inc_lock_ref(new_last_node)
+        result = self.inc_lock_ref(new_last_node)
+        swa_uuid_for_lock = result.swa_uuid_for_lock
 
         # `req.prefix_indices` will be used in `PrefillAdder::add_chunked_req` later
         if len(new_indices) < len(kv_indices):
@@ -674,7 +677,7 @@ class SWARadixCache(BasePrefixCache):
             num_tokens_evicted=full_num_evicted, swa_num_tokens_evicted=swa_num_evicted
         )
 
-    def inc_lock_ref(self, node: TreeNode) -> Optional[int]:
+    def inc_lock_ref(self, node: TreeNode) -> IncLockRefResult:
         """
         Increment the lock reference count for the node. Returns the swa_uuid_for_lock, which needs
         to be passed to dec_lock_ref.
@@ -682,7 +685,7 @@ class SWARadixCache(BasePrefixCache):
         It locks the swa_lock_ref for nodes between the [last node, swa_uuid_for_lock], inclusive.
         """
         if self.disable:
-            return None
+            return IncLockRefResult()
 
         swa_lock_size = 0
         swa_uuid_for_lock = None
@@ -713,14 +716,22 @@ class SWARadixCache(BasePrefixCache):
                         node.swa_uuid = gen_swa_uuid()
                     swa_uuid_for_lock = node.swa_uuid
             node = node.parent
-        return swa_uuid_for_lock
+        return IncLockRefResult(swa_uuid_for_lock=swa_uuid_for_lock)
 
+    # TODO(DSV4) @ispobock: please review the rebase of `97d1a672fe release lock
+    # after window` onto main #20330's unified lock interface. main wraps
+    # (node, swa_uuid_for_lock) into DecLockRefParams, so we kept `skip_swa` as
+    # an extra kwarg on this override (Liskov-compatible default-valued param)
+    # rather than forking `DecLockRefParams` in base_prefix_cache.py. This
+    # localizes the dsv4 SWA leaf-lock release protocol to the SWARadixCache
+    # subclass and the two call sites in cache_finished_req / cache_unfinished_req
+    # below. dec_swa_lock_only stays unchanged as fork-only API.
     def dec_lock_ref(
         self,
         node: TreeNode,
-        swa_uuid_for_lock: Optional[int] = None,
+        params: Optional[DecLockRefParams] = None,
         skip_swa: bool = False,
-    ):
+    ) -> DecLockRefResult:
         """
         Decrement the lock reference count for the node.
         It unlocks the full_lock_ref for nodes between the [last node, root), exclusive.
@@ -730,8 +741,10 @@ class SWARadixCache(BasePrefixCache):
         If skip_swa is True, only the full_lock_ref is decremented; the SWA lock is
         assumed to have been released already (e.g. via `dec_swa_lock_only`).
         """
+        swa_uuid_for_lock = params.swa_uuid_for_lock if params is not None else None
+
         if self.disable:
-            return
+            return DecLockRefResult()
 
         dec_lock_swa = not skip_swa
         while node != self.root_node:
@@ -759,6 +772,8 @@ class SWARadixCache(BasePrefixCache):
                     dec_lock_swa = False
 
             node = node.parent
+
+        return DecLockRefResult()
 
     def dec_swa_lock_only(
         self, node: TreeNode, swa_uuid_for_lock: Optional[int] = None
