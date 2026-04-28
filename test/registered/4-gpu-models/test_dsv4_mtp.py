@@ -178,7 +178,8 @@ class TestDSv4FlashMTPBasic(DSv4FlashMTPServerBase):
 
     def test_logprob_match(self):
         """logprob output must match dense decode (spec path is non-destructive)."""
-        run_logprob_check(self, top_logprobs_num=5, base_url=self.base_url)
+        # arg = (input_len, output_len, temperature, logprob_start_len, return_logprob, top_logprobs_num)
+        run_logprob_check(self, (32, 16, 0.0, -1, True, 5))
 
 
 if __name__ == "__main__":
