@@ -112,12 +112,38 @@ class ChoiceLogprobs(BaseModel):
     content: List[ChatCompletionTokenLogprob]
 
 
+class CachedTokensDetails(BaseModel):
+    """Detailed breakdown of cached tokens by cache source."""
+
+    device: int = 0  # Tokens from device cache (GPU)
+    host: int = 0  # Tokens from host cache (CPU memory)
+    # L3 storage fields are only present when storage backend is enabled
+    storage: Optional[int] = None  # Tokens from L3 storage backend
+    storage_backend: Optional[str] = None  # Type of storage backend used
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        # Remove None fields so they don't appear in response when L3 is disabled
+        if self.storage is None:
+            data.pop("storage", None)
+        if self.storage_backend is None:
+            data.pop("storage_backend", None)
+        return data
+
+
+class PromptTokensDetails(BaseModel):
+    """Details about prompt tokens."""
+
+    cached_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
-    # only used to return cached tokens when --enable-cache-report is set
-    prompt_tokens_details: Optional[Dict[str, int]] = None
+    # Used to return cached tokens info when --enable-cache-report is set
+    prompt_tokens_details: Optional[PromptTokensDetails] = None
     reasoning_tokens: Optional[int] = 0
 
 
@@ -243,6 +269,7 @@ class CompletionRequest(BaseModel):
     user: Optional[str] = None
     return_hidden_states: bool = False
     return_routed_experts: bool = False
+    return_cached_tokens_details: bool = False
 
     # Extra parameters for SRT backend only and will be ignored by OpenAI models.
     top_k: int = -1
@@ -299,6 +326,7 @@ class SglExt(BaseModel):
     """
 
     routed_experts: Optional[str] = None
+    cached_tokens_details: Optional[CachedTokensDetails] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
@@ -314,15 +342,12 @@ class CompletionResponseChoice(BaseModel):
     finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
     matched_stop: Union[None, int, str] = None
     hidden_states: Optional[object] = None
-    sgl_ext: Optional[SglExt] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
         if self.hidden_states is None:
             data.pop("hidden_states", None)
-        if self.sgl_ext is None:
-            data.pop("sgl_ext", None)
         return data
 
 
@@ -334,6 +359,14 @@ class CompletionResponse(BaseModel):
     choices: List[CompletionResponseChoice]
     usage: UsageInfo
     metadata: Optional[Dict[str, Any]] = None
+    sglext: Optional[SglExt] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.sglext is None:
+            data.pop("sglext", None)
+        return data
 
 
 class CompletionResponseStreamChoice(BaseModel):
@@ -343,15 +376,12 @@ class CompletionResponseStreamChoice(BaseModel):
     finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]] = None
     matched_stop: Union[None, int, str] = None
     hidden_states: Optional[object] = None
-    sgl_ext: Optional[SglExt] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
         if self.hidden_states is None:
             data.pop("hidden_states", None)
-        if self.sgl_ext is None:
-            data.pop("sgl_ext", None)
         return data
 
 
@@ -362,6 +392,14 @@ class CompletionStreamResponse(BaseModel):
     model: str
     choices: List[CompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = None
+    sglext: Optional[SglExt] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.sglext is None:
+            data.pop("sglext", None)
+        return data
 
 
 class ChatCompletionMessageContentTextPart(BaseModel):
@@ -541,6 +579,7 @@ class ChatCompletionRequest(BaseModel):
     )  # noqa
     return_hidden_states: bool = False
     return_routed_experts: bool = False
+    return_cached_tokens_details: bool = False
     reasoning_effort: Optional[Literal["low", "medium", "high"]] = Field(
         default="medium",
         description="Constrains effort on reasoning for reasoning models. "
@@ -700,6 +739,13 @@ class ChatCompletionRequest(BaseModel):
                 )
             return value
 
+        # add per user request
+        spaces_between_special_tokens = (
+            True
+            if self.chat_template_kwargs is None
+            else self.chat_template_kwargs.get("spaces_between_special_tokens", True)
+        )
+
         sampling_params = {
             "temperature": get_param("temperature"),
             "max_new_tokens": self.max_completion_tokens or self.max_tokens,
@@ -722,6 +768,7 @@ class ChatCompletionRequest(BaseModel):
             "logit_bias": self.logit_bias,
             "custom_params": self.custom_params,
             "sampling_seed": self.seed,
+            "spaces_between_special_tokens": spaces_between_special_tokens,
         }
 
         if self.response_format and self.response_format.type == "json_schema":
@@ -779,15 +826,12 @@ class ChatCompletionResponseChoice(BaseModel):
     ] = None
     matched_stop: Union[None, int, str] = None
     hidden_states: Optional[object] = None
-    sgl_ext: Optional[SglExt] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
         if self.hidden_states is None:
             data.pop("hidden_states", None)
-        if self.sgl_ext is None:
-            data.pop("sgl_ext", None)
         return data
 
 
@@ -799,6 +843,14 @@ class ChatCompletionResponse(BaseModel):
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
     metadata: Optional[Dict[str, Any]] = None
+    sglext: Optional[SglExt] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.sglext is None:
+            data.pop("sglext", None)
+        return data
 
 
 class DeltaMessage(BaseModel):
@@ -807,15 +859,12 @@ class DeltaMessage(BaseModel):
     reasoning_content: Optional[str] = None
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     hidden_states: Optional[object] = None
-    sgl_ext: Optional[SglExt] = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
         if self.hidden_states is None:
             data.pop("hidden_states", None)
-        if self.sgl_ext is None:
-            data.pop("sgl_ext", None)
         return data
 
 
@@ -838,6 +887,14 @@ class ChatCompletionStreamResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = None
+    sglext: Optional[SglExt] = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if self.sglext is None:
+            data.pop("sglext", None)
+        return data
 
 
 class MultimodalEmbeddingInput(BaseModel):

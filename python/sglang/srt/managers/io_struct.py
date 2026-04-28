@@ -1011,6 +1011,8 @@ class BatchTokenIDOutput(
     load: GetLoadReqOutput = None
     # Customized info
     customized_info: Optional[Dict[str, List[Any]]] = None
+    # Detailed breakdown of cached tokens by source (device/host/storage)
+    cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
 
 
 @dataclass
@@ -1102,6 +1104,8 @@ class BatchStrOutput(
 
     # Customized info
     customized_info: Optional[Dict[str, List[Any]]] = None
+    # Detailed breakdown of cached tokens by source (device/host/storage)
+    cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
 
 
 @dataclass
@@ -1127,6 +1131,8 @@ class BatchMultimodalOutput(BaseBatchReq):
     placeholder_tokens_val: List[Optional[List[int]]]
 
     return_bytes: List[bool]
+    # Detailed breakdown of cached tokens by source (device/host/storage)
+    cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
 
 
 @dataclass
@@ -1144,6 +1150,8 @@ class BatchEmbeddingOutput(BaseBatchReq, RequestTimingMetricsMixin):
 
     # Number of times each request was retracted.
     retraction_counts: List[int]
+    # Detailed breakdown of cached tokens by source (device/host/storage)
+    cached_tokens_details: Optional[List[Optional[Dict[str, Any]]]] = None
 
 
 @dataclass
