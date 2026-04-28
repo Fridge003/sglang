@@ -136,6 +136,7 @@ from sglang.srt.model_executor.forward_batch_info import (
 )
 from sglang.srt.model_executor.hook_manager import register_forward_hooks
 from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
+    MemoryPoolConfig,
     ModelRunnerKVCacheMixin,
 )
 from sglang.srt.model_executor.piecewise_cuda_graph_runner import (
@@ -306,9 +307,14 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
         draft_model_idx: Optional[int] = None,
+        memory_pool_config: Optional[MemoryPoolConfig] = None,
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
+        # Set on target by `_resolve_memory_pool_config`; passed in for draft
+        # workers so they reuse target's resolved sizes (replaces legacy
+        # `server_args._draft_pool_config` mutation hack).
+        self.memory_pool_config = memory_pool_config
         self.device = server_args.device
         self.gpu_id = gpu_id
         self.tp_rank = tp_rank

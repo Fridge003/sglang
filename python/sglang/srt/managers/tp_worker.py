@@ -41,6 +41,7 @@ from sglang.srt.managers.scheduler import GenerationBatchResult
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.model_executor.model_runner_kv_cache_mixin import MemoryPoolConfig
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import MultiprocessingSerializer, broadcast_pyobj, set_random_seed
 from sglang.srt.utils.hf_transformers_utils import (
@@ -232,6 +233,7 @@ class TpModelWorker(BaseTpWorker):
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
         is_multi_layer_eagle: bool = False,
+        memory_pool_config: Optional[MemoryPoolConfig] = None,
     ):
         # Parse args
         self.server_args = server_args
@@ -250,6 +252,8 @@ class TpModelWorker(BaseTpWorker):
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.attn_cp_rank = attn_cp_rank
         self.moe_dp_rank = moe_dp_rank
+        # Draft worker: target's resolved MemoryPoolConfig (forwarded to ModelRunner).
+        self.memory_pool_config = memory_pool_config
 
         # MTP model runners
         self.model_runner_list: List[ModelRunner] = []
@@ -355,6 +359,7 @@ class TpModelWorker(BaseTpWorker):
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
             draft_model_idx=0 if self.is_multi_layer_eagle else None,
+            memory_pool_config=self.memory_pool_config,
         )
 
     def _init_multi_layer_eagle_model_runners(self):
@@ -380,6 +385,7 @@ class TpModelWorker(BaseTpWorker):
                     req_to_token_pool=self.req_to_token_pool,
                     token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                     draft_model_idx=i,
+                    memory_pool_config=self.memory_pool_config,
                 )
             )
 
