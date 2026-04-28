@@ -29,6 +29,7 @@ from typing import (
 )
 
 import torch
+import torch.nn.functional as F
 
 try:
     from triton_kernels.routing import GatherIndx, RoutingData, ScatterIndx, routing
@@ -446,6 +447,25 @@ def fused_topk_torch_native(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
     return topk_weights, topk_ids
+
+
+def fused_topk_softmax_torch_raw_logits(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    assert (
+        hidden_states.shape[0] == gating_output.shape[0]
+    ), f"Number of tokens mismatch, {hidden_states.shape=} vs {gating_output.shape=}"
+
+    _, topk_ids = torch.topk(gating_output, k=topk, dim=-1, sorted=False)
+    logits = gating_output.float()
+    topk_weights = logits.gather(1, topk_ids)
+    if renormalize:
+        topk_weights = F.softmax(topk_weights, dim=-1, dtype=torch.float32)
+
+    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
 def fused_topk_cpu(
@@ -1069,6 +1089,18 @@ def select_experts(
                 num_token_non_padded=num_token_non_padded,
                 expert_location_dispatch_info=expert_location_dispatch_info,
                 apply_routed_scaling_factor_on_output=apply_routed_scaling_factor_on_output,
+            )
+        elif (
+            get_moe_runner_backend().is_flashinfer_trtllm_routed()
+            and scoring_func == "softmax"
+            and correction_bias is None
+        ):
+            # flashinfer_trtllm_routed uses raw-logits topk
+            topk_weights, topk_ids = fused_topk_softmax_torch_raw_logits(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=num_routed_topk if _use_aiter else top_k,
+                renormalize=renormalize,
             )
         else:
             # Qwen3MOE uses fused_topk

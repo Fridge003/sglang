@@ -512,7 +512,9 @@ class ModelRunnerKVCacheMixin:
                 end_layer=self.end_layer,
                 enable_hisparse=self.enable_hisparse,
             )
-        elif self.server_args.attention_backend == "ascend":
+        elif (
+            self.server_args.attention_backend == "ascend" and not self.mambaish_config
+        ):
             if self.use_mla_backend:
                 from sglang.srt.hardware_backend.npu.memory_pool_npu import (
                     NPUMLATokenToKVPool,
