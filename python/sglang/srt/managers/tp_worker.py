@@ -55,6 +55,7 @@ from sglang.srt.weight_sync.tensor_bucket import FlattenedTensorBucket
 if TYPE_CHECKING:
     from sglang.srt.managers.cache_controller import LayerDoneCounter
     from sglang.srt.model_executor.model_runner import ModelRunner
+    from sglang.srt.model_executor.model_runner_kv_cache_mixin import MemoryPoolConfig
 
 logger = logging.getLogger(__name__)
 
@@ -232,8 +233,8 @@ class TpModelWorker(BaseTpWorker):
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
-        is_multi_layer_eagle: bool = False,
         memory_pool_config: Optional[MemoryPoolConfig] = None,
+        is_multi_layer_eagle: bool = False,
     ):
         # Parse args
         self.server_args = server_args
@@ -358,8 +359,8 @@ class TpModelWorker(BaseTpWorker):
             is_draft_worker=self.is_draft_worker,
             req_to_token_pool=self.req_to_token_pool,
             token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-            draft_model_idx=0 if self.is_multi_layer_eagle else None,
             memory_pool_config=self.memory_pool_config,
+            draft_model_idx=0 if self.is_multi_layer_eagle else None,
         )
 
     def _init_multi_layer_eagle_model_runners(self):
@@ -384,8 +385,8 @@ class TpModelWorker(BaseTpWorker):
                     is_draft_worker=self.is_draft_worker,
                     req_to_token_pool=self.req_to_token_pool,
                     token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                    draft_model_idx=i,
                     memory_pool_config=self.memory_pool_config,
+                    draft_model_idx=i,
                 )
             )
 
