@@ -375,6 +375,8 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
     return_hidden_states_before_norm: bool = False
 
     hisparse_coordinator: Optional[HiSparseCoordinator] = None
+    # For dumper: request IDs for cross-step sequence tracking
+    rids: Optional[List[str]] = None
 
     @classmethod
     def init_new(
@@ -420,6 +422,7 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             tbo_split_seq_index=batch.tbo_split_seq_index,
             dimensions=batch.dimensions,
             return_hidden_states_before_norm=batch.return_hidden_states_before_norm,
+            rids=[req.rid for req in batch.reqs],
         )
         device = model_runner.device
 
