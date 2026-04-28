@@ -51,7 +51,7 @@ Per batch:
 - [x] batch 4: `f4417475b8` (2026-02-12, +400 commits) — merge commit `bd8ff150e8`
 - [x] batch 5: `5ddc84e33e` (2026-02-16, +500 commits) — merge commit `f5c1fe8cb6`
 - [x] batch 6: `38a69652e6` (2026-02-20, +600 commits) — merge commit `dfb088dbc6`
-- [ ] batch 7: `9bce3b040c` (2026-02-24, +700 commits)
+- [x] batch 7: `9bce3b040c` (2026-02-24, +700 commits) — merge commit `0fd2a78492`
 - [ ] batch 8: `bdc1e46e5a` (2026-02-26, +800 commits)
 - [ ] batch 9: `ea6ff7b01f` (2026-03-01, +900 commits)
 - [ ] batch 10: `1135e214b3` (2026-03-03, +1000 commits)
