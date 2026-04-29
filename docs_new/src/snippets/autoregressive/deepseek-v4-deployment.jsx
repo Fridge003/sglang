@@ -313,8 +313,6 @@ export const DeepSeekV4Deployment = () => {
         fp4Flags.push("  --speculative-eagle-topk 1");
         fp4Flags.push("  --speculative-num-draft-tokens 4");
       }
-      fp4Flags.push("  --chunked-prefill-size 4096");
-      fp4Flags.push("  --disable-flashinfer-autotune");
       if (isBig) fp4Flags.push("  --mem-fraction-static 0.88");
       if (toolcall === "enabled") fp4Flags.push("  --tool-call-parser deepseekv4");
       if (reasoningParser === "enabled") fp4Flags.push("  --reasoning-parser deepseek-v4");
