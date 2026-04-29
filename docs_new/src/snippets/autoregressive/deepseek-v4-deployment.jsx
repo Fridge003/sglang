@@ -295,8 +295,9 @@ export const DeepSeekV4Deployment = () => {
     // Instruct repos through the Marlin MoE runner, so it doesn't share envs
     // or flags with either the FP8 H200 path or the Blackwell paths.
     //   Flash: TP=4, single node       Pro: TP=8, single node
-    //   low-latency:           MTP enabled (steps=3 / topk=1 / draft=4)
-    //   balanced / max-throughput: MTP disabled
+    //   low-latency:    MTP 3 / 1 / 4 (steps / topk / draft-tokens)
+    //   balanced:       MTP 1 / 1 / 2
+    //   max-throughput: MTP disabled
     if (hardware === "h200-fp4") {
       const verifyKey = `${hardware}|${modelSize}|${recipe}`;
       if (TBD_RECIPES.has(verifyKey)) return TBD_PLACEHOLDER;
@@ -312,6 +313,11 @@ export const DeepSeekV4Deployment = () => {
         fp4Flags.push("  --speculative-num-steps 3");
         fp4Flags.push("  --speculative-eagle-topk 1");
         fp4Flags.push("  --speculative-num-draft-tokens 4");
+      } else if (recipe === "balanced") {
+        fp4Flags.push("  --speculative-algo EAGLE");
+        fp4Flags.push("  --speculative-num-steps 1");
+        fp4Flags.push("  --speculative-eagle-topk 1");
+        fp4Flags.push("  --speculative-num-draft-tokens 2");
       }
       if (isBig) fp4Flags.push("  --mem-fraction-static 0.88");
       if (toolcall === "enabled") fp4Flags.push("  --tool-call-parser deepseekv4");

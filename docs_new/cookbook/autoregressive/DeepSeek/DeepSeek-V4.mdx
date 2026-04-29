@@ -163,7 +163,8 @@ FP4-mixed Instruct repos (`deepseek-ai/DeepSeek-V4-Flash`,
 (`--moe-runner-backend marlin`). Flash fits on TP=4 and Pro fits on TP=8
 single-node. Only the `low-latency` / `balanced` / `max-throughput`
 recipes are supported on this path (`cp` / `pd-disagg` are not). MTP is
-enabled for `low-latency` and disabled for `balanced` / `max-throughput`.
+enabled for `low-latency` (`steps=3 / topk=1 / draft=4`) and `balanced`
+(`steps=1 / topk=1 / draft=2`), and disabled for `max-throughput`.
 
 PD-Disagg recipes on H200 may require `docker run --privileged --ulimit memlock=-1`
 (or `--device /dev/infiniband:/dev/infiniband --cap-add IPC_LOCK`) so mooncake
