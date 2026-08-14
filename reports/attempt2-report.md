@@ -10,6 +10,25 @@ Generated: `2026-08-14T06:56:40.279385Z`
 - Replay duration: 19,334.645255 seconds
 - QPS window: 1.000000 seconds
 
+
+## Server setting
+
+```bash
+nohup setsid sglang serve \
+  --trust-remote-code \
+  --model-path deepseek-ai/DeepSeek-V4-Flash-0731 \
+  --tp 8 \
+  --moe-runner-backend flashinfer_mxfp4 \
+  --speculative-algorithm DSPARK \
+  --disable-flashinfer-autotune \
+  --swa-full-tokens-ratio 0.1 \
+  --mem-fraction-static 0.85 \
+  --enable-cache-report \
+  --host 0.0.0.0 \
+  --port 30000 \
+  >"$artifact_dir/server.log" 2>&1 < /dev/null &
+```
+
 ## Central metrics
 
 | Metric | Value | Unit |
