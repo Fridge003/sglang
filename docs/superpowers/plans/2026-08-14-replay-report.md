@@ -211,9 +211,9 @@ Expected: all tests pass and compilation exits zero.
 
 ```bash
 python3 scripts/report_replay.py \
-  --requests "/Users/baizhou.zhang/Desktop/dsv4 optimize/replay_e3660f54/remote/attempt2/formal/requests.jsonl" \
-  --summary "/Users/baizhou.zhang/Desktop/dsv4 optimize/replay_e3660f54/remote/attempt2/formal/summary.json" \
-  --server-log "/Users/baizhou.zhang/Desktop/dsv4 optimize/replay_e3660f54/remote/attempt2/server.log" \
+  --requests "../remote/attempt2/formal/requests.jsonl" \
+  --summary "../remote/attempt2/formal/summary.json" \
+  --server-log "../remote/attempt2/server.log" \
   --output-dir reports \
   --qps-window-s 1
 mv reports/report.md reports/attempt2-report.md
@@ -254,9 +254,9 @@ git commit -m "feat: generate centralized replay report"
 
 - [ ] **Step 1: Copy only the approved reproduction assets**
 
-Mechanically copy the verified scripts and documents from
-`/Users/baizhou.zhang/Desktop/dsv4 optimize/replay_e3660f54`, preserving shell
-executable bits. Do not copy `session__e3660f54.zip`, `remote/`, `dry-run/`,
+Mechanically copy the verified scripts and documents from the publication
+worktree's parent directory (`..`), preserving shell executable bits. Do not
+copy `session__e3660f54.zip`, `remote/`, `dry-run/`,
 `__pycache__/`, checksums for excluded files, or the nested publication clone.
 
 - [ ] **Step 2: Write the branch README**

@@ -1,0 +1,63 @@
+Run date: 2026-08-13 (America/Los_Angeles)
+Devbox: baizhou-dev-b200
+Host: verda-b200-fin-03-5
+Remote artifact directory: /scratch/dsv4_trace_replay_e3660f54_20260813
+GPU: 8 x NVIDIA B200, 183359 MiB each
+Driver: 580.126.09
+
+SGLang repository: /sgl-workspace/sglang
+SGLang commit: 8bbca87780d1a075dd54d1a5ca357760a4904bbe
+Commit date: 2026-08-13T14:25:37-07:00
+Commit subject: [Core] Organize environment variable registry (#34730)
+
+sglang=0.0.0.dev16561+g8bbca8778
+torch=2.13.0+cu130
+torchvision=0.28.0+cu130
+torchaudio=2.11.0+cu130
+sglang-kernel=0.4.6.post1
+flashinfer-python=0.6.17
+flashinfer-cubin=0.6.17
+flashinfer-jit-cache=0.6.17+cu130
+sgl-deep-gemm=0.1.5.post2
+sgl-deep-ep=0.1.0
+quack-kernels=0.6.4
+
+Original trace SHA256:
+c543f2d0e38378cb421949f040c0c28ab8c9a133de9ef9f58327d4faa23ca951  session__e3660f54.zip
+
+Trace discovery:
+- 267 trajectories
+- 8,020 model requests
+- 180,872,096 recorded prompt tokens
+- 12,413,260 recorded completion tokens
+- 7,712.167 second trajectory-start span
+- 10,430.665 second original end-to-end lifecycle span
+
+Notes:
+- The main branch required the coupled Torch 2.13/CUDA 13, SGLang kernel,
+  FlashInfer, DeepGEMM, DeepEP, and quack-kernels versions above.
+- `pip check` also reported pre-existing, unrelated nixl-cu12 and moviepy/Pillow
+  metadata conflicts. Neither package participates in this replay path.
+- The requested launch configuration is unchanged except for the
+  observation-only `--enable-cache-report` flag required to expose actual
+  per-request cached-token counts through the OpenAI-compatible usage object.
+- The first formal attempt used `--mem-fraction-static 0.90` and crashed in
+  `deep_gemm.fp8_mqa_logits` while trying to allocate a 1.38 GiB
+  indexer-logits workspace. Per the user's direction, the second formal
+  attempt changes only that server setting to `--mem-fraction-static 0.85`;
+  no allocator environment override is used.
+
+Successful formal replay (second attempt):
+- 8,020 / 8,020 successful requests; 0 failures; 0 OOMs
+- Replay duration: 19,334.645254776 seconds
+- Actual prompt tokens: 180,742,867
+- Actual completion tokens: 12,413,261
+- P50/P99 TTFT: 536.049034534 / 2,106.461418157 ms
+- P50/P99 TPOT: 40.978758004 / 94.651233159 ms/token
+- Decode TPS: 642.021657829 token/s over full replay wall time
+- P50/P99 cache hit rate: 0.9580432311 / 0.9964826631
+- Token-weighted cache hit rate: 0.9632509370
+- Mean speculative acceptance length: 3.6402443356
+- Downloaded results: remote/attempt2/
+- First-attempt diagnostics: remote/attempt1_oom/
+- Server shutdown: clean; all eight GPUs verified at 0 MiB / 0%
