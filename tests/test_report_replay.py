@@ -157,5 +157,102 @@ class AcceptanceHistogramTest(unittest.TestCase):
         self.assertEqual(got, [2.5, 4.0])
 
 
+class CliTest(unittest.TestCase):
+    def test_cli_writes_complete_markdown_and_json_reports(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            requests_path = temp / "requests.jsonl"
+            summary_path = temp / "summary.json"
+            server_log_path = temp / "server.log"
+            output_dir = temp / "report"
+            rows = [
+                make_row(
+                    "a",
+                    0,
+                    4,
+                    ttft_s=1,
+                    tpot_s=0.1,
+                    prompt=100,
+                    output=7,
+                    cached=80,
+                ),
+                make_row(
+                    "b",
+                    1,
+                    3,
+                    ttft_s=0.5,
+                    tpot_s=0.2,
+                    prompt=200,
+                    output=6,
+                    cached=100,
+                ),
+            ]
+            requests_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+            summary_path.write_text(
+                json.dumps(
+                    {
+                        "total_requests": 2,
+                        "successful_requests": 2,
+                        "failed_requests": 0,
+                        "replay_duration_s": 4.0,
+                        "decode_tps": 3.25,
+                        "mean_accept_length": 3.5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            server_log_path.write_text(
+                "\n".join(
+                    [
+                        "[2026-08-14 00:00:01 TP0] Decode batch, accept len: 2.0, accept rate: 0.2",
+                        "[2026-08-14 00:00:03 TP0] Decode batch, accept len: 4.0, accept rate: 0.4",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "report_replay.py"),
+                    "--requests",
+                    str(requests_path),
+                    "--summary",
+                    str(summary_path),
+                    "--server-log",
+                    str(server_log_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--qps-window-s",
+                    "1",
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            report = json.loads((output_dir / "report.json").read_text())
+            markdown = (output_dir / "report.md").read_text()
+
+        self.assertEqual(report["counts"]["total_requests"], 2)
+        self.assertEqual(report["counts"]["successful_requests"], 2)
+        self.assertEqual(report["metrics"]["p50_ttft_ms"], 750.0)
+        self.assertAlmostEqual(report["metrics"]["p50_decode_tps_per_user"], 8 / 3)
+        self.assertEqual(report["acceptance"]["p50"], 3.0)
+        self.assertEqual(report["acceptance"]["p99"], 3.98)
+        self.assertEqual(report["acceptance"]["mean"], 3.5)
+        self.assertEqual(report["acceptance"]["mean_source"], "summary")
+        self.assertEqual(sum(x["count"] for x in report["isl_histogram"]), 2)
+        self.assertEqual(sum(x["count"] for x in report["osl_histogram"]), 2)
+        self.assertIn("P50 Decode TPS per user", markdown)
+        self.assertIn("ISL Histogram", markdown)
+        self.assertIn("OSL Histogram", markdown)
+        self.assertIn("Source artifacts", markdown)
+        self.assertNotIn("ITL", markdown)
+
+
 if __name__ == "__main__":
     unittest.main()

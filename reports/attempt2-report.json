@@ -1,0 +1,242 @@
+{
+  "acceptance": {
+    "log_sample_mean": 3.314702064896755,
+    "mean": 3.6402443356182546,
+    "mean_source": "summary",
+    "p50": 3.33,
+    "p99": 4.885200000000005,
+    "sample_count": 8475
+  },
+  "counts": {
+    "failed_requests": 0,
+    "successful_requests": 8020,
+    "total_completion_tokens": 12413261,
+    "total_prompt_tokens": 180742867,
+    "total_requests": 8020
+  },
+  "generated_at": "2026-08-14T06:56:40.279385Z",
+  "isl_histogram": [
+    {
+      "count": 0,
+      "cumulative_percentage": 0.0,
+      "lower_bound": 0,
+      "percentage": 0.0,
+      "range": "0-128",
+      "upper_bound": 128
+    },
+    {
+      "count": 0,
+      "cumulative_percentage": 0.0,
+      "lower_bound": 129,
+      "percentage": 0.0,
+      "range": "129-256",
+      "upper_bound": 256
+    },
+    {
+      "count": 0,
+      "cumulative_percentage": 0.0,
+      "lower_bound": 257,
+      "percentage": 0.0,
+      "range": "257-512",
+      "upper_bound": 512
+    },
+    {
+      "count": 0,
+      "cumulative_percentage": 0.0,
+      "lower_bound": 513,
+      "percentage": 0.0,
+      "range": "513-1024",
+      "upper_bound": 1024
+    },
+    {
+      "count": 185,
+      "cumulative_percentage": 2.306733167082294,
+      "lower_bound": 1025,
+      "percentage": 2.306733167082294,
+      "range": "1025-2048",
+      "upper_bound": 2048
+    },
+    {
+      "count": 1068,
+      "cumulative_percentage": 15.623441396508728,
+      "lower_bound": 2049,
+      "percentage": 13.316708229426432,
+      "range": "2049-4096",
+      "upper_bound": 4096
+    },
+    {
+      "count": 1512,
+      "cumulative_percentage": 34.47630922693266,
+      "lower_bound": 4097,
+      "percentage": 18.85286783042394,
+      "range": "4097-8192",
+      "upper_bound": 8192
+    },
+    {
+      "count": 1840,
+      "cumulative_percentage": 57.418952618453865,
+      "lower_bound": 8193,
+      "percentage": 22.942643391521198,
+      "range": "8193-16384",
+      "upper_bound": 16384
+    },
+    {
+      "count": 1667,
+      "cumulative_percentage": 78.20448877805487,
+      "lower_bound": 16385,
+      "percentage": 20.785536159600998,
+      "range": "16385-32768",
+      "upper_bound": 32768
+    },
+    {
+      "count": 1185,
+      "cumulative_percentage": 92.98004987531172,
+      "lower_bound": 32769,
+      "percentage": 14.775561097256858,
+      "range": "32769-65536",
+      "upper_bound": 65536
+    },
+    {
+      "count": 526,
+      "cumulative_percentage": 99.53865336658355,
+      "lower_bound": 65537,
+      "percentage": 6.558603491271821,
+      "range": "65537-131072",
+      "upper_bound": 131072
+    },
+    {
+      "count": 37,
+      "cumulative_percentage": 100.0,
+      "lower_bound": 131073,
+      "percentage": 0.4613466334164589,
+      "range": ">131072",
+      "upper_bound": null
+    }
+  ],
+  "metrics": {
+    "aggregate_decode_tps": 642.0216578286435,
+    "mean_concurrency": 26.95364594889479,
+    "p50_cache_hit_rate": 0.9580432310885934,
+    "p50_concurrency": 21.0,
+    "p50_decode_tps_per_user": 24.402886976287935,
+    "p50_qps": 0.0,
+    "p50_tpot_ms": 40.97875800398908,
+    "p50_ttft_ms": 536.0490345337894,
+    "p99_cache_hit_rate": 0.9964826631153246,
+    "p99_concurrency": 65.0,
+    "p99_qps": 3.0,
+    "p99_tpot_ms": 94.65123315860394,
+    "p99_ttft_ms": 2106.461418156986,
+    "qps_window_s": 1.0
+  },
+  "osl_histogram": [
+    {
+      "count": 2302,
+      "cumulative_percentage": 28.703241895261844,
+      "lower_bound": 0,
+      "percentage": 28.703241895261844,
+      "range": "0-128",
+      "upper_bound": 128
+    },
+    {
+      "count": 1832,
+      "cumulative_percentage": 51.54613466334165,
+      "lower_bound": 129,
+      "percentage": 22.8428927680798,
+      "range": "129-256",
+      "upper_bound": 256
+    },
+    {
+      "count": 1310,
+      "cumulative_percentage": 67.88029925187033,
+      "lower_bound": 257,
+      "percentage": 16.33416458852868,
+      "range": "257-512",
+      "upper_bound": 512
+    },
+    {
+      "count": 897,
+      "cumulative_percentage": 79.06483790523691,
+      "lower_bound": 513,
+      "percentage": 11.184538653366584,
+      "range": "513-1024",
+      "upper_bound": 1024
+    },
+    {
+      "count": 630,
+      "cumulative_percentage": 86.92019950124688,
+      "lower_bound": 1025,
+      "percentage": 7.855361596009976,
+      "range": "1025-2048",
+      "upper_bound": 2048
+    },
+    {
+      "count": 456,
+      "cumulative_percentage": 92.60598503740648,
+      "lower_bound": 2049,
+      "percentage": 5.685785536159601,
+      "range": "2049-4096",
+      "upper_bound": 4096
+    },
+    {
+      "count": 296,
+      "cumulative_percentage": 96.29675810473816,
+      "lower_bound": 4097,
+      "percentage": 3.690773067331671,
+      "range": "4097-8192",
+      "upper_bound": 8192
+    },
+    {
+      "count": 147,
+      "cumulative_percentage": 98.12967581047381,
+      "lower_bound": 8193,
+      "percentage": 1.8329177057356607,
+      "range": "8193-16384",
+      "upper_bound": 16384
+    },
+    {
+      "count": 97,
+      "cumulative_percentage": 99.33915211970074,
+      "lower_bound": 16385,
+      "percentage": 1.2094763092269327,
+      "range": "16385-32768",
+      "upper_bound": 32768
+    },
+    {
+      "count": 53,
+      "cumulative_percentage": 100.0,
+      "lower_bound": 32769,
+      "percentage": 0.6608478802992519,
+      "range": "32769-65536",
+      "upper_bound": 65536
+    },
+    {
+      "count": 0,
+      "cumulative_percentage": 100.0,
+      "lower_bound": 65537,
+      "percentage": 0.0,
+      "range": "65537-131072",
+      "upper_bound": 131072
+    },
+    {
+      "count": 0,
+      "cumulative_percentage": 100.0,
+      "lower_bound": 131073,
+      "percentage": 0.0,
+      "range": ">131072",
+      "upper_bound": null
+    }
+  ],
+  "replay": {
+    "duration_s": 19334.645254776,
+    "end": "2026-08-14T06:20:17.036775Z",
+    "start": "2026-08-14T00:58:02.419441Z"
+  },
+  "schema_version": 1,
+  "sources": {
+    "requests": "../remote/attempt2/formal/requests.jsonl",
+    "server_log": "../remote/attempt2/server.log",
+    "summary": "../remote/attempt2/formal/summary.json"
+  },
+  "warnings": []
+}
