@@ -34,6 +34,7 @@ from sglang.srt.distributed.parallel_state import (
 )
 from sglang.srt.environ import envs
 from sglang.srt.layers.attention.linear.utils import pp_spec_stable_rows_enabled
+from sglang.srt.layers.cp.base import disable_cp_strategy
 from sglang.srt.managers.schedule_batch import set_mamba_track_indices_from_reqs
 from sglang.srt.managers.utils import _async_d2h
 from sglang.srt.mem_cache.allocation import (
@@ -731,6 +732,7 @@ def draft_pp_context():
         yield
 
 
+@contextmanager
 def draft_tp_context(owns_attention: bool):
     """Enter the TP placement that draft work runs under.
 
@@ -739,9 +741,16 @@ def draft_tp_context(owns_attention: bool):
     target's TP placement. Enter it from outside any draft scope.
     """
     if not owns_attention:
-        return contextlib.nullcontext()
-    group = getattr(get_parallel(), f"{draft_attn_parallel_group()}_group")
-    return patch_tensor_parallel_group(group, owns_attention=True)
+        yield
+        return
+    parallel = get_parallel()
+    group = getattr(parallel, f"{draft_attn_parallel_group()}_group")
+    with (
+        patch_tensor_parallel_group(group, owns_attention=True),
+        parallel.override(enable_prefill_cp=False, enable_cp_tp_group_sharing=False),
+        disable_cp_strategy(),
+    ):
+        yield
 
 
 def spec_stage_span(name: str):
