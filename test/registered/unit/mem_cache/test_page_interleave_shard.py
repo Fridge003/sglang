@@ -97,7 +97,7 @@ from sglang.srt.mem_cache.page_interleave_pool import (
 from sglang.srt.mem_cache.radix_cache import RadixKey
 from sglang.srt.mem_cache.unified_cache.components import ComponentType
 from sglang.srt.mem_cache.unified_radix_cache import UnifiedRadixCache
-from sglang.srt.runtime_context import get_parallel, publish
+from sglang.srt.runtime_context import get_context, get_parallel, publish
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import ceil_div
 from sglang.test.ci.ci_register import register_cpu_ci, register_cuda_ci
@@ -136,24 +136,13 @@ class TestPageShardScratchSizing(CustomTestCase):
         v_head_dim=64,
     ):
         group = SimpleNamespace(world_size=shard_size, rank_in_group=0)
-        parallel = SimpleNamespace(
-            enable_kv_cache_sharding=enabled,
-            attn_cp_group=(SimpleNamespace(world_size=1) if use_mla else group),
-            attn_tp_group=group,
-            attn_tp_size=tp_size,
-            attn_dp_size=dp_size,
-        )
-        schedule = SimpleNamespace(
-            chunked_prefill_size=chunk_tokens,
-            prefill_max_requests=prefill_max_requests,
-            max_running_requests=max_running_requests,
-        )
         kvc = SimpleNamespace(
             is_draft_worker=draft,
             use_mla_backend=use_mla,
             page_size=16,
             kv_cache_dtype=torch.bfloat16,
             model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(architectures=["DeepseekV2ForCausalLM"]),
                 context_len=context_len,
                 kv_lora_rank=16,
                 qk_rope_head_dim=8,
@@ -163,11 +152,16 @@ class TestPageShardScratchSizing(CustomTestCase):
             ),
         )
         with (
-            unittest.mock.patch.object(
-                page_interleave, "get_parallel", return_value=parallel
+            get_context().override_server_args(
+                enable_kv_cache_sharding=enabled,
+                tp_size=tp_size * dp_size,
+                attn_dp_size=dp_size,
+                chunked_prefill_size=chunk_tokens,
+                prefill_max_requests=prefill_max_requests,
+                max_running_requests=max_running_requests,
             ),
             unittest.mock.patch.object(
-                page_interleave, "get_schedule", return_value=schedule
+                page_interleave, "get_kv_shard_group", return_value=group
             ),
         ):
             yield kvc
@@ -709,6 +703,38 @@ class TestShardedCoreGate(_TreeCoreBackendCase):
             UnifiedRadixCache(params)  # no raise: sharding is off
 
 
+class TestShardedRestoreSpans(_TreeCoreBackendCase):
+    tree_core_backend = "python"
+
+    def test_split_host_fragments_retain_original_page_owners(self):
+        tree = _unified_tree()
+        _insert(tree, list(range(32)), rotation_base=2)
+        _insert(tree, list(range(12)) + [90, 91, 92, 93], rotation_base=2)
+        _insert(tree, list(range(16)) + [100, 101, 102, 103], rotation_base=2)
+        matched = tree.match_prefix(
+            MatchPrefixParams(key=RadixKey(array("q", range(32))))
+        )
+        core = tree.tree_core
+        node = core.node_by_id(matched.last_device_node)
+        path = []
+        while node.parent is not None:
+            path.append(node.id)
+            node = node.parent
+        spans = core.load_back_shard_spans(path[::-1], page_size=4, shard_size=4)
+        self.assertEqual(spans, [(12, 2), (4, 1), (16, 2)])
+        allocator = PageInterleavePoolAllocator(
+            size=64,
+            physical_page_size=4,
+            shard_size=4,
+            dtype=torch.float16,
+            device="cpu",
+            kvcache=None,
+            need_sort=False,
+        )
+        rows = allocator.alloc_restore_spans(spans)
+        self.assertEqual((rows[::4] // 4 % 4).tolist(), [2, 3, 0, 1, 2, 3, 0, 1])
+
+
 class _GraftReq:
     """Minimal Req stand-in for checkpoint."""
 
@@ -1116,13 +1142,8 @@ class TestBeginShardExtendPlan(CustomTestCase):
         self.assertIn("cyclic", str(ctx.exception))
 
 
-class TestLayerTransferCounterRefused(CustomTestCase):
-    """Layer-wise KV load-back must fail loud at registration.
-
-    The gather reads pool rows directly (`_gather_pairs`), so it never passes
-    through the base getters' `layer_transfer_counter.wait_until` hook, and
-    `begin_shard_extend` kicks the first gather before any getter runs.
-    """
+class TestLayerTransferCounter(CustomTestCase):
+    """Disabling load-back must retain the base pool's no-counter behavior."""
 
     class _Base:
         def register_layer_transfer_counter(self, counter):
@@ -1131,12 +1152,6 @@ class TestLayerTransferCounterRefused(CustomTestCase):
     class _Pool(PageInterleaveKVPoolMixin, _Base):
         def __init__(self):
             pass
-
-    def test_a_real_counter_is_refused(self):
-        pool = self._Pool()
-        with self.assertRaises(NotImplementedError) as cm:
-            pool.register_layer_transfer_counter(object())
-        self.assertIn("logical-page KV sharding", str(cm.exception))
 
     def test_none_stays_a_no_op(self):
         """The SWA/hybrid wrappers disable the counter by passing None."""
@@ -1391,7 +1406,9 @@ class TestShardSendFilter(CustomTestCase):
         pages = np.array(_chain_pages(base=0, n_pages=4), dtype=np.int64)
         for rank, expect_skip in ((3, [True, False]), (1, [False, False])):
             sender = SimpleNamespace(
-                kv_mgr=SimpleNamespace(kv_shard_rank=rank, kv_shard_size=N),
+                kv_mgr=SimpleNamespace(
+                    kv_shard_rank=rank, kv_shard_size=N, is_hybrid_mla_backend=False
+                ),
                 curr_idx=0,
                 num_kv_indices=len(pages),
             )

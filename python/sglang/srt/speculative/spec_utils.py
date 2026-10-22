@@ -747,7 +747,11 @@ def draft_tp_context(owns_attention: bool):
     group = getattr(parallel, f"{draft_attn_parallel_group()}_group")
     with (
         patch_tensor_parallel_group(group, owns_attention=True),
-        parallel.override(enable_prefill_cp=False, enable_cp_tp_group_sharing=False),
+        parallel.override(
+            enable_prefill_cp=False,
+            enable_cp_tp_group_sharing=False,
+            enable_kv_cache_sharding=False,
+        ),
         disable_cp_strategy(),
     ):
         yield

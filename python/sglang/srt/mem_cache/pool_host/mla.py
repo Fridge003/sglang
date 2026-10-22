@@ -19,6 +19,7 @@ from sglang.kernels.ops.kvcache.hicache import (
 from sglang.kernels.ops.kvcache.hicache import (
     transfer_hicache_one_layer_mla as jit_transfer_hicache_one_layer_mla,
 )
+from sglang.srt.layers.attention.kv_shard_hooks import filter_kv_shard_host_indices
 from sglang.srt.layers.dcp.layout import maybe_dcp_kernel_indices
 from sglang.srt.mem_cache.device_pool_info import MLABufferInfo, MLASplitBuffers
 from sglang.srt.mem_cache.pool_host._kvcacheio import (
@@ -702,6 +703,10 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         is_draft: bool = False,
     ):
         assert not self._is_dummy, "load on a dummy (non-src MLA) host pool"
+        if not is_draft:
+            host_indices, device_indices = filter_kv_shard_host_indices(
+                device_pool, host_indices, device_indices
+            )
         if not is_draft and layer_id not in self._target_layer_indices:
             return
         host_indices = maybe_dcp_kernel_indices(
@@ -995,6 +1000,9 @@ class MLATokenToKVPoolHost(HiSparseHostPoolMixin, HostKVCache):
         self, device_pool, host_indices, device_indices, io_backend
     ):
         assert not self._is_dummy, "backup on a dummy (non-src MLA) host pool"
+        host_indices, device_indices = filter_kv_shard_host_indices(
+            device_pool, host_indices, device_indices
+        )
         host_indices = maybe_dcp_kernel_indices(
             host_indices, self.dcp_size, self.dcp_rank
         )

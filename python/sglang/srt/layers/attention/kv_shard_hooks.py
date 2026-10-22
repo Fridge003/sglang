@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from sglang.srt.mem_cache.memory_pool import HybridLinearKVPool
 from sglang.srt.mem_cache.page_interleave_pool import PageInterleaveKVPoolMixin
 
 if TYPE_CHECKING:
@@ -32,7 +33,9 @@ if TYPE_CHECKING:
 
 
 def get_kv_shard_pool(token_to_kv_pool) -> Optional[PageInterleaveKVPoolMixin]:
-    """Return the page-interleaved pool, if logical-page sharding is active."""
+    """Find sharded attention storage without involving hybrid recurrent state."""
+    if isinstance(token_to_kv_pool, HybridLinearKVPool):
+        token_to_kv_pool = token_to_kv_pool.full_kv_pool
     return (
         token_to_kv_pool
         if isinstance(token_to_kv_pool, PageInterleaveKVPoolMixin)
@@ -65,3 +68,19 @@ def prepare_kv_shard_forward(
         seq_lens,
     )
     return True
+
+
+def filter_kv_shard_host_indices(pool, host_indices, device_indices):
+    """Pair host rows with the persistent local rows owned by this rank.
+
+    HiCache retains mirrored host indices. Restoration must preserve the
+    original owner sequence; KDA and draft pools do not enter this mapping.
+    """
+    shard = get_kv_shard_pool(pool)
+    if shard is None:
+        return host_indices, device_indices
+    mask = shard.placement.local_mask(device_indices, shard.shard_rank)
+    return (
+        host_indices[mask.to(host_indices.device)],
+        shard.placement.local_index(device_indices[mask]),
+    )

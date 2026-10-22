@@ -15,6 +15,7 @@ from sglang.kernels.ops.kvcache.hicache import (
 from sglang.kernels.ops.kvcache.hicache import (
     transfer_hicache_all_layer_mla_staged_lf_pf as jit_transfer_hicache_all_layer_mla_staged_lf_pf,
 )
+from sglang.srt.layers.attention.kv_shard_hooks import filter_kv_shard_host_indices
 from sglang.srt.mem_cache.hicache_storage import PoolName
 from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
 from sglang.srt.mem_cache.pool_host._kvcacheio import (
@@ -383,6 +384,10 @@ class DSAIndexerPoolHost(HostKVCache):
         *,
         is_draft: bool = False,
     ):
+        if not is_draft:
+            host_indices, device_indices = filter_kv_shard_host_indices(
+                device_pool, host_indices, device_indices
+            )
         if not is_draft and not self._is_device_layer_owned(device_pool, layer_id):
             return
         assert not getattr(self, "_is_dummy", False), (
@@ -505,6 +510,9 @@ class DSAIndexerPoolHost(HostKVCache):
     def backup_from_device_all_layer(
         self, device_pool, host_indices, device_indices, io_backend
     ):
+        host_indices, device_indices = filter_kv_shard_host_indices(
+            device_pool, host_indices, device_indices
+        )
         assert not getattr(self, "_is_dummy", False), (
             "backup on a dummy (non-src DSA) host pool"
         )

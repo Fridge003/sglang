@@ -241,12 +241,18 @@ def _make_eager_idle_topk_result(
     )
 
 
-def _index_k_write_targets(pool, layer_id: int, loc: torch.Tensor):
+def _index_k_write_targets(
+    pool, layer_id: int, loc: torch.Tensor, *, immutable_plan=None
+):
     """(index-K buffer, token slots, selected token rows or None) to write."""
     shard_pool = get_kv_shard_pool(pool)
     if shard_pool is None:
         return ((pool.get_index_k_with_scale_buffer(layer_id=layer_id), loc, None),)
-    return shard_pool.index_key_cache.write_targets(layer_id, loc)
+    if shard_pool is not pool:
+        layer_id = pool._transfer_full_attention_id(layer_id)
+    return shard_pool.index_key_cache.write_targets(
+        layer_id, loc, immutable_plan=immutable_plan
+    )
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:

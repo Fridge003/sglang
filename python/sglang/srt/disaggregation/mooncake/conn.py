@@ -1361,7 +1361,23 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         dst_device_kv_indices: Optional[npt.NDArray[np.int32]] = None,
         dst_kv_item_len: Optional[int] = None,
         dst_attn_tp_size: Optional[int] = None,
+        dst_tp_rank: Optional[int] = None,
     ):
+        if self.kv_shard_size > 1 and self.is_hybrid_mla_backend:
+            if dst_device_kv_indices is not None:
+                raise ValueError(
+                    "Hybrid KV sharding does not support HiSparse destinations"
+                )
+            return self._send_sharded_hybrid_kvcache(
+                mooncake_session_id=mooncake_session_id,
+                prefill_kv_indices=prefill_kv_indices,
+                dst_kv_ptrs=dst_kv_ptrs,
+                dst_kv_indices=dst_kv_indices,
+                executor=executor,
+                dst_layer_ids=dst_layer_ids,
+                dst_tp_rank=dst_tp_rank,
+                dst_attn_tp_size=dst_attn_tp_size,
+            )
         self._validate_envelope_kv_layout(
             dst_kv_ptrs, dst_kv_item_len, dst_attn_tp_size
         )
@@ -1399,6 +1415,63 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             dst_layer_ids=dst_layer_ids,
             dst_device_data_indices=dst_device_kv_indices,
             dst_device_data_ptrs=dst_device_kv_ptrs,
+        )
+
+    def _send_sharded_hybrid_kvcache(
+        self,
+        *,
+        mooncake_session_id,
+        prefill_kv_indices,
+        dst_kv_ptrs,
+        dst_kv_indices,
+        executor,
+        dst_layer_ids,
+        dst_tp_rank,
+        dst_attn_tp_size,
+    ):
+        """Fan out owned DSA pages; send normal-TP draft heads to their peer."""
+        if dst_attn_tp_size != self.state_tp_size or dst_tp_rank is None:
+            raise ValueError("Hybrid KV sharding requires equal physical P/D TP sizes")
+        args = self.kv_args
+        if len(args.kv_layer_ids) != len(args.kv_data_ptrs) or not dst_layer_ids:
+            raise ValueError(
+                "Hybrid KV sharding requires explicit target/draft entry ids"
+            )
+        draft_count = args.num_draft_entries
+        target_count = len(args.kv_data_ptrs) - draft_count
+        dst_target_count = len(dst_kv_ptrs) - draft_count
+        if target_count <= 0 or dst_target_count <= 0:
+            raise ValueError("Invalid target/draft KV registration")
+        if len(prefill_kv_indices) != len(dst_kv_indices):
+            raise ValueError("Sharded PD page lists must match positionally")
+        owned = prefill_kv_indices % self.kv_shard_size == self.kv_shard_rank
+        ret = self._send_kvcache_generic(
+            mooncake_session_id=mooncake_session_id,
+            src_data_ptrs=args.kv_data_ptrs[:target_count],
+            dst_data_ptrs=dst_kv_ptrs[:dst_target_count],
+            item_lens=args.kv_item_lens[:target_count],
+            prefill_data_indices=prefill_kv_indices[owned] // self.kv_shard_size,
+            dst_data_indices=dst_kv_indices[owned],
+            executor=executor,
+            src_layer_ids=args.kv_layer_ids[:target_count],
+            dst_layer_ids=dst_layer_ids[:dst_target_count],
+        )
+        if (
+            ret
+            or not draft_count
+            or dst_tp_rank % self.state_tp_size != args.engine_rank % self.state_tp_size
+        ):
+            return ret
+        return self._send_kvcache_generic(
+            mooncake_session_id=mooncake_session_id,
+            src_data_ptrs=args.kv_data_ptrs[target_count:],
+            dst_data_ptrs=dst_kv_ptrs[dst_target_count:],
+            item_lens=args.kv_item_lens[target_count:],
+            prefill_data_indices=prefill_kv_indices,
+            dst_data_indices=dst_kv_indices,
+            executor=executor,
+            src_layer_ids=args.kv_layer_ids[target_count:],
+            dst_layer_ids=dst_layer_ids[dst_target_count:],
         )
 
     def send_kvcache_dcp(
@@ -1941,6 +2014,21 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         rc = 0
         state_types = getattr(self.kv_args, "state_types", [])
         for i, st in enumerate(state_types):
+            sharded_hybrid = self.kv_shard_size > 1 and self.is_hybrid_mla_backend
+            if sharded_hybrid and st != StateType.DSA:
+                if (
+                    target_rank_registration_info is None
+                    or target_rank_registration_info.dst_attn_tp_size
+                    != self.state_tp_size
+                ):
+                    raise ValueError(
+                        "Hybrid KV sharding requires matching physical P/D TP"
+                    )
+                if (
+                    target_rank_registration_info.dst_tp_rank % self.state_tp_size
+                    != self.kv_args.engine_rank % self.state_tp_size
+                ):
+                    continue
             indices = (
                 prefill_state_indices[i] if i < len(prefill_state_indices) else None
             )
@@ -2121,6 +2209,16 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                         continue
                 src_indices = list(indices)
                 dst_indices_local = list(dst_indices)
+                if sharded_hybrid and st == StateType.DSA:
+                    if len(src_indices) != len(dst_indices_local):
+                        raise ValueError("Sharded DSA indexer page lists must match")
+                    paired = [
+                        (source // self.kv_shard_size, dest)
+                        for source, dest in zip(src_indices, dst_indices_local)
+                        if source % self.kv_shard_size == self.kv_shard_rank
+                    ]
+                    src_indices = [source for source, _ in paired]
+                    dst_indices_local = [dest for _, dest in paired]
                 if (
                     st == StateType.DSV4_REQUEST_STATE
                     and len(src_indices) == 0
@@ -2690,6 +2788,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                                 dst_device_kv_indices=chunked_dst_device_kv_indice,
                                 dst_kv_item_len=target_rank_registration_info.dst_kv_item_len,
                                 dst_attn_tp_size=target_rank_registration_info.dst_attn_tp_size,
+                                dst_tp_rank=target_rank_registration_info.dst_tp_rank,
                             )
                         elif (
                             self.enable_staging

@@ -46,11 +46,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Keep enough assembled prefix KV for eight long-context requests. The
-# new-token compute budget is independent: eight 1K extensions can fill an
-# 8K prefill chunk even when each request has a nearly full-context prefix.
-_KV_SHARD_SCRATCH_PREFIX_CONTEXTS = 8
-
 
 class PageShardSpec(msgspec.Struct, frozen=True):
     """Everything both sides of any transfer need to reproduce the layout."""
@@ -143,7 +138,29 @@ def _page_shard_row_bytes(kvc: KVCacheConfigurator) -> int:
     model_config = kvc.model_config
     kv_size = torch._utils._element_size(kvc.kv_cache_dtype)
     if kvc.use_mla_backend:
-        return (model_config.kv_lora_rank + model_config.qk_rope_head_dim) * kv_size
+        from sglang.srt.configs.model_config import (
+            get_dsa_index_head_dim,
+            get_dsa_index_kpool,
+            is_deepseek_dsa,
+        )
+        from sglang.srt.mem_cache.kv_cache_configurator import (
+            calculate_mla_kv_cache_dim,
+        )
+        from sglang.srt.mem_cache.memory_pool import DSATokenToKVPool
+
+        row_bytes = (
+            calculate_mla_kv_cache_dim(
+                model_config=model_config, kv_cache_dtype=kvc.kv_cache_dtype
+            )
+            * kv_size
+        )
+        if is_deepseek_dsa(model_config.hf_config):
+            dim = get_dsa_index_head_dim(model_config.hf_config)
+            kpool = get_dsa_index_kpool(model_config.hf_config)
+            # The same two scratch slots carry latent KV and pooled index keys.
+            index_bytes = dim + dim // DSATokenToKVPool.quant_block_size * 4
+            row_bytes += (index_bytes + kpool - 1) // kpool
+        return row_bytes
     return (
         model_config.get_num_kv_heads(get_parallel().attn_tp_size)
         * (model_config.head_dim + model_config.v_head_dim)
@@ -152,21 +169,25 @@ def _page_shard_row_bytes(kvc: KVCacheConfigurator) -> int:
 
 
 def make_page_shard_spec(kvc: KVCacheConfigurator) -> Optional[PageShardSpec]:
-    """Provision eight full-context prefixes plus the batch's new-token budget.
+    """Provision full-context prefixes plus the batch's new-token budget.
 
     Prefix capacity must not shrink with the number of new tokens: eight
     long cached prefixes can accompany just 1K new tokens each. Round each
     context to a shard-group gather span before multiplying, so per-request
     padding cannot overflow the region even for an unaligned context length.
 
-    This is a fixed eight-context prefix budget, independent of request limits
-    or chunk size. Both scratch slots are charged against HBM before sizing
-    persistent KV; large model contexts therefore reduce persistent capacity.
-    Admission still checks the actual batch's padded prefix and chunk spans.
+    The operator can reduce the default eight-context prefix budget without
+    shortening the model context. Both scratch slots are charged against HBM
+    before sizing persistent KV. Admission defers requests when the batch's
+    padded prefixes exceed this budget; at least one full context always fits.
     """
     shard_rank, shard_size = get_kv_shard_group_info(kvc)
     if shard_rank is None:
         return None
+
+    prefix_contexts = get_parallel().kv_cache_sharding_prefix_contexts
+    if prefix_contexts <= 0:
+        raise ValueError("--kv-cache-sharding-prefix-contexts must be positive")
 
     page_size = kvc.page_size
     granule = shard_size * page_size
@@ -174,7 +195,7 @@ def make_page_shard_spec(kvc: KVCacheConfigurator) -> Optional[PageShardSpec]:
         shard_rank=shard_rank,
         shard_size=shard_size,
         page_size=page_size,
-        max_prefix_tokens=_KV_SHARD_SCRATCH_PREFIX_CONTEXTS
+        max_prefix_tokens=prefix_contexts
         * ceil_align(kvc.model_config.context_len, granule),
         # chunked_prefill_size is the TOTAL new-token budget for the batch.
         chunk_tokens=ceil_align(get_schedule().chunked_prefill_size, page_size),

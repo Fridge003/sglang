@@ -189,6 +189,13 @@ class Parallel(msgspec.Struct):
         "the group's unique KV capacity. Prefill workers of PD "
         "disaggregation only.",
     ] = False
+    kv_cache_sharding_prefix_contexts: A[
+        int,
+        "Number of full-context prefixes reserved in each KV-sharding gather "
+        "scratch buffer. Must be positive. Smaller values free persistent KV "
+        "capacity while limiting the total cached prefix in a prefill batch; "
+        "they do not shorten the model context length. Default: 8.",
+    ] = 8
     # Deprecated spelling of `attn_dp_size`: `--dp-size N --enable-dp-attention`
     # resolves to `attn_dp_size = N`, `dp_size = 1`. TODO: remove after 2026-12-31.
     enable_dp_attention: A[bool, Arg(no_cli=True, resolvable=True)] = False

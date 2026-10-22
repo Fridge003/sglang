@@ -1,5 +1,6 @@
 """GLM CP2/BCG prefill -> TP2 DFlash2 decode, including eager fallbacks."""
 
+import time
 import unittest
 
 import requests
@@ -11,7 +12,7 @@ from sglang.test.server_fixtures.disaggregation_fixture import (
 )
 from sglang.test.test_utils import popen_with_error_check, try_cached_model
 
-register_cuda_ci(est_time=900, stage="nightly", runner_config="4-gpu-gb300")
+register_cuda_ci(est_time=1800, stage="nightly", runner_config="4-gpu-gb300")
 
 COMMON_ARGS = [
     "--dsa-prefill-backend",
@@ -48,6 +49,7 @@ class TestGlm53CpBcgDflashPD(PDDisaggregationServerBase):
     prefill_tp_size = 2
     decode_tp_size = 2
     decode_base_gpu_id = 2
+    shard_prefill_args = []
 
     @classmethod
     def setUpClass(cls):
@@ -70,6 +72,7 @@ class TestGlm53CpBcgDflashPD(PDDisaggregationServerBase):
             "4096",
             "8192",
         ]
+        cls.extra_prefill_args += cls.shard_prefill_args
         cls.extra_decode_args = common
         cls.tokenizer = AutoTokenizer.from_pretrained(cls.model, trust_remote_code=True)
         cls.launch_all()
@@ -103,14 +106,19 @@ class TestGlm53CpBcgDflashPD(PDDisaggregationServerBase):
         )
         cls.wait_server_ready(cls.lb_url + "/readiness", process=cls.process_lb)
 
-    def _prompt(self, length):
+    def _prompt(self, length, document=None):
         suffix = self.tokenizer.encode(
             "\nThe access code is 739391. Copy the access code: 739391\n"
             "The access code is 739391. Copy the access code:",
             add_special_tokens=False,
         )
         filler = self.tokenizer.encode(
-            "These are background notes. ", add_special_tokens=False
+            (
+                "These are background notes. "
+                if document is None
+                else f"Document {document}: independent background notes. "
+            ),
+            add_special_tokens=False,
         )
         count = length - len(suffix)
         self.assertGreater(count, 0)
@@ -178,6 +186,78 @@ class TestGlm53CpBcgDflashPD(PDDisaggregationServerBase):
             if line.startswith("sglang:cuda_graph_passes_total{")
             and 'mode="prefill_cuda_graph"' in line
         )
+
+
+class TestGlm53ShardedHiCachePD(TestGlm53CpBcgDflashPD):
+    # Bound the device pool so five independent 16K prefixes evict the first
+    # one. Host indices are mirrored across owners, so reserve four physical
+    # device-pool equivalents rather than filling the CPU tier at the same time.
+    shard_prefill_args = [
+        "--enable-kv-cache-sharding",
+        "--enable-hierarchical-cache",
+        "--hicache-mem-layout",
+        "page_first",
+        "--hicache-io-backend",
+        "kernel",
+        "--hicache-write-policy",
+        "write_through",
+        "--max-total-tokens",
+        "32768",
+        "--context-length",
+        "65536",
+        "--max-mamba-cache-size",
+        "64",
+        "--hicache-ratio",
+        "4",
+    ]
+    extra_prefill_env = {"SGLANG_UNIFIED_RADIX_TREE_CORE_BACKEND": "python"}
+
+    def _restored_kv_tokens(self):
+        response = requests.get(self.prefill_url + "/metrics", timeout=30)
+        response.raise_for_status()
+        # Each rank reports the logical count, not its physical owner subset.
+        return max(
+            (
+                float(line.rsplit(" ", 1)[1])
+                for line in response.text.splitlines()
+                if line.startswith("sglang:load_back_tokens_total{")
+                and 'pool="kv"' in line
+            ),
+            default=0,
+        )
+
+    def test_evicted_prefix_restores_before_pd_and_speculative_decode(self):
+        for url in (self.prefill_url, self.decode_url):
+            requests.post(
+                url + "/flush_cache", params={"timeout": 30}, timeout=60
+            ).raise_for_status()
+        outputs = []
+        for step, document in enumerate([0, 1, 2, 3, 4, 0]):
+            # Ensure decode consumes the transferred state on every request.
+            requests.post(
+                self.decode_url + "/flush_cache",
+                params={"timeout": 30},
+                timeout=60,
+            ).raise_for_status()
+            before = self._restored_kv_tokens()
+            response = requests.post(
+                self.lb_url + "/generate",
+                json={
+                    "input_ids": self._prompt(16421, document=document),
+                    "sampling_params": {"temperature": 0, "max_new_tokens": 16},
+                    "return_logprob": True,
+                },
+                timeout=600,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            output = response.json()
+            self.assertIn("739391", output["text"])
+            self.assertGreater(output["meta_info"]["spec_verify_ct"], 0)
+            outputs.append(output)
+            time.sleep(2)  # Allow asynchronous backup/load acknowledgements.
+            if step == 5:
+                self.assertGreater(self._restored_kv_tokens() - before, 0)
+                self.assertEqual(output["text"], outputs[0]["text"])
 
 
 if __name__ == "__main__":

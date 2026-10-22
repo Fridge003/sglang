@@ -112,7 +112,7 @@ def _dflash_draft_cell_size(kvc: KVCacheConfigurator) -> int:
     cell_size = kvc.spec_aux_config.dflash_draft_cell_size_per_token
     if cell_size is None or int(cell_size) <= 0:
         return 0
-    return int(cell_size) * get_parallel().attn_dcp_size
+    return int(cell_size) * get_parallel().attn_dcp_size * kvc.kv_shard_size
 
 
 def _get_dsa_cache_layer_ids(kvc: KVCacheConfigurator, num_layers: int) -> list[int]:
@@ -329,7 +329,8 @@ class DefaultPoolConfigurator(MemoryPoolConfigurator):
                     target_cell_size_per_token=self._cell_size,
                     target_num_layers=int(num_layers),
                     draft_num_layers=int(draft_num_layers)
-                    * get_parallel().attn_dcp_size,
+                    * get_parallel().attn_dcp_size
+                    * kvc.kv_shard_size,
                     draft_cell_size_per_token=_dflash_draft_cell_size(kvc) or None,
                 )
 

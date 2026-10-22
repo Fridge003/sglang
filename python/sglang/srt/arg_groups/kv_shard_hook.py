@@ -23,9 +23,23 @@ from sglang.srt.utils.common import get_device_memory_capacity
 logger = logging.getLogger(__name__)
 
 
+def _is_glm_hybrid_dsa(server_args):
+    config = model_config_of(server_args).hf_config
+    return (
+        "Glm5NextForConditionalGeneration" in config.architectures
+        and is_deepseek_dsa(config)
+    )
+
+
 def validate_kv_shard_attention_backend(server_args: Any, cfg: Any = None) -> None:
     cfg = cfg or resolving_view(server_args)
     prefill_backend, _ = attention_backends_of(resolved_view(server_args))
+    if prefill_backend == "dsa" and _is_glm_hybrid_dsa(server_args):
+        if cfg.dsa_prefill_backend != "trtllm":
+            raise ValueError(
+                "GLM hybrid KV sharding requires --dsa-prefill-backend trtllm"
+            )
+        return
     if prefill_backend == "fa3":
         return
     if prefill_backend != "trtllm_mla":
@@ -50,6 +64,22 @@ def handle_kv_cache_sharding(server_args: Any, gpu_mem: Optional[float] = None) 
     cfg = resolving_view(server_args)
     if not cfg.enable_kv_cache_sharding:
         return
+    if cfg.kv_cache_sharding_prefix_contexts <= 0:
+        raise ValueError("--kv-cache-sharding-prefix-contexts must be positive")
+    glm_hybrid_dsa = _is_glm_hybrid_dsa(server_args)
+    if glm_hybrid_dsa:
+        if cfg.disaggregation_transfer_backend != "mooncake" or cfg.pp_size != 1:
+            raise ValueError("GLM hybrid KV sharding requires Mooncake and PP=1")
+        if (
+            not cfg.enable_prefill_cp
+            or cfg.attn_cp_size <= 1
+            or cfg.cp_strategy != "interleave"
+            or not cfg.enable_cp_tp_group_sharing
+        ):
+            raise ValueError(
+                "GLM hybrid KV sharding requires prefill CP > 1 with "
+                "interleave CP/TP group sharing"
+            )
 
     if gpu_mem is None:
         # `handle_gpu_memory_settings` resolves capacity internally now, so the
@@ -63,7 +93,9 @@ def handle_kv_cache_sharding(server_args: Any, gpu_mem: Optional[float] = None) 
             "workers: a rank's pool holds only its stripe of every cached "
             "page, which is incompatible with local decode."
         )
-    if cfg.speculative_algorithm is not None:
+    if cfg.speculative_algorithm is not None and not (
+        glm_hybrid_dsa and cfg.speculative_algorithm == "DFLASH"
+    ):
         raise ValueError(
             "--enable-kv-cache-sharding does not support speculative decoding."
         )
@@ -120,11 +152,16 @@ def handle_kv_cache_sharding(server_args: Any, gpu_mem: Optional[float] = None) 
             "(--dcp-size) are mutually exclusive users of the widened "
             "allocator index space."
         )
-    if cfg.enable_hierarchical_cache:
+    if cfg.enable_hierarchical_cache and not glm_hybrid_dsa:
         raise ValueError(
             "--enable-kv-cache-sharding does not support "
             "--enable-hierarchical-cache yet: HiCache backup/load assumes "
             "each rank holds full pages."
+        )
+    if glm_hybrid_dsa and cfg.hicache_storage_backend is not None:
+        raise ValueError(
+            "GLM hybrid KV sharding currently supports HiCache CPU tier; "
+            "storage-tier objects need owner-aware keys"
         )
     if cfg.enable_lmcache:
         raise ValueError(
@@ -184,7 +221,7 @@ def handle_kv_cache_sharding(server_args: Any, gpu_mem: Optional[float] = None) 
         )
 
     if use_mla_backend(server_args):
-        if is_deepseek_dsa(model_config.hf_config):
+        if is_deepseek_dsa(model_config.hf_config) and not glm_hybrid_dsa:
             raise ValueError(
                 "--enable-kv-cache-sharding does not support DSA models yet "
                 "(indexer buffers are not striped)."
@@ -264,7 +301,9 @@ def handle_kv_cache_sharding(server_args: Any, gpu_mem: Optional[float] = None) 
             page_size,
         )
 
-    if cfg.cuda_graph_config.prefill.backend != Backend.DISABLED:
+    if cfg.cuda_graph_config.prefill.backend != Backend.DISABLED and not (
+        glm_hybrid_dsa and cfg.cuda_graph_config.prefill.backend == Backend.BREAKABLE
+    ):
         logger.warning(
             "Prefill CUDA graph (%s) is incompatible with "
             "--enable-kv-cache-sharding; disabling it.",

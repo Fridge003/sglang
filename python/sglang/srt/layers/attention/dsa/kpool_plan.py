@@ -286,6 +286,7 @@ def _kpool_plan_to_gpu(
     kpool: int,
     index_page_size: int,
     topk_transform_method: TopkTransformMethod,
+    local_token_page_table: Optional[torch.Tensor] = None,
 ) -> KPoolExtendPlan:
     from sglang.srt.layers.attention.dsa.dsa_topk_backend import TopkTransformMethod
 
@@ -416,9 +417,18 @@ def _kpool_plan_to_gpu(
     ragged_paged_page_table = None
     ragged_paged_page_table_row_index = None
     if need_paged:
-        req_to_token = get_req_to_token_pool().req_to_token
+        req_to_token = (
+            get_req_to_token_pool().req_to_token
+            if local_token_page_table is None
+            else local_token_page_table
+        )
+        table_rows = (
+            local_req_pool_indices.to(torch.int32)
+            if local_token_page_table is None
+            else torch.arange(n_rag, dtype=torch.int32, device=device)
+        )
         ragged_paged_page_table_row_index = torch.repeat_interleave(
-            local_req_pool_indices.to(torch.int32),
+            table_rows,
             ragged_q_len_t,
             output_size=sum(cpu.ragged_q_len),
         )
@@ -501,6 +511,7 @@ def init_kpool_extend_metadata(
     local_extend_seq_lens_cpu: Optional[List[int]] = None,
     local_seq_lens_cpu: Optional[List[int]] = None,
     local_req_pool_indices: Optional[torch.Tensor] = None,
+    local_token_page_table: Optional[torch.Tensor] = None,
 ) -> DSAMetadata:
     mode = forward_batch.forward_mode
     is_extend_like = mode.is_extend_without_speculative() or mode.is_draft_extend_v2()
@@ -536,6 +547,7 @@ def init_kpool_extend_metadata(
         kpool,
         index_page_size,
         topk_transform_method,
+        local_token_page_table=local_token_page_table,
     )
     return dataclasses.replace(metadata, kpool_extend_plan=plan)
 

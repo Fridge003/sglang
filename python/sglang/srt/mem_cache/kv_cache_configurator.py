@@ -4,6 +4,7 @@ import gc
 import logging
 import math
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
@@ -87,7 +88,7 @@ from sglang.srt.mem_cache.page_interleave import (
     make_page_shard_spec,
 )
 from sglang.srt.mem_cache.page_interleave_pool import (
-    PageInterleaveKVPoolMixin,
+    PageInterleaveDSATokenToKVPool,
     PageInterleaveMHATokenToKVPool,
     PageInterleaveMLATokenToKVPool,
 )
@@ -702,6 +703,15 @@ class KVCacheConfigurator:
                             draft_virtual_id_space
                         )
                 sizes = msgspec.structs.replace(sizes, **size_overrides)
+            elif isinstance(token_to_kv_pool_allocator, PageInterleavePoolAllocator):
+                # Target DSA is striped; draft heads retain ordinary TP and
+                # therefore need every logical token id, including padding.
+                draft_virtual_id_space = (
+                    token_to_kv_pool_allocator.draft_virtual_id_space
+                )
+                sizes = msgspec.structs.replace(
+                    sizes, max_total_num_tokens=draft_virtual_id_space
+                )
             elif isinstance(token_to_kv_pool_allocator, HiSparseTokenToKVPoolAllocator):
                 # HiSparse's target allocator hands out logical IDs from its
                 # host-expanded address space. Draft KV is direct-indexed by
@@ -758,7 +768,9 @@ class KVCacheConfigurator:
         )
 
         if self.kv_shard_rank is not None:
-            if not isinstance(token_to_kv_pool, PageInterleaveKVPoolMixin):
+            from sglang.srt.layers.attention.kv_shard_hooks import get_kv_shard_pool
+
+            if get_kv_shard_pool(token_to_kv_pool) is None:
                 raise ValueError(
                     "--enable-kv-cache-sharding does not support this model "
                     f"family (pool {type(token_to_kv_pool).__name__})."
@@ -2516,6 +2528,12 @@ class KVCacheConfigurator:
         self, *, mha_pool_class: type, mla_pool_class: type, dsa_pool_class: type
     ) -> type:
         if self.use_mla_backend and is_deepseek_dsa(self.model_config.hf_config):
+            if self.kv_shard_rank is not None:
+                return partial(
+                    PageInterleaveDSATokenToKVPool,
+                    shard_spec=self.kv_shard_spec,
+                    shard_group=self.kv_shard_group,
+                )
             return dsa_pool_class
         if _is_npu:
             if self.use_mla_backend:

@@ -1320,7 +1320,7 @@ class CommonKVManager(BaseKVManager):
         # TP rank mapping
         # Only MLA shards across attn-TP, so non-MLA never reads the sharding flag.
         if (
-            self.is_mla_backend
+            (self.is_mla_backend or self.is_hybrid_mla_backend)
             and info.enable_kv_cache_sharding
             and info.attn_cp_size == 1
         ):
@@ -2139,6 +2139,10 @@ class CommonKVSender(BaseKVSender):
         is_last_chunk = self.curr_idx == self.num_kv_indices
 
         if self.kv_mgr.kv_shard_size > 1:
+            if self.kv_mgr.is_hybrid_mla_backend:
+                # Hybrid sends contain striped target KV and ordinary-TP
+                # draft KV. Mooncake selects addresses separately per pool.
+                return kv_indices, index_slice, is_last_chunk, False
             kv_indices, index_slice = filter_kv_indices_for_shard_rank(
                 kv_indices=kv_indices,
                 index_slice=index_slice,

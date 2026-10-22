@@ -123,6 +123,12 @@ class PageInterleavePoolAllocator(PagedTokenToKVPoolAllocator):
 
     # ---- classed accounting ---------------------------------------------------
 
+    @property
+    def draft_virtual_id_space(self) -> int:
+        # The target reserves one padding page per owner. An ordinary draft
+        # pool adds only one, so include the remaining padding in its size.
+        return self.size + (self.shard_size - 1) * self.page_size
+
     def class_free_page_counts(self) -> List[int]:
         """Free pages per class (free + release) — the per-class watermarks
         exported at the scheduler invariant-checker seam."""
@@ -170,6 +176,24 @@ class PageInterleavePoolAllocator(PagedTokenToKVPoolAllocator):
             "PageInterleavePoolAllocator allocates through alloc_extend only "
             "(class draws follow the chain's rotation; a bare alloc has no "
             "rotation base)"
+        )
+
+    def alloc_restore_spans(self, spans):
+        """Allocate page-aligned host fragments with their original first owner."""
+        if not spans:
+            return torch.empty(0, dtype=torch.int64, device=self.device)
+        lengths, owners = zip(*spans)
+        assert all(length > 0 and length % self.page_size == 0 for length in lengths)
+        zeros = torch.zeros(len(spans), dtype=torch.int64)
+        lengths = torch.tensor(lengths, dtype=torch.int64)
+        return self.alloc_extend(
+            prefix_lens=zeros,
+            prefix_lens_cpu=zeros,
+            seq_lens=lengths,
+            seq_lens_cpu=lengths,
+            last_loc=zeros,
+            extend_num_tokens=int(lengths.sum()),
+            rotation_bases=list(owners),
         )
 
     @staticmethod

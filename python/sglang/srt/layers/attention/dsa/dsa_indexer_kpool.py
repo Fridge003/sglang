@@ -12,6 +12,7 @@ from transformers import PretrainedConfig
 from sglang.srt.layers.attention.dsa.dsa_indexer import (
     DUAL_STREAM_TOKEN_THRESHOLD,
     BaseIndexerMetadata,
+    _index_k_write_targets,
     rotate_activation,
 )
 from sglang.srt.layers.attention.dsa.dsa_topk_backend import TopkTransformMethod
@@ -318,19 +319,33 @@ class IndexerKPool(MultiPlatformOp):
         if hasattr(pool, "invalidate_index_buffer_for_layer"):
             pool.invalidate_index_buffer_for_layer(layer_id)
 
-        buf = pool.get_index_k_with_scale_buffer(layer_id=layer_id)
-        return kpool_softmax_rotate_write_cache(
-            pool=pool,
-            buf=buf,
-            slot_k=slot_k,
-            slot_score=slot_score,
-            ape=self.index_kpool_compress_ape,
-            loc=write_locs.contiguous(),
-            write_mask=write_mask.contiguous() if write_mask is not None else None,
-            round_scale=self.scale_fmt is not None,
-            return_compressed=return_compressed,
-            write_cache=write_cache,
+        targets = (
+            _index_k_write_targets(pool, layer_id, write_locs)
+            if write_cache
+            else ((pool.get_index_k_with_scale_buffer(layer_id), write_locs, None),)
         )
+        compressed = None
+        for buf, loc, rows in targets:
+            selected = slice(None) if rows is None else rows
+            result = kpool_softmax_rotate_write_cache(
+                pool=pool,
+                buf=buf,
+                slot_k=slot_k[selected],
+                slot_score=slot_score[selected],
+                ape=self.index_kpool_compress_ape,
+                loc=loc.contiguous(),
+                write_mask=(
+                    write_mask[selected].contiguous()
+                    if write_mask is not None
+                    else None
+                ),
+                round_scale=self.scale_fmt is not None,
+                return_compressed=return_compressed and rows is None,
+                write_cache=write_cache,
+            )
+            if rows is None:
+                compressed = result
+        return compressed
 
     @staticmethod
     def _write_returned_compressed_pooled_index_cache(
@@ -470,22 +485,25 @@ class IndexerKPool(MultiPlatformOp):
                             f"{min_tail_req=}, {max_tail_req=}"
                         )
             if not writes.is_empty:
-                buf = pool.get_index_k_with_scale_buffer(layer_id=layer_id)
-                kpool_assemble_softmax_rotate_write_cache(
-                    pool=pool,
-                    buf=buf,
-                    chunk_k=key,
-                    chunk_score=gate_score,
-                    tail_k=tail_k_buf,
-                    tail_score=tail_score_buf,
-                    req_pool_idx=writes.req,
-                    n_from_tail=writes.n_from_tail,
-                    chunk_src_start=writes.chunk_src,
-                    tail_logical_base=writes.tail_logical_base,
-                    ape=self.index_kpool_compress_ape,
-                    loc=writes.write_loc,
-                    round_scale=self.scale_fmt is not None,
-                )
+                for buf, loc, rows in _index_k_write_targets(
+                    pool, layer_id, writes.write_loc, immutable_plan=plan
+                ):
+                    selected = slice(None) if rows is None else rows
+                    kpool_assemble_softmax_rotate_write_cache(
+                        pool=pool,
+                        buf=buf,
+                        chunk_k=key,
+                        chunk_score=gate_score,
+                        tail_k=tail_k_buf,
+                        tail_score=tail_score_buf,
+                        req_pool_idx=writes.req[selected],
+                        n_from_tail=writes.n_from_tail[selected],
+                        chunk_src_start=writes.chunk_src[selected],
+                        tail_logical_base=writes.tail_logical_base[selected],
+                        ape=self.index_kpool_compress_ape,
+                        loc=loc,
+                        round_scale=self.scale_fmt is not None,
+                    )
 
             if not tails.is_empty:
                 scatter_kpool_tail_updates(

@@ -101,6 +101,14 @@ class DeepseekSparseAttnBackendKPoolMixin:
         if forward_mode.is_extend_without_speculative():
             assert topk_transform_method is not None
             assert kpool_inputs is not None
+            query_inputs = local_query_inputs(forward_batch, metadata)
+            if self._kv_shard_pool is not None:
+                # Compression writes logical ids; both indexer reads and fused
+                # top-k output addresses refer to this batch's gathered scratch.
+                query_inputs.update(
+                    local_real_page_table=metadata.real_page_table,
+                    local_token_page_table=metadata.page_table_1,
+                )
             return init_kpool_extend_metadata(
                 metadata,
                 forward_batch,
@@ -110,7 +118,7 @@ class DeepseekSparseAttnBackendKPoolMixin:
                 topk_transform_method=topk_transform_method,
                 full_real_page_table=kpool_inputs.full_real_page_table,
                 full_seqlens_expanded=kpool_inputs.full_seqlens_expanded,
-                **local_query_inputs(forward_batch, metadata),
+                **query_inputs,
             )
 
         metadata = init_pooled_paged_mqa_metadata(
