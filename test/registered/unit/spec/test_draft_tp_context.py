@@ -90,6 +90,47 @@ class TestDraftTpContext(CustomTestCase):
             self.assertEqual(get_parallel().attn_cp_size, 4)
             self.assertFalse(parallel_state._TP_STATE_PATCHED)
 
+    def test_target_sharding_is_disabled_for_draft_and_restored_on_error(self):
+        for prefill_cp in (False, True):
+            with (
+                self.subTest(prefill_cp=prefill_cp),
+                get_parallel().override(
+                    tp_group=self.whole_tp,
+                    attn_tp_group=self.attn_tp,
+                    enable_prefill_cp=prefill_cp,
+                    enable_cp_tp_group_sharing=prefill_cp,
+                    enable_kv_cache_sharding=True,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "draft failed"):
+                    with draft_tp_context(True):
+                        parallel = get_parallel()
+                        self.assertFalse(parallel.enable_prefill_cp)
+                        self.assertFalse(parallel.enable_cp_tp_group_sharing)
+                        self.assertFalse(parallel.enable_kv_cache_sharding)
+                        raise RuntimeError("draft failed")
+                parallel = get_parallel()
+                self.assertEqual(parallel.enable_prefill_cp, prefill_cp)
+                self.assertEqual(parallel.enable_cp_tp_group_sharing, prefill_cp)
+                self.assertTrue(parallel.enable_kv_cache_sharding)
+                self.assertIs(parallel.tp_group, self.whole_tp)
+                self.assertFalse(parallel_state._TP_STATE_PATCHED)
+
+    def test_non_attention_draft_keeps_target_sharding(self):
+        with get_parallel().override(
+            tp_group=self.whole_tp,
+            attn_tp_group=self.attn_tp,
+            enable_prefill_cp=True,
+            enable_cp_tp_group_sharing=True,
+            enable_kv_cache_sharding=True,
+        ):
+            with draft_tp_context(False):
+                parallel = get_parallel()
+                self.assertTrue(parallel.enable_prefill_cp)
+                self.assertTrue(parallel.enable_cp_tp_group_sharing)
+                self.assertTrue(parallel.enable_kv_cache_sharding)
+                self.assertIs(parallel.tp_group, self.whole_tp)
+
     def test_target_kv_budget_matches_draft_execution_geometry(self):
         model = SimpleNamespace(
             dtype=torch.bfloat16,
